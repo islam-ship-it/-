@@ -43,15 +43,12 @@ def ask_chatgpt(message):
     }
     print("🤖 بيتم إرسال الرسالة لـ ChatGPT...")
     response = requests.post(f"{OPENAI_API_BASE}/chat/completions", headers=headers, json=payload)
-
-    try:
-        result = response.json()
-        print("📥 رد ChatGPT الكامل:")
-        print(result)
+    result = response.json()
+    if "choices" in result:
         return result["choices"][0]["message"]["content"]
-    except Exception as e:
-        print("❌ حصل خطأ في تحليل الرد:", e)
-        return "⚠ حصلت مشكلة مؤقتة في الاتصال بـ ChatGPT. جرّب تبعت تاني."
+    else:
+        print("❌ Error from ChatGPT:", result)
+        return "حصلت مشكلة أثناء التواصل مع ChatGPT. جرب تاني بعد شوية."
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
