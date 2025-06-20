@@ -48,6 +48,11 @@ def ask_chatgpt(message, sender_id):
     session_memory[sender_id] = [
         {
             "role": "system",
+           print(f"DEBUG: Type of replies: {type(replies)}")
+print(f"DEBUG: Content of replies: {replies}")
+
+print(f"DEBUG: Type of static_prompt: {type(static_prompt)}")
+print(f"DEBUG: Content of static_prompt (first 200 chars): {static_prompt[:200]}")
             "content": static_prompt.format(
                 prices=build_price_prompt(),
                 confirm_text=replies["تأكيد_الطلب"]
