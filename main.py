@@ -68,20 +68,12 @@ def ask_chatgpt(message, session=None):
         return "⚠ في مشكلة تقنية حالياً. ابعتلي تاني بعد شوية."
 
 def send_message(phone, message):
-    url = f"{ZAPI_API_URL}/token/{ZAPI_TOKEN}/send-text"
+    url = f"{ZAPI_API_URL}/send-message?token={ZAPI_TOKEN}"
     payload = {
         "phone": phone,
         "message": message
     }
     response = requests.post(url, json=payload)
-
-    # ✅ طباعة رد ZAPI بالتفصيل
-    try:
-        print("📤 ZAPI response:", response.json())
-    except Exception as e:
-        print("⚠ خطأ في قراءة رد ZAPI:", e)
-        print("📤 النص الكامل للرد:", response.text)
-
     print("✅ تم إرسال الرد إلى العميل.")
     return response.json()
 
