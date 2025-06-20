@@ -6,6 +6,7 @@ from openai import OpenAI
 
 from static_replies import static_prompt, replies
 from services_data import services
+from session_storage import load_session, save_session  # ✅ استدعاء نظام التخزين
 
 load_dotenv()
 
@@ -17,12 +18,8 @@ ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
 CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 
 app = Flask(__name__)
-session_memory = {}
 
-client = OpenAI(
-    api_key=OPENAI_API_KEY,
-    base_url=OPENAI_API_BASE
-)
+client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_API_BASE)
 
 def build_price_prompt():
     lines = []
@@ -62,85 +59,50 @@ def generate_link_request_text(services_requested):
     return "\n".join(lines)
 
 def ask_chatgpt(message, sender_id):
-    session_memory[sender_id] = [
-        {
+    messages = load_session(sender_id) or []
+
+    if not messages:
+        system_prompt = {
             "role": "system",
             "content": static_prompt.format(
                 prices=build_price_prompt(),
                 confirm_text=replies["تأكيد_الطلب"]
             )
         }
-    ]
-    session_memory[sender_id].append({"role": "user", "content": message})
+        messages.append(system_prompt)
 
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=session_memory[sender_id],
-            max_tokens=400
-        )
-        data = response.model_dump()
-        if "choices" in data and data["choices"] and "message" in data["choices"][0]:
-            reply_text = data["choices"][0]["message"]["content"].strip()
-            session_memory[sender_id].append({"role": "assistant", "content": reply_text})
+    messages.append({"role": "user", "content": message})
 
-            if any(kw in reply_text for kw in ["علشان نكمل الطلب", "ابعتلنا روابط", "محتاجين منك"]):
-                requested_services = extract_services_from_message(message)
-                if requested_services:
-                    links_text = generate_link_request_text(requested_services)
-                    reply_text = f"{links_text}\n\n{replies['الدفع']}"
-                    session_memory[sender_id].append({"role": "assistant", "content": reply_text})
+    response = client.chat.completions.create(
+        model="gpt-4",
+        messages=messages
+    )
 
-            return reply_text
-        else:
-            return "⚠ حصلت مشكلة في توليد الرد. جرب تاني بعد شوية."
-    except Exception as e:
-        return "⚠ في مشكلة تقنية مع الذكاء الاصطناعي. جرب تاني بعد شوية."
+    reply = response.choices[0].message.content.strip()
+    messages.append({"role": "assistant", "content": reply})
+    save_session(sender_id, messages)
 
-def send_message(phone, message):
-    url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
-    headers = {
-        "Content-Type": "application/json",
-        "Client-Token": CLIENT_TOKEN
-    }
-    payload = {
-        "phone": phone,
-        "message": message
-    }
-    try:
-        response = requests.post(url, headers=headers, json=payload)
-        return response.json()
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-@app.route("/")
-def home():
-    return "✅ البوت شغال"
+    return reply
 
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
-        return "✅ Webhook جاهز", 200
+        return "OK", 200
 
     data = request.json
-    incoming_msg = None
-    sender = None
+    sender_id = data.get("sender")
+    message = data.get("message")
 
-    if data and "text" in data and "message" in data["text"]:
-        incoming_msg = data["text"]["message"]
-    elif data and "body" in data:
-        incoming_msg = data["body"]
+    if not sender_id or not message:
+        return jsonify({"error": "Missing sender or message"}), 400
 
-    if data and "phone" in data:
-        sender = data["phone"]
-    elif data and "From" in data:
-        sender = data["From"]
+    reply = ask_chatgpt(message, sender_id)
 
-    if incoming_msg and sender:
-        reply = ask_chatgpt(incoming_msg, sender)
-        send_message(sender, reply)
+    zapi_url = f"{ZAPI_BASE_URL}instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
+    requests.post(zapi_url, json={"to": sender_id, "message": reply})
 
-    return jsonify({"status": "received"}), 200
+    return jsonify({"status": "sent"}), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+    
