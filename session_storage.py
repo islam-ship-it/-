@@ -1,20 +1,19 @@
-import time
+# session_storage.py
 
-session_memory = {}
-MAX_SESSION_LENGTH = 20
+import os
+import json
 
-def update_session_memory(user_id, role, content):
-    if user_id not in session_memory:
-        session_memory[user_id] = []
+SESSIONS_DIR = "sessions"
+os.makedirs(SESSIONS_DIR, exist_ok=True)
 
-    session_memory[user_id].append({
-        "role": role,
-        "content": content,
-        "timestamp": time.time()
-    })
+def load_session(user_id):
+    filepath = os.path.join(SESSIONS_DIR, f"{user_id}.json")
+    if os.path.exists(filepath):
+        with open(filepath, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
 
-    if len(session_memory[user_id]) > MAX_SESSION_LENGTH:
-        session_memory[user_id] = session_memory[user_id][-MAX_SESSION_LENGTH:]
-
-def get_session_memory(user_id):
-    return session_memory.get(user_id, [])
+def save_session(user_id, messages):
+    filepath = os.path.join(SESSIONS_DIR, f"{user_id}.json")
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(messages, f, ensure_ascii=False, indent=2)
