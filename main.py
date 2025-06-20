@@ -17,7 +17,7 @@ CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 
 app = Flask(__name__)
 session_memory = {}
-last_order = {}  # ✅ ذاكرة لحفظ آخر طلب
+last_order = {}
 
 client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_API_BASE)
 
@@ -35,15 +35,29 @@ def build_price_prompt():
 
 def ask_chatgpt(message, sender_id):
     print(f"DEBUG: Type of replies: {type(replies)}")
-    print(f"DEBUG: Content of replies: {replies}")
-    print(f"DEBUG: Type of static_prompt: {type(static_prompt)}")
-    print(f"DEBUG: Content of static_prompt (first 200 chars): {static_prompt[:200]}")
 
     confirm_text = replies["تأكيد_الطلب"]
 
+    previous_order = last_order.get(sender_id, "")
+    link_hint = ""
+
+    if previous_order:
+        if "متابع" in previous_order:
+            link_hint = "نوع الخدمة: متابعين ➜ اطلب من العميل رابط الصفحة."
+        elif "لايك" in previous_order:
+            link_hint = "نوع الخدمة: لايكات ➜ اطلب من العميل رابط البوست."
+        elif "مشاهدة" in previous_order:
+            link_hint = "نوع الخدمة: مشاهدات ➜ اطلب من العميل رابط الفيديو."
+        elif "تعليق" in previous_order:
+            link_hint = "نوع الخدمة: تعليقات ➜ اطلب من العميل رابط البوست."
+        elif "اشتراك" in previous_order:
+            link_hint = "نوع الخدمة: اشتراكات ➜ اطلب من العميل رابط القناة."
+        elif "تيليجرام" in previous_order or "تليجرام" in previous_order:
+            link_hint = "نوع الخدمة: تفاعلات تيليجرام ➜ اطلب من العميل رابط الجروب أو القناة."
+
     system_prompt = static_prompt.format(
         prices=build_price_prompt(),
-        confirm_text=confirm_text
+        confirm_text=confirm_text + ("\n\n📌 تنبيه بناءً على التحليل:\n" + link_hint if link_hint else "")
     )
 
     session_memory[sender_id] = [
@@ -65,8 +79,7 @@ def ask_chatgpt(message, sender_id):
         if "choices" in data and data["choices"] and "message" in data["choices"][0]:
             reply_text = data["choices"][0]["message"]["content"].strip()
 
-            # ✅ حفظ آخر طلب لو فيه طلب فعلي
-            if any(word in message for word in ["متابع", "لايك", "مشاهدة", "تعليق"]) and any(char.isdigit() for char in message):
+            if any(word in message for word in ["متابع", "لايك", "مشاهدة", "تعليق", "اشتراك", "تيليجرام"]) and any(char.isdigit() for char in message):
                 last_order[sender_id] = message
 
             session_memory[sender_id].append({"role": "assistant", "content": reply_text})
@@ -124,36 +137,14 @@ def webhook():
     if incoming_msg and sender:
         print(f"📨 رسالة من {sender}: {incoming_msg}")
 
-        # ✅ لو الرسالة من نوع "تمام – كمل – ايه المطلوب"
-       confirmation_keywords = ["تمام", "كمل", "عايز أكمل", "ايه المطلوب", "ابدأ", "أيوه"]
-if any(word in incoming_msg.lower() for word in confirmation_keywords):
-    last = last_order.get(sender, "")
-    if last:
-        # تحليل نوع الخدمة
-        service_type = ""
-        if "متابع" in last:
-            service_type = "متابعين ➜ اطلب منه رابط الصفحة"
-        elif "لايك" in last:
-            service_type = "لايكات ➜ اطلب منه رابط البوست"
-        elif "مشاهدة" in last:
-            service_type = "مشاهدات ➜ اطلب منه رابط الفيديو"
-        elif "تعليق" in last:
-            service_type = "تعليقات ➜ اطلب منه رابط البوست"
-        elif "اشتراك" in last:
-            service_type = "اشتراكات ➜ اطلب منه رابط القناة"
-        elif "تيليجرام" in last or "تليجرام" in last:
-            service_type = "تفاعلات تيليجرام ➜ اطلب منه رابط الجروب أو القناة"
-        else:
-            service_type = "نوع الخدمة غير محدد بدقة، تعامل بحذر"
+        confirmation_keywords = ["تمام", "كمل", "عايز أكمل", "ايه المطلوب", "ابدأ", "أيوه"]
+        if any(word in incoming_msg.lower() for word in confirmation_keywords):
+            last = last_order.get(sender, "")
+            if last:
+                incoming_msg = f"العميل قال إنه عايز يكمل، وكان طالب قبل كده: {last}"
+            else:
+                incoming_msg = "العميل قال تمام بس مفيش طلب محفوظ، فتعامل طبيعي."
 
-        incoming_msg = f"""العميل قال إنه عايز يكمل، وكان طالب قبل كده:
-{last}
-
-⟶ نوع الخدمة حسب التحليل: {service_type}
-رد عليه بناءً على نوع الرابط المطلوب فقط، بشكل واضح ومختصر."""
-    else:
-        incoming_msg = "العميل قال تمام بس مفيش طلب محفوظ، فتعامل طبيعي."
-     
         reply = ask_chatgpt(incoming_msg, sender)
 
         if "تحويل لموظف" in reply:
@@ -167,3 +158,4 @@ if any(word in incoming_msg.lower() for word in confirmation_keywords):
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
