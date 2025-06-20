@@ -2,8 +2,6 @@ import os
 import requests
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
-from static_replies import static_prompt, replies
-from services_data import services
 
 load_dotenv()
 
@@ -12,20 +10,11 @@ OPENAI_API_BASE = "https://openai.chatgpt4mena.com/v1"
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
 ZAPI_API_URL = os.getenv("ZAPI_API_URL")
 
-app = Flask(__name__)
+app = Flask(_name_)
 session_memory = {}
 
 def build_price_prompt():
-    lines = []
-    for item in services:
-        line = f"- {item['count']} {item['type']} على {item['platform']}"
-        if item['audience']:
-            line += f" ({item['audience']})"
-        line += f" = {item['price']} جنيه"
-        if item['note']:
-            line += f" ✅ {item['note']}"
-        lines.append(line)
-    return "\n".join(lines)
+    return "خدماتنا تشمل تزويد المتابعين والإعلانات الممولة والاشتراكات الشهرية 💼"
 
 def ask_chatgpt(message, session=None):
     if session is None:
@@ -34,13 +23,11 @@ def ask_chatgpt(message, session=None):
     if not session:
         session.append({
             "role": "system",
-            "content": static_prompt.format(
-                prices=build_price_prompt(),
-                confirm_text=replies["تأكيد_الطلب"]
-            )
+            "content": "أنت مساعد ودود 🌟 ترد باللهجة المصرية لصفحة Followers Store بأفضل طريقة مفيدة ومقنعة."
         })
 
     session.append({"role": "user", "content": message})
+    print("OPENAI_API_KEY being used:", OPENAI_API_KEY)
 
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -48,7 +35,7 @@ def ask_chatgpt(message, session=None):
     }
 
     payload = {
-        "model": "gpt-4o",
+        "model": "gpt-4",  # Changed من gpt-4.1 إلى gpt-4
         "messages": session,
         "max_tokens": 400
     }
@@ -57,15 +44,16 @@ def ask_chatgpt(message, session=None):
         response = requests.post(f"{OPENAI_API_BASE}/chat/completions", headers=headers, json=payload)
         data = response.json()
         print("🔁 GPT raw response:", data)
-        if "choices" in data:
+        if "choices" in data and data["choices"]:
             reply = data["choices"][0]["message"]["content"].strip()
             session.append({"role": "assistant", "content": reply})
             return reply
         else:
-            return "⚠ حصلت مشكلة من السيرفر. جرب تاني بعد شوية."
+            error_message = data.get("error", {}).get("message", "رد غير متوقع من OpenAI.")
+            return f"⚠ حصلت مشكلة من السيرفر: {error_message}. جرب تاني بعد شوية."
     except Exception as e:
         print("❌ Exception:", e)
-        return "⚠ في مشكلة تقنية حالياً. ابعتلي تاني بعد شوية."
+        return "⚠ في مشكلة تقنية حالياً. ابعتلي تاني بعد شوية"
 
 def send_message(phone, message):
     url = f"{ZAPI_API_URL}/send-message?token={ZAPI_TOKEN}"
@@ -76,6 +64,7 @@ def send_message(phone, message):
     response = requests.post(url, json=payload)
     print("✅ تم إرسال الرد إلى العميل.")
     return response.json()
+
 @app.route("/")
 def home():
     return "✅ البوت شغال"
@@ -90,8 +79,18 @@ def webhook():
     print("📦 البيانات المستلمة:")
     print(data)
 
-    incoming_msg = data.get("text", {}).get("message")
-    sender = data.get("phone")
+    incoming_msg = None
+    sender = None
+
+    if data and "text" in data and "message" in data["text"]:
+        incoming_msg = data["text"]["message"]
+    elif data and "body" in data:
+        incoming_msg = data["body"]
+
+    if data and "phone" in data:
+        sender = data["phone"]
+    elif data and "From" in data:
+        sender = data["From"]
 
     if incoming_msg and sender:
         print(f"📩 رسالة من: {sender} - {incoming_msg}")
@@ -100,9 +99,9 @@ def webhook():
         reply = ask_chatgpt(incoming_msg, session_memory[sender])
         send_message(sender, reply)
     else:
-        print("⚠ البيانات غير مكتملة أو غير متوقعة")
+        print(f"⚠ البيانات غير مكتملة أو غير متوقعة. Received data: {data}")
 
     return jsonify({"status": "received"}), 200
 
-if __name__ == "__main__":
+if _name_ == "_main_":
     app.run(host="0.0.0.0", port=5000)
