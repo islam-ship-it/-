@@ -74,6 +74,14 @@ def send_message(phone, message):
         "message": message
     }
     response = requests.post(url, json=payload)
+
+    # ✅ طباعة رد ZAPI بالتفصيل
+    try:
+        print("📤 ZAPI response:", response.json())
+    except Exception as e:
+        print("⚠ خطأ في قراءة رد ZAPI:", e)
+        print("📤 النص الكامل للرد:", response.text)
+
     print("✅ تم إرسال الرد إلى العميل.")
     return response.json()
 
