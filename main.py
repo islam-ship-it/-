@@ -12,7 +12,7 @@ OPENAI_API_BASE = "https://openai.chatgpt4mena.com/v1"
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
 ZAPI_API_URL = os.getenv("ZAPI_API_URL")
 
-app = Flask(_name_)
+app = Flask(__name__)
 session_memory = {}
 
 def build_price_prompt():
