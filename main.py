@@ -4,13 +4,17 @@ from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from openai import OpenAI
 
+# استيراد ملفاتك الخاصة بالبيانات والتعليمات
 from static_replies import static_prompt, replies
 from services_data import services
 
+# حمل المتغيرات البيئية من ملف .env
 load_dotenv()
 
+# تعريف المتغيرات البيئية
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_API_BASE = "https://openai.chatgpt4mena.com/v1"
+
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
@@ -19,11 +23,13 @@ CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 app = Flask(__name__)
 session_memory = {}
 
+# تهيئة عميل OpenAI
 client = OpenAI(
     api_key=OPENAI_API_KEY,
     base_url=OPENAI_API_BASE
 )
 
+# دالة بناء الأسعار
 def build_price_prompt():
     lines = []
     for item in services:
@@ -36,63 +42,98 @@ def build_price_prompt():
         lines.append(line)
     return "\n".join(lines)
 
+# دالة التواصل مع GPT
 def ask_chatgpt(message, sender_id):
-    if sender_id not in session_memory:
-        session_memory[sender_id] = [
-            {
-                "role": "system",
-                "content": static_prompt.format(
-                    prices=build_price_prompt(),
-                    confirm_text=replies["تأكيد_الطلب"]
-                )
-            }
-        ]
+    # تحديث دائم للبرومبت لإجبار استخدام آخر أسعار
+    session_memory[sender_id] = [
+        {
+            "role": "system",
+            "content": static_prompt.format(
+                prices=build_price_prompt(),
+                confirm_text=replies["تأكيد_الطلب"]
+            )
+        }
+    ]
 
     session_memory[sender_id].append({"role": "user", "content": message})
+    print("✅ OPENAI_API_KEY:", OPENAI_API_KEY)
 
     try:
         response = client.chat.completions.create(
             model="gpt-4",
             messages=session_memory[sender_id],
-            max_tokens=500
+            max_tokens=400
         )
-        reply_text = response.choices[0].message.content.strip()
-        session_memory[sender_id].append({"role": "assistant", "content": reply_text})
-        return reply_text
-    except Exception as e:
-        print("❌ Error:", e)
-        return "⚠ في مشكلة تقنية، جرب تبعت تاني بعد شوية."
+        data = response.model_dump()
+        print("🤖 GPT raw response:", data)
 
+        if "choices" in data and data["choices"] and "message" in data["choices"][0]:
+            reply_text = data["choices"][0]["message"]["content"].strip()
+            session_memory[sender_id].append({"role": "assistant", "content": reply_text})
+            return reply_text
+        else:
+            return "⚠ حصلت مشكلة في توليد الرد. جرب تاني بعد شوية."
+    except Exception as e:
+        print("❌ Exception:", e)
+        return "⚠ في مشكلة تقنية مع الذكاء الاصطناعي. جرب تاني بعد شوية."
+
+# إرسال رسالة على ZAPI
 def send_message(phone, message):
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
     headers = {
         "Content-Type": "application/json",
         "Client-Token": CLIENT_TOKEN
     }
-    payload = {"phone": phone, "message": message}
+    payload = {
+        "phone": phone,
+        "message": message
+    }
     try:
         response = requests.post(url, headers=headers, json=payload)
-        return response.json()
+        data = response.json()
+        print("✅ تم إرسال الرد:", data)
+        return data
     except Exception as e:
         print("❌ ZAPI Error:", e)
         return {"status": "error", "message": str(e)}
 
+# الصفحة الرئيسية
 @app.route("/")
 def home():
     return "✅ البوت شغال"
 
+# Webhook
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
         return "✅ Webhook جاهز", 200
 
     data = request.json
-    msg = data.get("text", {}).get("message") or data.get("body", "")
-    sender = data.get("phone") or data.get("From")
+    print("📩 البيانات المستلمة:", data)
 
-    if msg and sender:
-        reply = ask_chatgpt(msg, sender)
-        send_message(sender, reply)
+    incoming_msg = None
+    sender = None
+
+    if data and "text" in data and "message" in data["text"]:
+        incoming_msg = data["text"]["message"]
+    elif data and "body" in data:
+        incoming_msg = data["body"]
+
+    if data and "phone" in data:
+        sender = data["phone"]
+    elif data and "From" in data:
+        sender = data["From"]
+
+    if incoming_msg and sender:
+        print(f"📨 رسالة من {sender}: {incoming_msg}")
+        reply = ask_chatgpt(incoming_msg, sender)
+
+        if "تحويل لموظف" in reply:
+            send_message(sender, "عزيزي العميل، لم أتمكن من فهم طلبك بشكل دقيق. سيتم تحويلك الآن لممثل خدمة عملاء.")
+        else:
+            send_message(sender, reply)
+    else:
+        print("⚠ بيانات غير مكتملة:", data)
 
     return jsonify({"status": "received"}), 200
 
