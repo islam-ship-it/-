@@ -3,6 +3,7 @@ import requests
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from openai import OpenAI
+
 from static_replies import static_prompt, replies
 from services_data import services
 
@@ -17,9 +18,11 @@ CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 
 app = Flask(__name__)
 session_memory = {}
-last_order = {}
 
-client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_API_BASE)
+client = OpenAI(
+    api_key=OPENAI_API_KEY,
+    base_url=OPENAI_API_BASE
+)
 
 def build_price_prompt():
     lines = []
@@ -33,37 +36,42 @@ def build_price_prompt():
         lines.append(line)
     return "\n".join(lines)
 
+def determine_link_type(service_type):
+    if "متابع" in service_type:
+        return "رابط الصفحة"
+    elif "لايك" in service_type:
+        return "رابط البوست"
+    elif "مشاهدة" in service_type or "فيديو" in service_type:
+        return "رابط الفيديو"
+    else:
+        return "الرابط المناسب"
+
+def extract_services_from_message(message):
+    extracted = []
+    for item in services:
+        if str(item["count"]) in message and item["type"] in message and item["platform"] in message:
+            extracted.append(item)
+    return extracted
+
+def generate_link_request_text(services_requested):
+    lines = []
+    for service in services_requested:
+        link_type = determine_link_type(service["type"])
+        line = f"📎 ابعت {link_type} الخاصة بـ {service['count']} {service['type']} {service['platform']}"
+        lines.append(line)
+    return "\n".join(lines)
+
 def ask_chatgpt(message, sender_id):
-    confirm_text = replies["تأكيد_الطلب"]
-
-    # تحليل نوع الطلب (لو فيه طلب سابق)
-    previous_order = last_order.get(sender_id, "")
-    link_hint = ""
-
-    if previous_order:
-        if "متابع" in previous_order:
-            link_hint = "نوع الخدمة: متابعين ➜ اطلب من العميل رابط الصفحة."
-        elif "لايك" in previous_order:
-            link_hint = "نوع الخدمة: لايكات ➜ اطلب من العميل رابط البوست."
-        elif "مشاهدة" in previous_order:
-            link_hint = "نوع الخدمة: مشاهدات ➜ اطلب من العميل رابط الفيديو."
-        elif "تعليق" in previous_order:
-            link_hint = "نوع الخدمة: تعليقات ➜ اطلب من العميل رابط البوست أو الفيديو."
-        elif "اشتراك" in previous_order:
-            link_hint = "نوع الخدمة: اشتراكات ➜ اطلب من العميل رابط القناة."
-        elif "تيليجرام" in previous_order or "تليجرام" in previous_order:
-            link_hint = "نوع الخدمة: تفاعلات تيليجرام ➜ اطلب من العميل رابط الجروب أو القناة."
-
-    # إضافة تعليمات الرابط في نهاية البرومبت
-    system_prompt = static_prompt.format(
-        prices=build_price_prompt(),
-        confirm_text=confirm_text + ("\n\n📌 تنبيه بناءً على التحليل:\n" + link_hint if link_hint else "")
-    )
-
     session_memory[sender_id] = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": message}
+        {
+            "role": "system",
+            "content": static_prompt.format(
+                prices=build_price_prompt(),
+                confirm_text=replies["تأكيد_الطلب"]
+            )
+        }
     ]
+    session_memory[sender_id].append({"role": "user", "content": message})
 
     try:
         response = client.chat.completions.create(
@@ -72,14 +80,17 @@ def ask_chatgpt(message, sender_id):
             max_tokens=400
         )
         data = response.model_dump()
-
         if "choices" in data and data["choices"] and "message" in data["choices"][0]:
             reply_text = data["choices"][0]["message"]["content"].strip()
-
-            if any(word in message for word in ["متابع", "لايك", "مشاهدة", "تعليق", "اشتراك", "تيليجرام"]) and any(char.isdigit() for char in message):
-                last_order[sender_id] = message
-
             session_memory[sender_id].append({"role": "assistant", "content": reply_text})
+
+            if any(kw in reply_text for kw in ["علشان نكمل الطلب", "ابعتلنا روابط", "محتاجين منك"]):
+                requested_services = extract_services_from_message(message)
+                if requested_services:
+                    links_text = generate_link_request_text(requested_services)
+                    reply_text = f"{links_text}\n\n{replies['الدفع']}"
+                    session_memory[sender_id].append({"role": "assistant", "content": reply_text})
+
             return reply_text
         else:
             return "⚠ حصلت مشكلة في توليد الرد. جرب تاني بعد شوية."
@@ -126,23 +137,10 @@ def webhook():
         sender = data["From"]
 
     if incoming_msg and sender:
-        confirmation_keywords = ["تمام", "كمل", "عايز أكمل", "ايه المطلوب", "ابدأ", "أيوه"]
-        if any(word in incoming_msg.lower() for word in confirmation_keywords):
-            last = last_order.get(sender, "")
-            if last:
-                incoming_msg = f"العميل قال إنه عايز يكمل، وكان طالب قبل كده: {last}"
-            else:
-                incoming_msg = "العميل قال تمام بس مفيش طلب محفوظ، فتعامل طبيعي."
-
         reply = ask_chatgpt(incoming_msg, sender)
-
-        if "تحويل لموظف" in reply:
-            send_message(sender, "عزيزي العميل، لم أتمكن من فهم طلبك بشكل دقيق. سيتم تحويلك الآن لممثل خدمة عملاء.")
-        else:
-            send_message(sender, reply)
+        send_message(sender, reply)
 
     return jsonify({"status": "received"}), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-    
