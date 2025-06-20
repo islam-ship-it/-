@@ -2,6 +2,8 @@ import os
 import requests
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
+from static_replies import static_prompt, replies
+from services_data import services
 
 load_dotenv()
 
@@ -14,7 +16,16 @@ app = Flask(__name__)
 session_memory = {}
 
 def build_price_prompt():
-    return "خدماتنا تشمل تزويد المتابعين والإعلانات الممولة والاشتراكات الشهرية 💼"
+    lines = []
+    for item in services:
+        line = f"- {item['count']} {item['type']} على {item['platform']}"
+        if item['audience']:
+            line += f" ({item['audience']})"
+        line += f" = {item['price']} جنيه"
+        if item['note']:
+            line += f" ✅ {item['note']}"
+        lines.append(line)
+    return "\n".join(lines)
 
 def ask_chatgpt(message, session=None):
     if session is None:
@@ -23,11 +34,13 @@ def ask_chatgpt(message, session=None):
     if not session:
         session.append({
             "role": "system",
-            "content": "أنت مساعد ودود 🌟 ترد باللهجة المصرية لصفحة Followers Store بأفضل طريقة مفيدة ومقنعة."
+            "content": static_prompt.format(
+                prices=build_price_prompt(),
+                confirm_text=replies["تأكيد_الطلب"]
+            )
         })
 
     session.append({"role": "user", "content": message})
-    print("OPENAI_API_KEY being used:", OPENAI_API_KEY)
 
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -35,7 +48,7 @@ def ask_chatgpt(message, session=None):
     }
 
     payload = {
-        "model": "gpt-4",  # Changed من gpt-4.1 إلى gpt-4
+        "model": "gpt-4",
         "messages": session,
         "max_tokens": 400
     }
@@ -44,7 +57,7 @@ def ask_chatgpt(message, session=None):
         response = requests.post(f"{OPENAI_API_BASE}/chat/completions", headers=headers, json=payload)
         data = response.json()
         print("🔁 GPT raw response:", data)
-        if "choices" in data and data["choices"]:
+        if "choices" in data:
             reply = data["choices"][0]["message"]["content"].strip()
             session.append({"role": "assistant", "content": reply})
             return reply
@@ -53,7 +66,7 @@ def ask_chatgpt(message, session=None):
             return f"⚠ حصلت مشكلة من السيرفر: {error_message}. جرب تاني بعد شوية."
     except Exception as e:
         print("❌ Exception:", e)
-        return "⚠ في مشكلة تقنية حالياً. ابعتلي تاني بعد شوية"
+        return "⚠ في مشكلة تقنية حالياً. ابعتلي تاني بعد شوية."
 
 def send_message(phone, message):
     url = f"{ZAPI_API_URL}/send-message?token={ZAPI_TOKEN}"
@@ -62,7 +75,8 @@ def send_message(phone, message):
         "message": message
     }
     response = requests.post(url, json=payload)
-    print("✅ تم إرسال الرد إلى العميل.")
+    print("✅ تم إرسال الرد إلى العميل")
+    print("ZAPI Response:", response.json())  # السطر المطلوب
     return response.json()
 
 @app.route("/")
@@ -99,7 +113,7 @@ def webhook():
         reply = ask_chatgpt(incoming_msg, session_memory[sender])
         send_message(sender, reply)
     else:
-        print(f"⚠ البيانات غير مكتملة أو غير متوقعة. Received data: {data}")
+        print("⚠ البيانات غير مكتملة أو غير متوقعة. Received data:", data)
 
     return jsonify({"status": "received"}), 200
 
