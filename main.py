@@ -1,4 +1,6 @@
 import os
+import sys
+sys.path.append(".")  # ✅ ده المهم
 import requests
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
@@ -6,8 +8,7 @@ from openai import OpenAI
 
 from static_replies import static_prompt, replies
 from services_data import services
-from session_storage import load_session, save_session  # ✅ استدعاء نظام التخزين
-
+from session_storage import load_session, save_session
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
