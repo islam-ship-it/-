@@ -69,9 +69,10 @@ def ask_chatgpt(message, session=None):
         return "⚠ في مشكلة تقنية حالياً. ابعتلي تاني بعد شوية."
 
 def send_message(phone, message):
-    url = f"{ZAPI_API_URL}/token/{ZAPI_TOKEN}/send-text"
+    url = f"{ZAPI_API_URL}/token/{ZAPI_TOKEN}/send-message"
     payload = {
         "phone": phone,
+        "type": "text",
         "message": message
     }
 
