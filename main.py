@@ -60,7 +60,7 @@ def ask_chatgpt(message, sender_id):
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4",
+            model="gpt-4o",
             messages=session_memory[sender_id],
             max_tokens=400
         )
