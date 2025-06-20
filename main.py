@@ -76,7 +76,6 @@ def send_message(phone, message):
     response = requests.post(url, json=payload)
     print("✅ تم إرسال الرد إلى العميل.")
     return response.json()
-
 @app.route("/")
 def home():
     return "✅ البوت شغال"
