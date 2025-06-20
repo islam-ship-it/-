@@ -42,13 +42,13 @@ def build_price_prompt():
         lines.append(line)
     return "\n".join(lines)
 
-# داخل ask_chatgpt
 def ask_chatgpt(message, sender_id):
     print(f"DEBUG: Type of replies: {type(replies)}")
     print(f"DEBUG: Content of replies: {replies}")
     print(f"DEBUG: Type of static_prompt: {type(static_prompt)}")
     print(f"DEBUG: Content of static_prompt (first 200 chars): {static_prompt[:200]}")
 
+    # استخرج النص الجاهز من replies
     confirm_text = replies["تأكيد_الطلب"]
 
     session_memory[sender_id] = [
@@ -82,6 +82,7 @@ def ask_chatgpt(message, sender_id):
     except Exception as e:
         print("❌ Exception:", e)
         return "⚠ في مشكلة تقنية مع الذكاء الاصطناعي. جرب تاني بعد شوية."
+
 
 # إرسال رسالة على ZAPI
 def send_message(phone, message):
