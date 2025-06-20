@@ -48,7 +48,7 @@ def ask_chatgpt(message, session=None):
     }
 
     payload = {
-        "model": "gpt-4.1",
+        "model": "gpt-4o",
         "messages": session,
         "max_tokens": 400
     }
