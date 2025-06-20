@@ -12,7 +12,7 @@ OPENAI_API_BASE = "https://openai.chatgpt4mena.com/v1"
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
 ZAPI_API_URL = os.getenv("ZAPI_API_URL")
 
-app = Flask(_name_)
+app = Flask(__name__)
 session_memory = {}
 
 def build_price_prompt():
@@ -105,5 +105,5 @@ def webhook():
 
     return jsonify({"status": "received"}), 200
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
