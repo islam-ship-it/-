@@ -34,10 +34,9 @@ def build_price_prompt():
     return "\n".join(lines)
 
 def ask_chatgpt(message, sender_id):
-    print(f"DEBUG: Type of replies: {type(replies)}")
-
     confirm_text = replies["تأكيد_الطلب"]
 
+    # تحليل نوع الطلب (لو فيه طلب سابق)
     previous_order = last_order.get(sender_id, "")
     link_hint = ""
 
@@ -49,12 +48,13 @@ def ask_chatgpt(message, sender_id):
         elif "مشاهدة" in previous_order:
             link_hint = "نوع الخدمة: مشاهدات ➜ اطلب من العميل رابط الفيديو."
         elif "تعليق" in previous_order:
-            link_hint = "نوع الخدمة: تعليقات ➜ اطلب من العميل رابط البوست."
+            link_hint = "نوع الخدمة: تعليقات ➜ اطلب من العميل رابط البوست أو الفيديو."
         elif "اشتراك" in previous_order:
             link_hint = "نوع الخدمة: اشتراكات ➜ اطلب من العميل رابط القناة."
         elif "تيليجرام" in previous_order or "تليجرام" in previous_order:
             link_hint = "نوع الخدمة: تفاعلات تيليجرام ➜ اطلب من العميل رابط الجروب أو القناة."
 
+    # إضافة تعليمات الرابط في نهاية البرومبت
     system_prompt = static_prompt.format(
         prices=build_price_prompt(),
         confirm_text=confirm_text + ("\n\n📌 تنبيه بناءً على التحليل:\n" + link_hint if link_hint else "")
@@ -65,8 +65,6 @@ def ask_chatgpt(message, sender_id):
         {"role": "user", "content": message}
     ]
 
-    print("✅ OPENAI_API_KEY:", OPENAI_API_KEY)
-
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -74,7 +72,6 @@ def ask_chatgpt(message, sender_id):
             max_tokens=400
         )
         data = response.model_dump()
-        print("🤖 GPT raw response:", data)
 
         if "choices" in data and data["choices"] and "message" in data["choices"][0]:
             reply_text = data["choices"][0]["message"]["content"].strip()
@@ -87,7 +84,6 @@ def ask_chatgpt(message, sender_id):
         else:
             return "⚠ حصلت مشكلة في توليد الرد. جرب تاني بعد شوية."
     except Exception as e:
-        print("❌ Exception:", e)
         return "⚠ في مشكلة تقنية مع الذكاء الاصطناعي. جرب تاني بعد شوية."
 
 def send_message(phone, message):
@@ -102,11 +98,8 @@ def send_message(phone, message):
     }
     try:
         response = requests.post(url, headers=headers, json=payload)
-        data = response.json()
-        print("✅ تم إرسال الرد:", data)
-        return data
+        return response.json()
     except Exception as e:
-        print("❌ ZAPI Error:", e)
         return {"status": "error", "message": str(e)}
 
 @app.route("/")
@@ -119,8 +112,6 @@ def webhook():
         return "✅ Webhook جاهز", 200
 
     data = request.json
-    print("📩 البيانات المستلمة:", data)
-
     incoming_msg = None
     sender = None
 
@@ -135,8 +126,6 @@ def webhook():
         sender = data["From"]
 
     if incoming_msg and sender:
-        print(f"📨 رسالة من {sender}: {incoming_msg}")
-
         confirmation_keywords = ["تمام", "كمل", "عايز أكمل", "ايه المطلوب", "ابدأ", "أيوه"]
         if any(word in incoming_msg.lower() for word in confirmation_keywords):
             last = last_order.get(sender, "")
@@ -151,11 +140,9 @@ def webhook():
             send_message(sender, "عزيزي العميل، لم أتمكن من فهم طلبك بشكل دقيق. سيتم تحويلك الآن لممثل خدمة عملاء.")
         else:
             send_message(sender, reply)
-    else:
-        print("⚠ بيانات غير مكتملة:", data)
 
     return jsonify({"status": "received"}), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-
+    
