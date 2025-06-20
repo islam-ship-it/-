@@ -12,7 +12,7 @@ OPENAI_API_BASE = "https://openai.chatgpt4mena.com/v1"
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
 ZAPI_API_URL = os.getenv("ZAPI_API_URL")
 
-app = Flask(__name__)
+app = Flask(_name_)
 session_memory = {}
 
 def build_price_prompt():
@@ -32,14 +32,13 @@ def ask_chatgpt(message, session=None):
         session = []
 
     if not session:
-        system_msg = {
+        session.append({
             "role": "system",
             "content": static_prompt.format(
                 prices=build_price_prompt(),
                 confirm_text=replies["تأكيد_الطلب"]
             )
-        }
-        session.append(system_msg)
+        })
 
     session.append({"role": "user", "content": message})
 
@@ -69,22 +68,14 @@ def ask_chatgpt(message, session=None):
         return "⚠ في مشكلة تقنية حالياً. ابعتلي تاني بعد شوية."
 
 def send_message(phone, message):
-    url = f"{ZAPI_API_URL}/token/{ZAPI_TOKEN}/send-message"
+    url = f"{ZAPI_API_URL}/token/{ZAPI_TOKEN}/send-text"
     payload = {
         "phone": phone,
-        "type": "text",
         "message": message
     }
-
-    print("📤 جاري إرسال الرد عبر ZAPI:", payload, flush=True)
-
-    try:
-        response = requests.post(url, json=payload)
-        print("📥 رد ZAPI:", response.status_code, response.text, flush=True)
-        return response.json()
-    except Exception as e:
-        print("❌ خطأ أثناء الإرسال عبر ZAPI:", e, flush=True)
-        return {"error": str(e)}
+    response = requests.post(url, json=payload)
+    print("✅ تم إرسال الرد إلى العميل.")
+    return response.json()
 
 @app.route("/")
 def home():
@@ -114,5 +105,5 @@ def webhook():
 
     return jsonify({"status": "received"}), 200
 
-if __name__ == "__main__":
+if _name_ == "_main_":
     app.run(host="0.0.0.0", port=5000)
