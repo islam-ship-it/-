@@ -49,7 +49,7 @@ def ask_chatgpt(message, session=None):
     }
 
     payload = {
-        "model": "gpt-4.1",  # ← جرب gpt-4.1 أو غيّره حسب السيرفر
+        "model": "gpt-4.1",
         "messages": session,
         "max_tokens": 400
     }
@@ -82,8 +82,11 @@ def send_message(phone, message):
 def home():
     return "✅ البوت شغال"
 
-@app.route("/webhook", methods=["POST"])
+@app.route("/webhook", methods=["GET", "POST"])
 def webhook():
+    if request.method == "GET":
+        return "✅ Webhook جاهز", 200
+
     print("✅ Webhook تم استدعاؤه")
     data = request.json
     print("📦 البيانات المستلمة:")
