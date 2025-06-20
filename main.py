@@ -3,18 +3,13 @@ import requests
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from openai import OpenAI
-
-# استيراد ملفاتك الخاصة بالبيانات والتعليمات
 from static_replies import static_prompt, replies
 from services_data import services
 
-# حمل المتغيرات البيئية من ملف .env
 load_dotenv()
 
-# تعريف المتغيرات البيئية
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_API_BASE = "https://openai.chatgpt4mena.com/v1"
-
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
@@ -22,14 +17,10 @@ CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 
 app = Flask(__name__)
 session_memory = {}
+last_order = {}  # ✅ ذاكرة لحفظ آخر طلب
 
-# تهيئة عميل OpenAI
-client = OpenAI(
-    api_key=OPENAI_API_KEY,
-    base_url=OPENAI_API_BASE
-)
+client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_API_BASE)
 
-# دالة بناء الأسعار
 def build_price_prompt():
     lines = []
     for item in services:
@@ -48,20 +39,18 @@ def ask_chatgpt(message, sender_id):
     print(f"DEBUG: Type of static_prompt: {type(static_prompt)}")
     print(f"DEBUG: Content of static_prompt (first 200 chars): {static_prompt[:200]}")
 
-    # استخرج النص الجاهز من replies
     confirm_text = replies["تأكيد_الطلب"]
 
+    system_prompt = static_prompt.format(
+        prices=build_price_prompt(),
+        confirm_text=confirm_text
+    )
+
     session_memory[sender_id] = [
-        {
-            "role": "system",
-            "content": static_prompt.format(
-                prices=build_price_prompt(),
-                confirm_text=confirm_text
-            )
-        }
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": message}
     ]
 
-    session_memory[sender_id].append({"role": "user", "content": message})
     print("✅ OPENAI_API_KEY:", OPENAI_API_KEY)
 
     try:
@@ -75,6 +64,11 @@ def ask_chatgpt(message, sender_id):
 
         if "choices" in data and data["choices"] and "message" in data["choices"][0]:
             reply_text = data["choices"][0]["message"]["content"].strip()
+
+            # ✅ حفظ آخر طلب لو فيه طلب فعلي
+            if any(word in message for word in ["متابع", "لايك", "مشاهدة", "تعليق"]) and any(char.isdigit() for char in message):
+                last_order[sender_id] = message
+
             session_memory[sender_id].append({"role": "assistant", "content": reply_text})
             return reply_text
         else:
@@ -83,8 +77,6 @@ def ask_chatgpt(message, sender_id):
         print("❌ Exception:", e)
         return "⚠ في مشكلة تقنية مع الذكاء الاصطناعي. جرب تاني بعد شوية."
 
-
-# إرسال رسالة على ZAPI
 def send_message(phone, message):
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
     headers = {
@@ -104,12 +96,10 @@ def send_message(phone, message):
         print("❌ ZAPI Error:", e)
         return {"status": "error", "message": str(e)}
 
-# الصفحة الرئيسية
 @app.route("/")
 def home():
     return "✅ البوت شغال"
 
-# Webhook
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
@@ -133,6 +123,16 @@ def webhook():
 
     if incoming_msg and sender:
         print(f"📨 رسالة من {sender}: {incoming_msg}")
+
+        # ✅ لو الرسالة من نوع "تمام – كمل – ايه المطلوب"
+        confirmation_keywords = ["تمام", "كمل", "عايز أكمل", "ايه المطلوب", "ابدأ", "أيوه"]
+        if any(word in incoming_msg.lower() for word in confirmation_keywords):
+            last = last_order.get(sender, "")
+            if last:
+                incoming_msg = f"العميل قال إنه عايز يكمل، وكان طالب قبل كده: {last}"
+            else:
+                incoming_msg = "العميل قال تمام بس مفيش طلب محفوظ، فتعامل طبيعي."
+
         reply = ask_chatgpt(incoming_msg, sender)
 
         if "تحويل لموظف" in reply:
