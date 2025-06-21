@@ -1,70 +1,49 @@
 import os
+import json
 import requests
 from flask import Flask, request, jsonify
 from openai import OpenAI
 from services_data import services
-from prompt import static_prompt
-from replies import replies
+from session_storage import session_memory
+from static_replies import static_prompt  # ✅ دي الصح
 
-# --- إعداد البيئة
+app = Flask(__name__)
+
+# متغيرات البيئة
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
 CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_API_BASE = os.getenv("OPENAI_API_BASE")
+OPENAI_API_MODEL = os.getenv("OPENAI_API_MODEL", "gpt-3.5-turbo")
 
-app = Flask(__name__)
-session_memory = {}
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-# --- تهيئة OpenAI
-client = OpenAI(
-    api_key=OPENAI_API_KEY,
-    base_url=OPENAI_API_BASE
-)
-
-# --- تجهيز البيانات في شكل نص prompt
-def build_price_prompt():
-    lines = []
-    for item in services:
-        line = f"- {item['platform']} | {item['type']} | {item['count']} = {item['price']} جنيه ({item['audience']})"
-        lines.append(line)
-    return "\n".join(lines)
-
-# --- الدالة اللي بتكلم ChatGPT
 def ask_chatgpt(message, sender_id):
-    if sender_id not in session_memory:
-        session_memory[sender_id] = [
-            {
-                "role": "system",
-                "content": static_prompt.format(
-                    prices=build_price_prompt(),
-                    confirm_text=replies["تأكيد الطلب"]
-                )
-            }
-        ]
-    session_memory[sender_id].append({"role": "user", "content": message})
+    messages = session_memory.get(sender_id, [])
+    if not messages:
+        # أول رسالة من العميل، حط البرومبت الأساسي
+        messages.append({"role": "system", "content": static_prompt(services)})
+    messages.append({"role": "user", "content": message})
 
-    response = client.chat.completions.create(
-        model="gpt-3.5-turbo",
-        messages=session_memory[sender_id]
+    chat = client.chat.completions.create(
+        model=OPENAI_API_MODEL,
+        messages=messages
     )
 
-    reply = response.choices[0].message.content
-    print(f"✅ رد من ChatGPT: {reply}")  # سطر مهم جدًا للمراقبة
-    session_memory[sender_id].append({"role": "assistant", "content": reply})
+    reply = chat.choices[0].message.content
+    session_memory[sender_id] = messages + [{"role": "assistant", "content": reply}]
     return reply
 
-# --- Webhook الأساسي
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json()
-
+    
+    # جلب الرسالة
     incoming_msg = None
     sender = None
-
-    if "text" in data and "message" in data["text"]:
-        incoming_msg = data["text"]["message"]
+    if data.get("text") and data.get("message"):
+        incoming_msg = data["message"]["text"]
     elif "body" in data:
         incoming_msg = data["body"]
 
@@ -74,18 +53,15 @@ def webhook():
         sender = data["From"]
 
     if incoming_msg and sender:
-        print(f"📥 رسالة جاية من {sender}: {incoming_msg}")
         reply = ask_chatgpt(incoming_msg, sender)
-
-        # إرسال الرد باستخدام ZAPI
+        # إرسال الرد
         requests.post(
             f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text",
             json={"to": sender, "message": reply}
         )
-
         return jsonify({"status": "sent"}), 200
-
     return jsonify({"status": "received"}), 200
 
 if __name__ == "__main__":
-    app.run(debug=False, host="0.0.0.0", port=10000)
+    app.run(host="0.0.0.0", port=10000)
+
