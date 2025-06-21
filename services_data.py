@@ -231,12 +231,14 @@ services = [
 تيليجرام #
 {"platform": "
 "تيليجرام
+,
 مصري فقط"
 "
 ,
 "price": 195},
 {"platform": "
 "تيليجرام
+,
 "
 مصري + عربي
 "
@@ -244,8 +246,6 @@ services = [
 "price": 135},
 {"platform": "
 "تيليجرام
-,
-,
 ,
 "+ عربي
 ,
@@ -256,44 +256,6 @@ services = [
 "+ عربي
 ,
 "price": 14},
-"فقط
-,
-و ا تساب #
-{"platform": "
-واتساب
-"
-"price": 195},
-,
-GPT ا شترا كات #
-{"platform": "GPT"
-"price": 115},
-{"platform": "GPT"
-"price": 235},
-{"platform": "GPT"
-"price": 440},
-{"platform": "GPT"
-"price": 650},
-,
-,
-,
-,
-إ عﻼ نات ممولة #
-"إعﻼن" :"platform"{
-"price": 130},
-"إعﻼن" :"platform"{
-"price": 360},
-"إعﻼن" :"platform"{
-"price": 800},
-"إعﻼن" :"platform"{
-"price": 1650},
-"إعﻼن" :"platform"{
-"price": 3150},
-,
-,
-,
-,
-,
-]
 "type": "
 "عضو جروب
 ,
@@ -315,65 +277,103 @@ GPT ا شترا كات #
 "count": 1000,
 "audience": "
 مصري
+"فقط
+,
+و ا تساب #
+{"platform": "
+واتساب
+"price": 195},
+"
+,
 "عضو قناة" :"type"
 ,
 "count": 1000,
 "audience": "
 مصري
-"اشتراك" :"type"
-"اشتراك" :"type"
-"اشتراك" :"type"
-"اشتراك" :"type"
+GPT ا شترا كات #
+{"platform": "GPT"
+"price": 115},
+{"platform": "GPT"
+"price": 235},
+{"platform": "GPT"
+"price": 440},
+{"platform": "GPT"
+"price": 650},
 ,
-,
-,
+"اشتراك" :"type"
 ,
 "count": 1,
-"count": 3,
-"count": 6,
-"count": 12,
 "audience": "
 "شهر
 ,
+,
+"اشتراك" :"type"
+,
+"count": 3,
 "audience": "
 "شهور
+,
+,
+"اشتراك" :"type"
+,
+"count": 6,
 "audience": "
 "شهور
+,
+,
+"اشتراك" :"type"
+,
+"count": 12,
 سنة" :"audience"
 "
 ,
-,
+إ عﻼ نات ممولة #
+"إعﻼن" :"platform"{
+"price": 130},
+"إعﻼن" :"platform"{
+"price": 360},
+"إعﻼن" :"platform"{
+"price": 800},
+"إعﻼن" :"platform"{
+"price": 1650},
+"إعﻼن" :"platform"{
+"price": 3150},
 ,
 "إعﻼن ممول" :"type"
-"إعﻼن ممول" :"type"
-"إعﻼن ممول" :"type"
-"إعﻼن ممول" :"type"
-"إعﻼن ممول" :"type"
-,
-,
-,
-,
 ,
 "count": 1,
+"audience": "
+يوم
+"
+,
+,
+"إعﻼن ممول" :"type"
+,
 "count": 3,
+"audience": "
+"أيام
+,
+,
+"إعﻼن ممول" :"type"
+,
 "count": 7,
+"audience": "
+"أيام
+,
+,
+"إعﻼن ممول" :"type"
+,
 "count": 15,
+"audience": "
+يوم
+"
+,
+,
+"إعﻼن ممول" :"type"
+,
 "count": 30,
 "audience": "
-"audience": "
-"audience": "
-"audience": "
-"audience": "
-"
-يوم
-,
-"أيام
-"أيام
-"
 يوم
 "
-يوم
 ,
-,
-,
-,
+]
