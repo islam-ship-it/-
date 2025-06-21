@@ -40,54 +40,26 @@ def home():
 # نقطة الاستقبال من ZAPI
 @app.route('/webhook', methods=['POST'])
 def webhook():
-    try:
-        data = request.get_json(force=True, silent=True) or request.form.to_dict() or {}
-        print("[Webhook] البيانات المستلمة:", data)
-
-        # استخراج الرقم والرسالة من الهيكل الجديد
-        phone_number = (
-            data.get("messageData", {}).get("senderData", {}).get("chatId") or
-            data.get("chatId") or
-            data.get("phone")
-        )
-
-        message = (
-            data.get("messageData", {}).get("textMessageData", {}).get("textMessage") or
-            data.get("message") or
-            data.get("text")
-        )
-
-        # معالجة الرقم (لو فيه @ مثلاً)
-        if phone_number and "@" in phone_number:
-            phone_number = phone_number.split("@")[0]
-
-        print(f"[📥] رقم: {phone_number} | رسالة: {message}")
-
-        if not phone_number or not message:
-            return jsonify({"error": "بيانات غير مكتملة"}), 400
-
-        # حفظ المحادثة
-        history = session_memory.get(phone_number, [])
-        history.append({"role": "user", "content": message})
-        session_memory[phone_number] = history[-10:]
-
+  try:
         chat_response = openai.ChatCompletion.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "أنت بوت بترد باللهجة المصرية على استفسارات العملاء بشكل محترم وسلس."},
+                {"role": "system", "content": "أنت بوت ذكي بترد باللهجة المصرية على استفسارات العملاء."},
                 *session_memory[phone_number]
             ]
         )
 
         reply = chat_response.choices[0].message.content
         session_memory[phone_number].append({"role": "assistant", "content": reply})
-        send_whatsapp_message(phone_number, reply)
+
+        success = send_whatsapp_message(phone_number, reply)
+        print(f"[✅] تم إرسال الرد للعميل؟ {success}")
         return jsonify({"status": "ok"}), 200
 
-   
-except Exception as e:
-    print("[❌ ERROR أثناء الرد]:", e)
-    return jsonify({"error": str(e)}), 500
+    except Exception as e:
+        print("[❌ ERROR أثناء الرد]:", e)
+        return jsonify({"error": str(e)}), 500
+
 
 # تشغيل السيرفر
 if __name__ == '__main__':
