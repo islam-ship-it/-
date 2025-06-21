@@ -161,12 +161,11 @@ def webhook():
     reply = response.choices[0].message.content
     session_memory[sender_id].append({"role": "assistant", "content": reply})
         # استدعاء دالة الذكاء الاصطناعي للحصول على الرد
-        reply = ask_chatgpt(incoming_msg, sender)
-
-    requests.post(
-        f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text",
-        json={"to": sender_id, "message": reply}
-    )
+reply = ask_chatgpt(incoming_msg, sender)
+requests.post(
+    f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text",
+    json={"to": sender_id, "message": reply}
+)
         # منطق التحويل لموظف بشري
         if "تحويل لموظف" in reply:
             send_message(sender, "عزيزي العميل، لم أتمكن من فهم طلبك بشكل كامل أو أن طلبك يحتاج لتدخل بشري. سيتم تحويل محادثتك الآن إلى أحد ممثلي خدمة العملاء وسيتواصل معك في أقرب وقت ممكن.")
