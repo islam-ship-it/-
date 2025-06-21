@@ -23,8 +23,9 @@ def send_whatsapp_message(to_number, message):
         "message": message
     }
     headers = {"Content-Type": "application/json"}
+    print(f"[DEBUG] Sending to WhatsApp ➜ {payload}")
     response = requests.post(url, json=payload, headers=headers)
-    print("[ZAPI Response]", response.json())  # تتبع استجابة ZAPI
+    print(f"[DEBUG] WhatsApp API Response: {response.status_code} - {response.text}")
     return response.json()
 
 # استدعاء ChatGPT
@@ -48,6 +49,9 @@ def call_chatgpt(session_id, user_message):
         }
     )
 
+    print(f"[DEBUG] OpenAI Response Status: {response.status_code}")
+    print(f"[DEBUG] OpenAI Raw Response: {response.text}")
+
     reply = response.json()["choices"][0]["message"]["content"]
     messages.append({"role": "assistant", "content": reply})
     return reply
@@ -62,15 +66,17 @@ def webhook():
             phone = msg["from"]
             text = msg["text"]["body"]
 
-            print(f"[{phone}] {text}")
+            print(f"[RECEIVED] From: {phone} | Text: {text}")
             reply = call_chatgpt(phone, text)
-            print(f"[Bot Reply] {reply}")
+            print(f"[REPLY] {reply}")
             send_whatsapp_message(phone, reply)
 
         except Exception as e:
             print("[ERROR]", str(e))
+            return jsonify({"status": "error", "message": str(e)}), 500
 
         return jsonify({"status": "ok"}), 200
+
     return "OK", 200
 
 if __name__ == "__main__":
