@@ -48,7 +48,7 @@ def webhook():
             print("[⚠] مفيش رسالة داخلية في البيانات")
             return jsonify({"error": "Invalid payload"}), 400
 
-        message_data = data['message']
+        message_data = data["message"]
         phone = message_data.get("from")
         message_text = message_data.get("body")
 
