@@ -41,7 +41,7 @@ def call_chatgpt(session_id, user_message):
             "Content-Type": "application/json"
         },
         json={
-            "model": "gpt-4o",  # أو استبدله بـ "gpt-4.1-mini"
+            "model": "gpt-4o",
             "messages": [{"role": "system", "content": static_prompt(services)}] + messages,
             "temperature": 0.5
         }
@@ -70,11 +70,9 @@ def webhook():
             print("[ERROR]", str(e))
 
         return jsonify({"status": "ok"}), 200
-  return "OK", 200
 
-@app.route("/", methods=["GET"])
-def home():
-    return "🚀 البوت شغال تمام على Render", 200
+    return "OK", 200
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
