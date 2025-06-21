@@ -5,8 +5,8 @@ list = "\n"
 _
 .join([
 f"
-- {s[\'platform\']} | {s[\'type\']} | {s[\'count\']} = {s[\'price\']}
-")}]'\s[\'audience{( جنيه
+- {s[\"platform\"]} | {s[\"type\"]} | {s[\"count\"]} = {s[\"price\"]}
+")}]"\s[\"audience{( جنيه
 for s in services
 )]
 return f"""
