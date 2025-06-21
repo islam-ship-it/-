@@ -41,16 +41,13 @@ def home():
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        # تجربة قراءة JSON أو form تلقائيًا
-        try:
-            data = request.get_json(force=True)
-            print("[Webhook] JSON المستلم:", data)
-        except:
+        # قراءة البيانات بأي صيغة
+        data = request.get_json(silent=True)
+        if not data:
             data = request.form.to_dict()
-            print("[Webhook] FORM المستلم:", data)
-
-        # طباعة الخام في كل الحالات
-        print("[RAW DATA]", request.data)
+        
+        print("[Webhook] البيانات المستلمة:", data)
+        print("[RAW]", request.data)
 
         phone_number = data.get("phone")
         message = data.get("message")
@@ -59,6 +56,7 @@ def webhook():
             print("[Webhook] 🚫 بيانات ناقصة!")
             return jsonify({"error": "Missing phone or message"}), 400
 
+        ...
         # حفظ المحادثة
         history = session_memory.get(phone_number, [])
         history.append({"role": "user", "content": message})
