@@ -1,82 +1,95 @@
 from flask import Flask, request, jsonify
 import requests
 import os
-from static_replies import static_prompt
-from services_data import services
+import openai
 
 app = Flask(__name__)
 
-# مفاتيح البيئة
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# OpenAI & ZAPI credentials
+openai.api_key = os.getenv("OPENAI_API_KEY")
+ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
-ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
+CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 
-# ذاكرة الجلسة
+# Session memory لكل عميل
 session_memory = {}
 
 # إرسال رسالة واتساب
-def send_whatsapp_message(to_number, message):
+def send_whatsapp_message(phone_number, message):
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
     payload = {
-        "to": to_number,
+        "phone": phone_number,
         "message": message
     }
-    headers = {"Content-Type": "application/json"}
-    response = requests.post(url, json=payload, headers=headers)
-    return response.json()
+    try:
+        response = requests.post(url, json=payload)
+        print(f"[ZAPI] إرسال الرسالة لـ {phone_number}: {response.status_code}")
+        print(f"[ZAPI] الرد من ZAPI: {response.text}")
+        return response.status_code == 200
+    except Exception as e:
+        print(f"[خطأ في ZAPI]: {e}")
+        return False
 
-# الاتصال بـ ChatGPT
-def call_chatgpt(session_id, user_message):
-    if session_id not in session_memory:
-        session_memory[session_id] = []
-
-    messages = session_memory[session_id]
-    messages.append({"role": "user", "content": user_message})
-
-    response = requests.post(
-        "https://openai.chatgpt4mena.com/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json"
-        },
-        json={
-            "model": "gpt-4o",
-            "messages": [{"role": "system", "content": static_prompt(services)}] + messages,
-            "temperature": 0.5
-        }
-    )
-
-    reply = response.json()["choices"][0]["message"]["content"]
-    messages.append({"role": "assistant", "content": reply})
-    return reply
-
-# الراوت الأساسي
-@app.route("/webhook", methods=["POST", "GET"])
+# استقبال الويب هوك
+@app.route("/webhook", methods=["POST"])
 def webhook():
-    if request.method == "POST":
+    try:
         data = request.get_json()
-        try:
-            msg = data.get("message", {})
-            phone = msg.get("from")
-            text_body = msg.get("text", {}).get("body")
+        print(f"[📩] البيانات المستلمة: {data}")
 
-            if not text_body:
-                return jsonify({"status": "no_text"}), 200
+        if not data or 'message' not in data:
+            print("[⚠] مفيش رسالة داخلية في البيانات")
+            return jsonify({"error": "Invalid payload"}), 400
 
-            print(f"[{phone}] {text_body}")
-            reply = call_chatgpt(phone, text_body)
-            print(f"[Bot Reply] {reply}")
-            send_whatsapp_message(phone, reply)
+        message_data = data['message']
+        phone = message_data.get("from")
+        message_text = message_data.get("body")
 
-        except Exception as e:
-            print("[ERROR]", str(e))
-            return jsonify({"status": "error", "error": str(e)}), 500
+        if not phone or not message_text:
+            print("[⚠] مفيش رقم أو نص الرسالة")
+            return jsonify({"error": "Missing phone or message"}), 400
 
+        print(f"[👤] العميل: {phone}")
+        print(f"[📝] الرسالة: {message_text}")
+
+        # ذاكرة المحادثة
+        history = session_memory.get(phone, [])
+        history.append({"role": "user", "content": message_text})
+
+        # استدعاء ChatGPT
+        response = openai.ChatCompletion.create(
+            model="gpt-4",
+            messages=[
+                {"role": "system", "content": "انت بوت واتساب بتساعد العملاء في الرد على استفساراتهم باللهجة المصرية."},
+                *history
+            ]
+        )
+
+        reply = response.choices[0].message["content"].strip()
+        print(f"[🤖] رد ChatGPT: {reply}")
+
+        if not reply:
+            print("[⚠] الرد فاضي!")
+            reply = "حصلت مشكلة في الرد، جرب تبعت تاني 🙏"
+
+        history.append({"role": "assistant", "content": reply})
+        session_memory[phone] = history[-10:]  # آخر 10 رسائل بس
+
+        # إرسال الرد عبر واتساب
+        success = send_whatsapp_message(phone, reply)
+        if not success:
+            print("[🚫] فشل إرسال الرد للعميل.")
         return jsonify({"status": "ok"}), 200
 
-    return "OK", 200
+    except Exception as e:
+        print(f"[❌] خطأ أثناء المعالجة: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/", methods=["GET"])
+def home():
+    return "🤖 بوت واتساب شغال تمام ✅", 200
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(debug=False, port=10000)
+
