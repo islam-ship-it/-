@@ -186,10 +186,16 @@ def webhook():
         # استخراج البيانات المطلوبة
         phone_number = data.get("phone") or data.get("from")
         message = data.get("message") or data.get("text") or data.get("body")
+        event_type = data.get("type") # إضافة هذا السطر للحصول على نوع الحدث
 
-        # التحقق من وجود البيانات المطلوبة
+        # إذا كان نوع الحدث ليس رسالة، تجاهله (أو عالجه بشكل مختلف)
+        if event_type and event_type != "message": # افترض أن 'message' هو النوع لرسائل المستخدم
+            logger.info(f"[Webhook] تلقى حدث غير رسالة: {event_type}. تجاهل.")
+            return jsonify({"status": "ignored", "message": f"تجاهل حدث من نوع {event_type}"}), 200
+
+        # التحقق من وجود البيانات المطلوبة (بعد تصفية الأحداث غير الرسائل)
         if not phone_number or not message:
-            logger.warning("[Webhook] 🚫 بيانات ناقصة!")
+            logger.warning("[Webhook] 🚫 بيانات ناقصة! (بعد تصفية الأحداث)")
             logger.info(f"Phone: {phone_number}, Message: {message}")
             return jsonify({"error": "رقم الهاتف أو الرسالة مفقودة"}), 400
 
