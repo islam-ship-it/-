@@ -161,24 +161,25 @@ def webhook():
     reply = response.choices[0].message.content
     session_memory[sender_id].append({"role": "assistant", "content": reply})
         # استدعاء دالة الذكاء الاصطناعي للحصول على الرد
-reply = ask_chatgpt(incoming_msg, sender)
-requests.post(
-    f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text",
-    json={"to": sender_id, "message": reply}
-)
-        # منطق التحويل لموظف بشري
-        if "تحويل لموظف" in reply:
-            send_message(sender, "عزيزي العميل، لم أتمكن من فهم طلبك بشكل كامل أو أن طلبك يحتاج لتدخل بشري. سيتم تحويل محادثتك الآن إلى أحد ممثلي خدمة العملاء وسيتواصل معك في أقرب وقت ممكن.")
-            # هنا ممكن تضيف كود لإرسال إشعار للموظف البشري (مثلاً عبر HTTP request لنظام CRM أو Slack)
-            print(f"⚠ تم تحويل المحادثة لـ {sender} إلى موظف بشري.")
-        else:
-            # إرسال الرد العادي للعميل
-            send_message(sender, reply)
-    else:
-        print("⚠ البيانات غير مكتملة أو غير متوقعة. Received data:", data)
+if incoming_msg and sender:
+    print(f"رسالة من {sender}: {incoming_msg}")
+    reply = ask_chatgpt(incoming_msg, sender)
 
-    return jsonify({"status": "sent"}), 200Add commentMore actions
-    return jsonify({"status": "received"}), 200
+    requests.post(
+        f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text",
+        json={"to": sender_id, "message": reply}
+    )
+
+    # منطق التحويل لوظيفة ذكية
+    if "تحويل لوظيفة" in reply:
+        send_message(sender, reply)
+        print(f"تم إرسال تحويل إلى {sender} (رد: {reply})")
+    else:
+        send_message(sender, reply)
+else:
+    print(f"Received data غير مفهومة:", data)
+
+return jsonify({"status": "sent"}), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
