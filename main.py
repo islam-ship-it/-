@@ -6,6 +6,7 @@ from openai import OpenAI
 from services_data import services
 from session_storage import session_memory
 from static_replies import static_prompt  # ✅ دي الصح
+from session_storage import get_session, save_session
 
 app = Flask(__name__)
 
