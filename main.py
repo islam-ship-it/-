@@ -34,7 +34,8 @@ client = OpenAI(
 def build_price_prompt():
     lines = []
     for item in services:
-@@ -36,40 +42,119 @@ def build_price_prompt():
+        # مؤقتًا نطبع كل خدمة كسطر أو نبنيها
+        line = f"- {item['platform']} | {item['type']} | {item['count']} = {item['price']} جنيه ({item['audience']})"
         lines.append(line)
     return "\n".join(lines)
 
