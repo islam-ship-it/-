@@ -1,43 +1,27 @@
 services = [
-    {"platform": "فيسبوك", "type": "متابع", "count": 1000, "audience": "مصري فقط", "price": 24},
-    {"platform": "فيسبوك", "type": "متابع", "count": 1000, "audience": "مصري + عربي", "price": 25},
-    {"platform": "فيسبوك", "type": "متابع", "count": 5000, "audience": "مصري + عربي", "price": 125},
-    {"platform": "فيسبوك", "type": "لايك", "count": 1000, "audience": "مصري + عربي", "price": 45},
-    {"platform": "فيسبوك", "type": "لايك", "count": 100, "audience": "مصري + عربي", "price": 65},
-    {"platform": "فيسبوك", "type": "تعليق", "count": 100, "audience": "مصري + عربي", "price": 95},
-
-    {"platform": "إنستجرام", "type": "متابع", "count": 1000, "audience": "مصري فقط", "price": 24},
-    {"platform": "إنستجرام", "type": "متابع", "count": 1000, "audience": "مصري + عربي", "price": 25},
-    {"platform": "إنستجرام", "type": "لايك", "count": 1000, "audience": "مصري + عربي", "price": 45},
-    {"platform": "إنستجرام", "type": "لايك", "count": 100, "audience": "مصري + عربي", "price": 65},
-
-    {"platform": "تيك توك", "type": "متابع", "count": 1000, "audience": "مصري فقط", "price": 24},
-    {"platform": "تيك توك", "type": "متابع", "count": 1000, "audience": "مصري + عربي", "price": 25},
-    {"platform": "تيك توك", "type": "مشاهدة", "count": 100000, "audience": "مصري + عربي", "price": 125},
-
-    {"platform": "يوتيوب", "type": "مشترك", "count": 1000, "audience": "مصري فقط", "price": 175},
-    {"platform": "يوتيوب", "type": "ساعة مشاهدة", "count": 1000, "audience": "مصري فقط", "price": 220},
-    {"platform": "يوتيوب", "type": "لايك", "count": 100, "audience": "مصري فقط", "price": 165},
-
-    {"platform": "سناب شات", "type": "متابع", "count": 1000, "audience": "مصري + عربي", "price": 220},
-    {"platform": "سناب شات", "type": "مشاهدة", "count": 100000, "audience": "مصري + عربي", "price": 370},
-    {"platform": "سناب شات", "type": "تعليق", "count": 100, "audience": "مصري + عربي", "price": 185},
-
-    {"platform": "تيليجرام", "type": "عضو جروب", "count": 1000, "audience": "مصري فقط", "price": 195},
-    {"platform": "تيليجرام", "type": "مشترك قناة", "count": 1000, "audience": "مصري + عربي", "price": 135},
-    {"platform": "تيليجرام", "type": "تفاعل", "count": 1000, "audience": "مصري + عربي", "price": 120},
-    {"platform": "تيليجرام", "type": "مشاهدة", "count": 1000, "audience": "مصري + عربي", "price": 14},
-
-    {"platform": "واتساب", "type": "عضو قناة", "count": 1000, "audience": "مصري فقط", "price": 195},
-
-    {"platform": "GPT", "type": "اشتراك", "count": 1, "audience": "شهر", "price": 115},
-    {"platform": "GPT", "type": "اشتراك", "count": 3, "audience": "شهور", "price": 235},
-    {"platform": "GPT", "type": "اشتراك", "count": 6, "audience": "شهور", "price": 440},
-    {"platform": "GPT", "type": "اشتراك", "count": 12, "audience": "سنة", "price": 650},
-
-    {"platform": "إعلان", "type": "إعلان ممول", "count": 1, "audience": "يوم", "price": 130},
-    {"platform": "إعلان", "type": "إعلان ممول", "count": 3, "audience": "أيام", "price": 360},
-    {"platform": "إعلان", "type": "إعلان ممول", "count": 7, "audience": "أيام", "price": 800},
-    {"platform": "إعلان", "type": "إعلان ممول", "count": 15, "audience": "يوم", "price": 1650},
-    {"platform": "إعلان", "type": "إعلان ممول", "count": 30, "audience": "يوم", "price": 3150}
+    {"platform": "فيسبوك", "type": "متابع", "count": 1000, "audience": "مصري + عربي", "price": 25, "note": "مدة التنفيذ 12-24 ساعة"},
+    {"platform": "فيسبوك", "type": "متابع", "count": 5000, "audience": "مصري + عربي", "price": 125, "note": "ضمان مدى الحياة"},
+    {"platform": "فيسبوك", "type": "متابع", "count": 1000, "audience": "مصري فقط", "price": 44, "note": "مدة التنفيذ 12-24 ساعة"},
+    {"platform": "فيسبوك", "type": "متابع", "count": 5000, "audience": "مصري فقط", "price": 220, "note": "ضمان مدى الحياة"},
+    {"platform": "فيسبوك", "type": "لايك", "count": 100, "audience": "عرب", "price": 65, "note": ""},
+    {"platform": "فيسبوك", "type": "لايك", "count": 1000, "audience": "عرب", "price": 45, "note": ""},
+    {"platform": "إنستجرام", "type": "متابع", "count": 1000, "audience": "عرب", "price": 25, "note": ""},
+    {"platform": "إنستجرام", "type": "متابع", "count": 5000, "audience": "عرب", "price": 125, "note": ""},
+    {"platform": "تيك توك", "type": "متابع", "count": 1000, "audience": "عرب", "price": 25, "note": ""},
+    {"platform": "تيك توك", "type": "متابع", "count": 5000, "audience": "عرب", "price": 125, "note": ""},
+    {"platform": "سناب شات", "type": "متابع", "count": 1000, "audience": "عرب", "price": 220, "note": ""},
+    {"platform": "سناب شات", "type": "مشاهدة", "count": 100000, "audience": "عرب", "price": 370, "note": ""},
+    {"platform": "سناب شات", "type": "تعليق", "count": 100, "audience": "عرب", "price": 185, "note": ""},
+    {"platform": "تيليجرام", "type": "عضو جروب", "count": 1000, "audience": "مصري فقط", "price": 195, "note": ""},
+    {"platform": "تيليجرام", "type": "مشترك قناة", "count": 1000, "audience": "عرب", "price": 135, "note": ""},
+    {"platform": "تيليجرام", "type": "تفاعل", "count": 1000, "audience": "عرب", "price": 120, "note": ""},
+    {"platform": "تيليجرام", "type": "مشاهدة", "count": 1000, "audience": "عرب", "price": 14, "note": ""},
+    {"platform": "واتساب", "type": "عضو قناة", "count": 1000, "audience": "عرب", "price": 195, "note": ""},
+    {"platform": "يوتيوب", "type": "مشترك", "count": 1000, "audience": "مصري فقط", "price": 175, "note": ""},
+    {"platform": "يوتيوب", "type": "ساعة مشاهدة", "count": 1000, "audience": "عرب", "price": 220, "note": ""},
+    {"platform": "يوتيوب", "type": "لايك", "count": 100, "audience": "عرب", "price": 165, "note": ""},
+    {"platform": "ChatGPT", "type": "اشتراك", "count": "شهر", "audience": "", "price": 115, "note": ""},
+    {"platform": "ChatGPT", "type": "اشتراك", "count": "3 شهور", "audience": "", "price": 235, "note": ""},
+    {"platform": "ChatGPT", "type": "اشتراك", "count": "6 شهور", "audience": "", "price": 440, "note": ""},
+    {"platform": "ChatGPT", "type": "اشتراك", "count": "سنة", "audience": "", "price": 650, "note": ""}
 ]
