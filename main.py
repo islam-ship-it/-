@@ -41,7 +41,7 @@ def call_chatgpt(session_id, user_message):
             "Content-Type": "application/json"
         },
         json={
-            "model": "gpt-4o",  # أو استبدله بـ "gpt-4.1-mini"
+            "model": "gpt-4o",
             "messages": [{"role": "system", "content": static_prompt(services)}] + messages,
             "temperature": 0.5
         }
