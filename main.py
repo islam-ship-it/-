@@ -70,7 +70,11 @@ def webhook():
             print("[ERROR]", str(e))
 
         return jsonify({"status": "ok"}), 200
-    return "OK", 200
+  return "OK", 200
+
+@app.route("/", methods=["GET"])
+def home():
+    return "🚀 البوت شغال تمام على Render", 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
