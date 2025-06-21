@@ -12,6 +12,12 @@ ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
 CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 
+# Static system prompt
+STATIC_PROMPT = """
+انت بوت واتساب شغال بتساعد العملاء باللهجة المصرية، وظيفتك ترد على استفساراتهم عن الأسعار والخدمات الخاصة بتزويد متابعين، لايكات، تعليقات، مشاهدات، اشتراكات ChatGPT، إعلانات ممولة، صفحات، وهكذا. 
+ردودك تكون ودودة، واقعية، ومنظمة بإيموجي، وما تكررش الكلام. لو العميل وافق على السعر، اطلب منه رابط الصفحة أو الفيديو حسب نوع الخدمة.
+"""
+
 # Session memory لكل عميل
 session_memory = {}
 
@@ -59,9 +65,9 @@ def webhook():
 
         # استدعاء ChatGPT
         response = openai.ChatCompletion.create(
-            model="gpt-4",
+            model="gpt-4o",
             messages=[
-                {"role": "system", "content": "انت بوت واتساب بتساعد العملاء في الرد على استفساراتهم باللهجة المصرية."},
+                {"role": "system", "content": STATIC_PROMPT},
                 *history
             ]
         )
@@ -74,7 +80,7 @@ def webhook():
             reply = "حصلت مشكلة في الرد، جرب تبعت تاني 🙏"
 
         history.append({"role": "assistant", "content": reply})
-        session_memory[phone] = history[-10:]  # آخر 10 رسائل بس
+        session_memory[phone] = history[-10:]  # آخر 10 رسائل فقط
 
         # إرسال الرد عبر واتساب
         success = send_whatsapp_message(phone, reply)
@@ -92,4 +98,3 @@ def home():
 
 if __name__ == "__main__":
     app.run(debug=False, port=10000)
-
