@@ -86,12 +86,18 @@ def ask_chatgpt(message, sender_id):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
-        print("🔥 Trying to read JSON...")
-        data = request.get_json(force=True)
+        print("🔥 Raw body:", request.data)
+
+        try:
+            data = request.get_json(force=True)
+        except Exception as e:
+            print("❌ JSON decode error:", str(e))
+            return jsonify({"error": "invalid json"}), 400
+
         print("✅ Received data:", data)
 
         if not data or "message" not in data or "from" not in data:
-            print("❌ Invalid payload received")
+            print("❌ Invalid payload structure")
             return jsonify({"error": "Invalid payload"}), 400
 
         user_msg = data["message"]
@@ -100,7 +106,6 @@ def webhook():
         reply = ask_chatgpt(user_msg, sender_id)
         print("🧠 ChatGPT Reply:", reply)
 
-        # Send to ZAPI
         url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
         payload = {
             "to": sender_id,
