@@ -1,4 +1,5 @@
 import os
+print("🚀 BOT STARTED - VERSION CHECK")
 import requests
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
