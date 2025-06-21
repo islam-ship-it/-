@@ -62,12 +62,54 @@ def generate_link_request_text(services_requested):
     return "\n".join(lines)
 
 def ask_chatgpt(message, sender_id):
-    session_memory[sender_id] = [
-        {
-            "role": "system",
-            "content": static_prompt.format(
+    if sender_id not in session_memory:
+        session_memory[sender_id] = []
+
+    session_memory[sender_id].append({"role": "user", "content": message})
+
+    response = client.chat.completions.create(
+        model="gpt-4",
+        messages=[
+            {"role": "system", "content": static_prompt.format(
                 prices=build_price_prompt(),
                 confirm_text=replies["تأكيد_الطلب"]
-            )
-        }
+            )},
+            *session_memory[sender_id]
+        ]
+    )
+
+    reply = response.choices[0].message.content
+    session_memory[sender_id].append({"role": "assistant", "content": reply})
+    return reply
+
+
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    try:
+        data = request.get_json()
+        print("✅ Received data:", data)
+
+        if not data or "message" not in data or "from" not in data:
+            return jsonify({"error": "Invalid payload"}), 400
+
+        user_msg = data["message"]
+        sender_id = data["from"]
+
+        reply = ask_chatgpt(user_msg, sender_id)
+
+        # Send reply to Z-API
+        url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
+        requests.post(url, json={
+            "to": sender_id,
+            "message": reply
+        })
+
+        return jsonify({"status": "sent"}), 200
+
+    except Exception as e:
+        print("❌ Error in webhook:", str(e))
+        return jsonify({"error": str(e)}), 500
+
+
+if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
