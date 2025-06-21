@@ -10,7 +10,7 @@ _
 data import services
 app = Flask(__
 name
-__)
+)__
 OPENAI
 ZAPI
 ZAPI
@@ -111,14 +111,15 @@ KEY}"
 ,
 "Content-Type": "application/json"
 ,
-},
+,
+,}
 json={
 "model": "gpt-4"
 ,
 "messages": [{"role": "system"
 static
 _prompt(services)}] + messages,
-"temperature": 0.5
+"temperature": 0.5,
 "content":
 ,
 }
