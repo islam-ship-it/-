@@ -55,8 +55,8 @@ def webhook():
         success = send_whatsapp_message(phone_number, reply)
         print(f"[✅] تم إرسال الرد للعميل؟ {success}")
         return jsonify({"status": "ok"}), 200
-
-    except Exception as e:
+      
+  except Exception as e:
         print("[❌ ERROR أثناء الرد]:", e)
         return jsonify({"error": str(e)}), 500
 
