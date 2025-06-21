@@ -41,44 +41,53 @@ def home():
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        # قراءة البيانات بأي صيغة
-        data = request.get_json(silent=True)
-        if not data:
-            data = request.form.to_dict()
-        
+        data = request.get_json(force=True, silent=True) or request.form.to_dict() or {}
         print("[Webhook] البيانات المستلمة:", data)
-        print("[RAW]", request.data)
 
-        phone_number = data.get("phone")
-        message = data.get("message")
+        # استخراج الرقم والرسالة من الهيكل الجديد
+        phone_number = (
+            data.get("messageData", {}).get("senderData", {}).get("chatId") or
+            data.get("chatId") or
+            data.get("phone")
+        )
+
+        message = (
+            data.get("messageData", {}).get("textMessageData", {}).get("textMessage") or
+            data.get("message") or
+            data.get("text")
+        )
+
+        # معالجة الرقم (لو فيه @ مثلاً)
+        if phone_number and "@" in phone_number:
+            phone_number = phone_number.split("@")[0]
+
+        print(f"[📥] رقم: {phone_number} | رسالة: {message}")
 
         if not phone_number or not message:
-            print("[Webhook] 🚫 بيانات ناقصة!")
-            return jsonify({"error": "Missing phone or message"}), 400
+            return jsonify({"error": "بيانات غير مكتملة"}), 400
 
-        ...
         # حفظ المحادثة
         history = session_memory.get(phone_number, [])
         history.append({"role": "user", "content": message})
         session_memory[phone_number] = history[-10:]
 
-        # طلب من ChatGPT
         chat_response = openai.ChatCompletion.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": "أنت مساعد ذكي بترد باللهجة المصرية، ودود، منظم، وتجاوب على استفسارات العملاء بشكل احترافي."},
+                {"role": "system", "content": "أنت بوت بترد باللهجة المصرية على استفسارات العملاء بشكل محترم وسلس."},
                 *session_memory[phone_number]
             ]
         )
+
         reply = chat_response.choices[0].message.content
         session_memory[phone_number].append({"role": "assistant", "content": reply})
-
         send_whatsapp_message(phone_number, reply)
         return jsonify({"status": "ok"}), 200
 
     except Exception as e:
-        print("[ERROR] حصل استثناء:", e)
+        print("[ERROR]", e)
         return jsonify({"error": "حدث خطأ داخلي"}), 500
+
 
 # تشغيل السيرفر
 if __name__ == '__main__':
