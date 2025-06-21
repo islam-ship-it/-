@@ -70,8 +70,13 @@ def ask_chatgpt(message, sender_id):
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.get_json()
-    print("[RAW DATA FROM ZAPI]", data)
+    print("[DEBUG] تم دخول الراوت /webhook")
+    try:
+        data = request.get_json(force=True)
+        print("[RAW DATA FROM ZAPI]", data)
+    except Exception as e:
+        print("[ERROR] أثناء قراءة JSON:", str(e))
+        return jsonify({"status": "json_error"}), 400
 
     incoming_msg = None
     sender_id = None
