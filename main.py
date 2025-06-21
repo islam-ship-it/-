@@ -16,7 +16,9 @@ def send_message(to, message):
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
     payload = {"to": to, "message": message}
     headers = {"Content-Type": "application/json"}
-    return requests.post(url, json=payload, headers=headers)
+    res = requests.post(url, json=payload, headers=headers)
+    print("[ZAPI RESPONSE]", res.status_code, res.text)
+    return res
 
 def build_price_prompt():
     lines = []
@@ -86,16 +88,8 @@ def webhook():
     if incoming_msg and sender_id:
         print(f"رسالة من {sender_id}: {incoming_msg}")
         reply = ask_chatgpt(incoming_msg, sender_id)
-
-        requests.post(
-            f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text",
-            json={"to": sender_id, "message": reply}
-        )
-
-        if "تحويل لوظيفة" in reply:
-            send_message(sender_id, reply)
-        else:
-            send_message(sender_id, reply)
+        print("[BOT DEBUG] الرد اللي هيتبعت:", reply)
+        send_message(sender_id, reply)
 
         return jsonify({"status": "sent"}), 200
 
