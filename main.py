@@ -7,7 +7,7 @@ from services_data import services
 from static_replies import static_prompt
 from session_storage import get_session, save_session  # ✅ دي الصح
 
-app = Flask(_name_)
+app = Flask(__name__)
 
 # متغيرات البيئة
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
@@ -68,6 +68,6 @@ def webhook():
 
     return jsonify({"status": "received"}), 200
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
 
