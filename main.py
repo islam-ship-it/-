@@ -23,12 +23,10 @@ def send_whatsapp_message(to_number, message):
         "message": message
     }
     headers = {"Content-Type": "application/json"}
-    print(f"[DEBUG] Sending to WhatsApp ➜ {payload}")
     response = requests.post(url, json=payload, headers=headers)
-    print(f"[DEBUG] WhatsApp API Response: {response.status_code} - {response.text}")
     return response.json()
 
-# استدعاء ChatGPT
+# الاتصال بـ ChatGPT
 def call_chatgpt(session_id, user_message):
     if session_id not in session_memory:
         session_memory[session_id] = []
@@ -49,31 +47,31 @@ def call_chatgpt(session_id, user_message):
         }
     )
 
-    print(f"[DEBUG] OpenAI Response Status: {response.status_code}")
-    print(f"[DEBUG] OpenAI Raw Response: {response.text}")
-
     reply = response.json()["choices"][0]["message"]["content"]
     messages.append({"role": "assistant", "content": reply})
     return reply
 
 # الراوت الأساسي
-@app.route("/webhook", methods=["GET", "POST"])
+@app.route("/webhook", methods=["POST", "GET"])
 def webhook():
     if request.method == "POST":
         data = request.get_json()
         try:
-            msg = data["message"]
-            phone = msg["from"]
-            text = msg["text"]["body"]
+            msg = data.get("message", {})
+            phone = msg.get("from")
+            text_body = msg.get("text", {}).get("body")
 
-            print(f"[RECEIVED] From: {phone} | Text: {text}")
-            reply = call_chatgpt(phone, text)
-            print(f"[REPLY] {reply}")
+            if not text_body:
+                return jsonify({"status": "no_text"}), 200
+
+            print(f"[{phone}] {text_body}")
+            reply = call_chatgpt(phone, text_body)
+            print(f"[Bot Reply] {reply}")
             send_whatsapp_message(phone, reply)
 
         except Exception as e:
             print("[ERROR]", str(e))
-            return jsonify({"status": "error", "message": str(e)}), 500
+            return jsonify({"status": "error", "error": str(e)}), 500
 
         return jsonify({"status": "ok"}), 200
 
@@ -81,4 +79,4 @@ def webhook():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host="0.0.0.0", port=port, debug=False)
