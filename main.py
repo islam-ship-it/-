@@ -18,7 +18,7 @@ ZAPI
 API
 _
 _
-KEY = os.getenv("OPENAI
+KEY = os.getenv('OPENAI_API_KEY')
 API
 _
 _
@@ -114,7 +114,7 @@ KEY}"
 ,
 ,}
 json={
-"model": "gpt-4"
+"model": "gpt-4o"
 ,
 "messages": [{"role": "system"
 static
