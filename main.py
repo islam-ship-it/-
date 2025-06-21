@@ -71,6 +71,7 @@ def ask_chatgpt(message, sender_id):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json()
+    print("[RAW DATA FROM ZAPI]", data)
 
     incoming_msg = None
     sender_id = None
