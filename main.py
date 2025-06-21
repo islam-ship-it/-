@@ -86,10 +86,12 @@ def ask_chatgpt(message, sender_id):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
+        print("🔥 Trying to read JSON...")
         data = request.get_json(force=True)
         print("✅ Received data:", data)
 
         if not data or "message" not in data or "from" not in data:
+            print("❌ Invalid payload received")
             return jsonify({"error": "Invalid payload"}), 400
 
         user_msg = data["message"]
