@@ -18,33 +18,53 @@ def send_message(to, message):
     headers = {"Content-Type": "application/json"}
     return requests.post(url, json=payload, headers=headers)
 
+def build_price_prompt():
+    lines = []
+    for item in services:
+        line = f"- {item['platform']} | {item['type']} | {item['count']} = {item['price']} جنيه ({item['audience']})"
+        lines.append(line)
+    return "\n".join(lines)
+
 def ask_chatgpt(message, sender_id):
     if sender_id not in session_memory:
         session_memory[sender_id] = [
             {
                 "role": "system",
-                "content": static_prompt(services)
+                "content": static_prompt.format(
+                    prices=build_price_prompt(),
+                    confirm_text="لتأكيد الطلب اكتب (أكدلي الطلب)"
+                )
             }
         ]
 
     session_memory[sender_id].append({"role": "user", "content": message})
 
-    response = requests.post(
-        "https://openai.chatgpt4mena.com/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json"
-        },
-        json={
-            "model": "gpt-4o",
-            "messages": session_memory[sender_id],
-            "temperature": 0.5
-        }
-    )
+    try:
+        response = requests.post(
+            "https://openai.chatgpt4mena.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "gpt-4o",
+                "messages": session_memory[sender_id],
+                "temperature": 0.5
+            }
+        )
 
-    reply = response.json()["choices"][0]["message"]["content"]
-    session_memory[sender_id].append({"role": "assistant", "content": reply})
-    return reply
+        data = response.json()
+        print("🔁 GPT raw response:", data)
+
+        if "choices" in data and data["choices"] and "message" in data["choices"][0]:
+            reply_text = data["choices"][0]["message"]["content"].strip()
+            session_memory[sender_id].append({"role": "assistant", "content": reply_text})
+            return reply_text
+        else:
+            return "معرفتش أرد دلوقتي 😓"
+    except Exception as e:
+        print("[ERROR from GPT]", str(e))
+        return "حصلت مشكلة مؤقتة، جرب تبعت تاني 🙏"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -64,7 +84,7 @@ def webhook():
         sender_id = data["From"]
 
     if incoming_msg and sender_id:
-        print(f"Ø±Ø³Ø§ÙØ© ÙÙ {sender_id}: {incoming_msg}")
+        print(f"رسالة من {sender_id}: {incoming_msg}")
         reply = ask_chatgpt(incoming_msg, sender_id)
 
         requests.post(
@@ -72,7 +92,7 @@ def webhook():
             json={"to": sender_id, "message": reply}
         )
 
-        if "ØªØ­ÙÙÙ ÙÙØ¸ÙÙØ©" in reply:
+        if "تحويل لوظيفة" in reply:
             send_message(sender_id, reply)
         else:
             send_message(sender_id, reply)
