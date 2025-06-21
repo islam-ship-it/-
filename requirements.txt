@@ -1,4 +1,4 @@
 flask
 requests
-openai
 python-dotenv
+openai>=1.3.5
