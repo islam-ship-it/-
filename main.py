@@ -24,6 +24,7 @@ def send_whatsapp_message(to_number, message):
     }
     headers = {"Content-Type": "application/json"}
     response = requests.post(url, json=payload, headers=headers)
+    print("[ZAPI Response]", response.json())  # تتبع استجابة ZAPI
     return response.json()
 
 # استدعاء ChatGPT
