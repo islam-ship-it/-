@@ -75,7 +75,7 @@ def webhook():
     incoming_msg = None
     sender_id = None
 
-    if "text" in data.get("message", {}):
+    if "message" in data and "text" in data["message"]:
         incoming_msg = data["message"]["text"]
     elif "body" in data:
         incoming_msg = data["body"]
@@ -84,6 +84,9 @@ def webhook():
         sender_id = data["phone"]
     elif "From" in data:
         sender_id = data["From"]
+
+    print("[DEBUG] incoming_msg:", incoming_msg)
+    print("[DEBUG] sender_id:", sender_id)
 
     if incoming_msg and sender_id:
         print(f"رسالة من {sender_id}: {incoming_msg}")
