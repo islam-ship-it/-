@@ -24,7 +24,7 @@ client = OpenAI(
     base_url=OPENAI_API_BASE
 )
 
-# دالة توليد الأسعار
+# توليد الأسعار كـ نص منسق
 def build_price_prompt():
     lines = []
     for item in services:
@@ -37,24 +37,22 @@ def build_price_prompt():
         lines.append(line)
     return "\n".join(lines)
 
-# الدالة الأساسية للتحدث مع ChatGPT
+# الرد من ChatGPT مع تضمين الأسعار مباشرة
 def ask_chatgpt(message, sender_id):
-    # إعادة تحميل الأسعار في كل مرة لضمان التحديث
     session_memory[sender_id] = [
         {
             "role": "system",
             "content": static_prompt.format(
-                prices=build_price_prompt(),
+                prices=build_price_prompt(),  # ✅ تحميل الأسعار ديناميكيًا
                 confirm_text=replies["تأكيد_الطلب"]
             )
-        }
+        },
+        {"role": "user", "content": message}
     ]
-
-    session_memory[sender_id].append({"role": "user", "content": message})
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",  # ✅ نموذج سريع وأرخص
+            model="gpt-4o",  # نموذج اقتصادي وسريع
             messages=session_memory[sender_id],
             max_tokens=500
         )
@@ -65,7 +63,7 @@ def ask_chatgpt(message, sender_id):
         print("❌ Error:", e)
         return "⚠ في مشكلة تقنية، جرب تبعت تاني بعد شوية."
 
-# إرسال الرسالة عبر ZAPI
+# إرسال الرسالة إلى ZAPI
 def send_message(phone, message):
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
     headers = {
@@ -80,12 +78,10 @@ def send_message(phone, message):
         print("❌ ZAPI Error:", e)
         return {"status": "error", "message": str(e)}
 
-# الصفحة الرئيسية
 @app.route("/")
 def home():
     return "✅ البوت شغال"
 
-# Webhook للاستقبال من واتساب
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
