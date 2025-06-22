@@ -1,11 +1,12 @@
 import os
 import requests
+import gspread
 from flask import Flask, request, jsonify
-from dotenv import load_dotenv
+from google.oauth2.service_account import Credentials
 from openai import OpenAI
+from dotenv import load_dotenv
 
 from static_replies import static_prompt, replies
-from services_data import services
 
 load_dotenv()
 
@@ -16,6 +17,29 @@ ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
 CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 
+# 🔐 ربط Google Sheets
+GOOGLE_SHEET_NAME = "أسعار"
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+
+creds = Credentials.from_service_account_file(GOOGLE_CREDENTIALS_PATH, scopes=SCOPES)
+client_gsheets = gspread.authorize(creds)
+
+def get_services():
+    sheet = client_gsheets.open(GOOGLE_SHEET_NAME).sheet1
+    data = sheet.get_all_records()
+    services = []
+    for row in data:
+        services.append({
+            "platform": row.get("المنصة", "").strip(),
+            "type": row.get("النوع", "").strip(),
+            "count": str(row.get("العدد", "")).strip(),
+            "price": str(row.get("السعر", "")).strip(),
+            "audience": row.get("الجمهور", "").strip(),
+            "note": row.get("ملاحظات", "").strip()
+        })
+    return services
+
 app = Flask(__name__)
 session_memory = {}
 
@@ -24,8 +48,8 @@ client = OpenAI(
     base_url=OPENAI_API_BASE
 )
 
-# توليد الأسعار كـ نص منسق
 def build_price_prompt():
+    services = get_services()
     lines = []
     for item in services:
         line = f"- {item['count']} {item['type']} على {item['platform']}"
@@ -37,13 +61,12 @@ def build_price_prompt():
         lines.append(line)
     return "\n".join(lines)
 
-# الرد من ChatGPT مع تضمين الأسعار مباشرة
 def ask_chatgpt(message, sender_id):
     session_memory[sender_id] = [
         {
             "role": "system",
             "content": static_prompt.format(
-                prices=build_price_prompt(),  # ✅ تحميل الأسعار ديناميكيًا
+                prices=build_price_prompt(),
                 confirm_text=replies["تأكيد_الطلب"]
             )
         },
@@ -52,7 +75,7 @@ def ask_chatgpt(message, sender_id):
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",  # نموذج اقتصادي وسريع
+            model="gpt-4o",
             messages=session_memory[sender_id],
             max_tokens=500
         )
@@ -63,7 +86,6 @@ def ask_chatgpt(message, sender_id):
         print("❌ Error:", e)
         return "⚠ في مشكلة تقنية، جرب تبعت تاني بعد شوية."
 
-# إرسال الرسالة إلى ZAPI
 def send_message(phone, message):
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
     headers = {
