@@ -1,32 +1,27 @@
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
-import os
-
-# إعداد الوصول لجوجل شيت
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = ServiceAccountCredentials.from_json_keyfile_name(
-    os.getenv("GOOGLE_APPLICATION_CREDENTIALS"), scope
-)
-client = gspread.authorize(creds)
-
-# اسم الجدول في الشيت
-SPREADSHEET_NAME = "أسعار"
-sheet = client.open(SPREADSHEET_NAME).sheet1
-
-# تحميل الأسعار وتحويلها لقائمة dicts
-def load_services():
-    records = sheet.get_all_records()
-    services = []
-    for row in records:
-        services.append({
-            "platform": row.get("المنصة", "").strip(),
-            "type": row.get("النوع", "").strip(),
-            "count": int(row.get("العدد", 0)),
-            "price": float(row.get("السعر", 0)),
-            "audience": row.get("الجمهور", "").strip(),
-            "note": row.get("ملاحظة", "").strip()
-        })
-    return services
-
-# ده اللي بيتم استدعاؤه في main.py
-services = load_services()
+services = [
+    {"platform": "فيسبوك", "type": "متابع", "count": 1000, "audience": "مصري + عربي", "price": 25, "note": "مدة التنفيذ 12-24 ساعة"},
+    {"platform": "فيسبوك", "type": "متابع", "count": 5000, "audience": "مصري + عربي", "price": 125, "note": "ضمان مدى الحياة"},
+    {"platform": "فيسبوك", "type": "متابع", "count": 1000, "audience": "مصري فقط", "price": 44, "note": "مدة التنفيذ 12-24 ساعة"},
+    {"platform": "فيسبوك", "type": "متابع", "count": 5000, "audience": "مصري فقط", "price": 220, "note": "ضمان مدى الحياة"},
+    {"platform": "فيسبوك", "type": "لايك", "count": 100, "audience": "عرب", "price": 65, "note": ""},
+    {"platform": "فيسبوك", "type": "لايك", "count": 1000, "audience": "عرب", "price": 45, "note": ""},
+    {"platform": "إنستجرام", "type": "متابع", "count": 1000, "audience": "عرب", "price": 25, "note": ""},
+    {"platform": "إنستجرام", "type": "متابع", "count": 5000, "audience": "عرب", "price": 125, "note": ""},
+    {"platform": "تيك توك", "type": "متابع", "count": 1000, "audience": "عرب", "price": 25, "note": ""},
+    {"platform": "تيك توك", "type": "متابع", "count": 5000, "audience": "عرب", "price": 125, "note": ""},
+    {"platform": "سناب شات", "type": "متابع", "count": 1000, "audience": "عرب", "price": 220, "note": ""},
+    {"platform": "سناب شات", "type": "مشاهدة", "count": 100000, "audience": "عرب", "price": 370, "note": ""},
+    {"platform": "سناب شات", "type": "تعليق", "count": 100, "audience": "عرب", "price": 185, "note": ""},
+    {"platform": "تيليجرام", "type": "عضو جروب", "count": 1000, "audience": "مصري فقط", "price": 195, "note": ""},
+    {"platform": "تيليجرام", "type": "مشترك قناة", "count": 1000, "audience": "عرب", "price": 135, "note": ""},
+    {"platform": "تيليجرام", "type": "تفاعل", "count": 1000, "audience": "عرب", "price": 120, "note": ""},
+    {"platform": "تيليجرام", "type": "مشاهدة", "count": 1000, "audience": "عرب", "price": 14, "note": ""},
+    {"platform": "واتساب", "type": "عضو قناة", "count": 1000, "audience": "عرب", "price": 195, "note": ""},
+    {"platform": "يوتيوب", "type": "مشترك", "count": 1000, "audience": "مصري فقط", "price": 175, "note": ""},
+    {"platform": "يوتيوب", "type": "ساعة مشاهدة", "count": 1000, "audience": "عرب", "price": 220, "note": ""},
+    {"platform": "يوتيوب", "type": "لايك", "count": 100, "audience": "عرب", "price": 165, "note": ""},
+    {"platform": "ChatGPT", "type": "اشتراك", "count": "شهر", "audience": "", "price": 115, "note": ""},
+    {"platform": "ChatGPT", "type": "اشتراك", "count": "3 شهور", "audience": "", "price": 235, "note": ""},
+    {"platform": "ChatGPT", "type": "اشتراك", "count": "6 شهور", "audience": "", "price": 440, "note": ""},
+    {"platform": "ChatGPT", "type": "اشتراك", "count": "سنة", "audience": "", "price": 650, "note": ""}
+]
