@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from static_replies import static_prompt, replies
-from sheets_services import services  # ✅ تعديل مهم: استدعاء الأسعار من الشيت
+from sheet_services import services  # ← تم التعديل هنا فقط
 
 load_dotenv()
 
@@ -24,7 +24,6 @@ client = OpenAI(
     base_url=OPENAI_API_BASE
 )
 
-# دالة توليد الأسعار في شكل نص
 def build_price_prompt():
     lines = []
     for item in services:
@@ -37,7 +36,6 @@ def build_price_prompt():
         lines.append(line)
     return "\n".join(lines)
 
-# الدالة الأساسية للتحدث مع ChatGPT
 def ask_chatgpt(message, sender_id):
     session_memory[sender_id] = [
         {
@@ -48,6 +46,7 @@ def ask_chatgpt(message, sender_id):
             )
         }
     ]
+
     session_memory[sender_id].append({"role": "user", "content": message})
 
     try:
@@ -63,7 +62,6 @@ def ask_chatgpt(message, sender_id):
         print("❌ Error:", e)
         return "⚠ في مشكلة تقنية، جرب تبعت تاني بعد شوية."
 
-# إرسال الرسالة عبر ZAPI
 def send_message(phone, message):
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
     headers = {
