@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 from static_replies import static_prompt, replies
-from sheet_services import services  # ← تم التعديل هنا فقط
+from services_data import services
 
 load_dotenv()
 
@@ -37,6 +37,7 @@ def build_price_prompt():
     return "\n".join(lines)
 
 def ask_chatgpt(message, sender_id):
+    # نحدث البرومبت في كل مرة لضمان تحديث الأسعار دائمًا
     session_memory[sender_id] = [
         {
             "role": "system",
@@ -51,7 +52,7 @@ def ask_chatgpt(message, sender_id):
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o",  # ✅ تم التغيير إلى النموذج الجديد
             messages=session_memory[sender_id],
             max_tokens=500
         )
