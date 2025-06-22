@@ -1,14 +1,10 @@
 import os
 import requests
 from flask import Flask, request, jsonify
-from dotenv import load_dotenv
 from openai import OpenAI
-
 from static_replies import static_prompt, replies
 from services_data import services
-from session_storage import get_session, save_session  # ✅ استيراد نظام الذاكرة الجديد
-
-load_dotenv()
+from session_storage import get_session, save_session, reset_session
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_API_BASE = "https://openai.chatgpt4mena.com/v1"
@@ -18,54 +14,36 @@ ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
 CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 
 app = Flask(__name__)
-MAX_MEMORY = 10  # عدد الرسائل اللي هنحتفظ بيهم من الجلسة
-
-client = OpenAI(
-    api_key=OPENAI_API_KEY,
-    base_url=OPENAI_API_BASE
-)
+client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_API_BASE)
 
 def build_price_prompt():
-    lines = []
-    for item in services:
-        line = f"- {item['count']} {item['type']} على {item['platform']}"
-        if item['audience']:
-            line += f" ({item['audience']})"
-        line += f" = {item['price']} جنيه"
-        if item['note']:
-            line += f" ✅ {item['note']}"
-        lines.append(line)
-    return "\n".join(lines)
+    return "\n".join([
+        f"- {s['platform']} | {s['type']} | {s['count']} = {s['price']} جنيه ({s['audience']})"
+        for s in services
+    ])
 
 def ask_chatgpt(message, sender_id):
-    messages = get_session(sender_id)
+    history = get_session(sender_id)
+    if not history:
+        history.append({
+            "role": "system",
+            "content": static_prompt.format(
+                prices=build_price_prompt(),
+                confirm_text=replies["تأكيد_الطلب"]
+            )
+        })
 
-    if not messages:
-        messages = [
-            {
-                "role": "system",
-                "content": static_prompt.format(
-                    prices=build_price_prompt(),
-                    confirm_text=replies["تأكيد_الطلب"]
-                )
-            }
-        ]
-
-    messages.append({"role": "user", "content": message})
-
-    # نحتفظ بعدد معين فقط من الرسائل السابقة لتوفير التكلفة
-    if len(messages) > MAX_MEMORY + 1:
-        messages = [messages[0]] + messages[-MAX_MEMORY:]
+    history.append({"role": "user", "content": message})
 
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
-            messages=messages,
+            messages=history[-10:],
             max_tokens=500
         )
         reply_text = response.choices[0].message.content.strip()
-        messages.append({"role": "assistant", "content": reply_text})
-        save_session(sender_id, messages)  # ✅ حفظ الجلسة
+        history.append({"role": "assistant", "content": reply_text})
+        save_session(sender_id, history)
         return reply_text
     except Exception as e:
         print("❌ Error:", e)
