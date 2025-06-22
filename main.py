@@ -37,7 +37,7 @@ def build_price_prompt():
     return "\n".join(lines)
 
 def ask_chatgpt(message, sender_id):
-    # 💡 تم تعديل الجزء ده فقط لضمان تحديث الأسعار كل مرة
+    # نحدث البرومبت في كل مرة لضمان تحديث الأسعار دائمًا
     session_memory[sender_id] = [
         {
             "role": "system",
@@ -52,7 +52,7 @@ def ask_chatgpt(message, sender_id):
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4",
+            model="gpt-4o",  # ✅ تم التغيير إلى النموذج الجديد
             messages=session_memory[sender_id],
             max_tokens=500
         )
