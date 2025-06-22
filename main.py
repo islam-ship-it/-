@@ -1,10 +1,14 @@
+# main.py
+
 import os
 import requests
 from flask import Flask, request, jsonify
 from openai import OpenAI
+
 from static_replies import static_prompt, replies
 from services_data import services
-from session_storage import get_session, save_session, reset_session
+from session_storage import get_session, save_session
+from message_handler import analyze_message  # ✅ الجديد
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_API_BASE = "https://openrouter.ai/api/v1"
@@ -75,10 +79,17 @@ def webhook():
     data = request.json
     msg = data.get("text", {}).get("message") or data.get("body", "")
     sender = data.get("phone") or data.get("From")
+    media_type = data.get("type")  # مثلاً: "image"
 
     if msg and sender:
-        reply = ask_chatgpt(msg, sender)
-        send_message(sender, reply)
+        # ✅ تحليل ذكي للرسالة
+        smart_reply = analyze_message(msg, sender, media_type)
+
+        if smart_reply:
+            send_message(sender, smart_reply)
+        else:
+            reply = ask_chatgpt(msg, sender)
+            send_message(sender, reply)
 
     return jsonify({"status": "received"}), 200
 
