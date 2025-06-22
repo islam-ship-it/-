@@ -1,73 +1,101 @@
 import os
-import json
 import requests
 from flask import Flask, request, jsonify
+from dotenv import load_dotenv
 from openai import OpenAI
+
+from static_replies import static_prompt, replies
 from services_data import services
-from static_replies import static_prompt
-from session_storage import get_session, save_session
 
-app = Flask(__name__)
+load_dotenv()
 
-# متغيرات البيئة
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_BASE = "https://openai.chatgpt4mena.com/v1"
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
 CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_API_MODEL = os.getenv("OPENAI_API_MODEL", "gpt-4o")
-OPENAI_API_BASE_URL = os.getenv("OPENAI_API_BASE_URL")  # ✅ جديد
+
+app = Flask(__name__)
+session_memory = {}
 
 client = OpenAI(
     api_key=OPENAI_API_KEY,
-    base_url=OPENAI_API_BASE_URL  # ✅ هنا السر
+    base_url=OPENAI_API_BASE
 )
 
+def build_price_prompt():
+    lines = []
+    for item in services:
+        line = f"- {item['count']} {item['type']} على {item['platform']}"
+        if item['audience']:
+            line += f" ({item['audience']})"
+        line += f" = {item['price']} جنيه"
+        if item['note']:
+            line += f" ✅ {item['note']}"
+        lines.append(line)
+    return "\n".join(lines)
+
 def ask_chatgpt(message, sender_id):
-    messages = get_session(sender_id)
+    if sender_id not in session_memory:
+        session_memory[sender_id] = [
+            {
+                "role": "system",
+                "content": static_prompt.format(
+                    prices=build_price_prompt(),
+                    confirm_text=replies["تأكيد_الطلب"]
+                )
+            }
+        ]
 
-    if not messages:
-        messages.append({"role": "system", "content": static_prompt(services)})
+    session_memory[sender_id].append({"role": "user", "content": message})
 
-    messages.append({"role": "user", "content": message})
-
-    chat = client.chat.completions.create(
-        model=OPENAI_API_MODEL,
-        messages=messages
-    )
-
-    reply = chat.choices[0].message.content
-    messages.append({"role": "assistant", "content": reply})
-
-    save_session(sender_id, messages)
-
-    return reply
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    data = request.get_json()
-    
-    incoming_msg = None
-    sender = None
-    if data.get("text") and data.get("message"):
-        incoming_msg = data["message"]["text"]
-    elif "body" in data:
-        incoming_msg = data["body"]
-
-    if "phone" in data:
-        sender = data["phone"]
-    elif "From" in data:
-        sender = data["From"]
-
-    if incoming_msg and sender:
-        reply = ask_chatgpt(incoming_msg, sender)
-        requests.post(
-            f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text",
-            json={"to": sender, "message": reply}
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=session_memory[sender_id],
+            max_tokens=500
         )
-        return jsonify({"status": "sent"}), 200
+        reply_text = response.choices[0].message.content.strip()
+        session_memory[sender_id].append({"role": "assistant", "content": reply_text})
+        return reply_text
+    except Exception as e:
+        print("❌ Error:", e)
+        return "⚠ في مشكلة تقنية، جرب تبعت تاني بعد شوية."
+
+def send_message(phone, message):
+    url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
+    headers = {
+        "Content-Type": "application/json",
+        "Client-Token": CLIENT_TOKEN
+    }
+    payload = {"phone": phone, "message": message}
+    try:
+        response = requests.post(url, headers=headers, json=payload)
+        return response.json()
+    except Exception as e:
+        print("❌ ZAPI Error:", e)
+        return {"status": "error", "message": str(e)}
+
+@app.route("/")
+def home():
+    return "✅ البوت شغال"
+
+@app.route("/webhook", methods=["GET", "POST"])
+def webhook():
+    if request.method == "GET":
+        return "✅ Webhook جاهز", 200
+
+    data = request.json
+    msg = data.get("text", {}).get("message") or data.get("body", "")
+    sender = data.get("phone") or data.get("From")
+
+    if msg and sender:
+        reply = ask_chatgpt(msg, sender)
+        send_message(sender, reply)
 
     return jsonify({"status": "received"}), 200
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run(host="0.0.0.0", port=5000)
+
