@@ -6,6 +6,7 @@ from openai import OpenAI
 
 from static_replies import static_prompt, replies
 from services_data import services
+from session_storage import get_session, save_session  # ✅ استيراد نظام الذاكرة الجديد
 
 load_dotenv()
 
@@ -17,7 +18,7 @@ ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
 CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 
 app = Flask(__name__)
-session_memory = {}
+MAX_MEMORY = 10  # عدد الرسائل اللي هنحتفظ بيهم من الجلسة
 
 client = OpenAI(
     api_key=OPENAI_API_KEY,
@@ -37,27 +38,34 @@ def build_price_prompt():
     return "\n".join(lines)
 
 def ask_chatgpt(message, sender_id):
-    # نحدث البرومبت في كل مرة لضمان تحديث الأسعار دائمًا
-    session_memory[sender_id] = [
-        {
-            "role": "system",
-            "content": static_prompt.format(
-                prices=build_price_prompt(),
-                confirm_text=replies["تأكيد_الطلب"]
-            )
-        }
-    ]
+    messages = get_session(sender_id)
 
-    session_memory[sender_id].append({"role": "user", "content": message})
+    if not messages:
+        messages = [
+            {
+                "role": "system",
+                "content": static_prompt.format(
+                    prices=build_price_prompt(),
+                    confirm_text=replies["تأكيد_الطلب"]
+                )
+            }
+        ]
+
+    messages.append({"role": "user", "content": message})
+
+    # نحتفظ بعدد معين فقط من الرسائل السابقة لتوفير التكلفة
+    if len(messages) > MAX_MEMORY + 1:
+        messages = [messages[0]] + messages[-MAX_MEMORY:]
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",  # ✅ تم التغيير إلى النموذج الجديد
-            messages=session_memory[sender_id],
+            model="gpt-4o",
+            messages=messages,
             max_tokens=500
         )
         reply_text = response.choices[0].message.content.strip()
-        session_memory[sender_id].append({"role": "assistant", "content": reply_text})
+        messages.append({"role": "assistant", "content": reply_text})
+        save_session(sender_id, messages)  # ✅ حفظ الجلسة
         return reply_text
     except Exception as e:
         print("❌ Error:", e)
