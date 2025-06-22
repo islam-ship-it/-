@@ -37,16 +37,16 @@ def build_price_prompt():
     return "\n".join(lines)
 
 def ask_chatgpt(message, sender_id):
-    if sender_id not in session_memory:
-        session_memory[sender_id] = [
-            {
-                "role": "system",
-                "content": static_prompt.format(
-                    prices=build_price_prompt(),
-                    confirm_text=replies["تأكيد_الطلب"]
-                )
-            }
-        ]
+    # 💡 تم تعديل الجزء ده فقط لضمان تحديث الأسعار كل مرة
+    session_memory[sender_id] = [
+        {
+            "role": "system",
+            "content": static_prompt.format(
+                prices=build_price_prompt(),
+                confirm_text=replies["تأكيد_الطلب"]
+            )
+        }
+    ]
 
     session_memory[sender_id].append({"role": "user", "content": message})
 
@@ -98,4 +98,3 @@ def webhook():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-
