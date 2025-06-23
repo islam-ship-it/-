@@ -24,7 +24,9 @@ def build_price_prompt():
 
 def ask_chatgpt(message, sender_id):
     history = get_session(sender_id)
+
     if not history:
+        history = []
         history.append({
             "role": "system",
             "content": static_prompt.format(
@@ -38,7 +40,7 @@ def ask_chatgpt(message, sender_id):
     try:
         response = client.chat.completions.create(
             model="gpt-4.1",
-            messages=history[-10:],
+            messages=history[-10:],  # آخر 10 رسائل
             max_tokens=500
         )
         reply_text = response.choices[0].message.content.strip()
@@ -48,6 +50,7 @@ def ask_chatgpt(message, sender_id):
     except Exception as e:
         print("❌ Error:", e)
         return "⚠ في مشكلة تقنية، جرب تبعت تاني بعد شوية."
+
 
 def send_message(phone, message):
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
