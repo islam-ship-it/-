@@ -8,7 +8,7 @@ from services_data import services
 from session_storage import get_session, save_session
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_API_BASE = "https://openrouter.ai/api/v1"
+OPENAI_API_BASE = "https://openai.chatgpt4mena.com/v1"
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
