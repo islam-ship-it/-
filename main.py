@@ -8,7 +8,7 @@ from openai import OpenAI
 from static_replies import static_prompt, replies
 from services_data import services
 from session_storage import get_session, save_session
-from message_handler import analyze_message  # ✅ الجديد
+from message_handler import handle_message  # ✅ استدعاء الدالة بالاسم الصحيح
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_API_BASE = "https://openrouter.ai/api/v1"
@@ -83,7 +83,7 @@ def webhook():
 
     if msg and sender:
         # ✅ تحليل ذكي للرسالة
-        smart_reply = analyze_message(msg, sender, media_type)
+        smart_reply = handle_message(msg, sender, media_type)
 
         if smart_reply:
             send_message(sender, smart_reply)
@@ -95,3 +95,4 @@ def webhook():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
