@@ -1,3 +1,29 @@
+# نماذج متعددة حسب مستوى التعقيد
+MODEL_SIMPLE = "openchat/openchat-3.5"
+MODEL_MEDIUM = "anthropic/claude-3-sonnet"
+MODEL_COMPLEX = "openai/gpt-4o"
+
+
+# اختيار النموذج المناسب بناءً على محتوى الرسالة
+def choose_model(user_message):
+    user_message = user_message.lower()
+
+    # نموذج بسيط للأسئلة المباشرة
+    if any(word in user_message for word in ["سعر", "كام", "متابع", "لايك", "مشاهدة"]) and len(user_message.split()) <= 10:
+        return MODEL_SIMPLE
+
+    # نموذج متوسط لو فيها أكتر من خدمة أو تفاصيل كتيرة
+    elif any(word in user_message for word in ["و", "انستجرام", "تيك توك", "يوتيوب", "فيسبوك"]) and user_message.count("و") >= 1:
+        return MODEL_MEDIUM
+
+    # نموذج معقد لو فيها دفع أو رابط أو سيناريو متكامل
+    elif any(word in user_message for word in ["الرابط", "حولت", "ايصال", "تم الدفع", "تم التحويل"]):
+        return MODEL_COMPLEX
+
+    # افتراضي: نموذج بسيط
+    return MODEL_SIMPLE
+
+
 import os
 import re
 import requests
@@ -14,7 +40,7 @@ ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
 CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 
-app = Flask(__name__)
+app = Flask(_name_)
 client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_API_BASE)
 
 def build_price_prompt():
@@ -68,7 +94,7 @@ def ask_chatgpt(message, sender_id):
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4.1",
+            model=choose_model(user_message),
             messages=session["history"][-10:],
             max_tokens=500
         )
@@ -151,7 +177,6 @@ def webhook():
 
     return jsonify({"status": "received"}), 200
 
-if __name__ == "__main__":
+if _name_ == "_main_":
     app.run(host="0.0.0.0", port=5000)
-
 
