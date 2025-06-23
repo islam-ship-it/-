@@ -248,7 +248,6 @@ services = [
     {"platform": "إنستجرام", "type": "توثيق شهري", "count": 1, "audience": "رابط الحساب فقط", "price": 220},
     {"platform": "واتساب", "type": "توثيق شهري", "count": 1, "audience": "رابط الحساب فقط", "price": 220},
     {"platform": "تيليجرام", "type": "توثيق شهري", "count": 1, "audience": "رابط الحساب فقط", "price": 220},
-    {"platform": "تويتر (X)", "type": "توثيق شهري", "count": 1, "audience": "رابط الحساب فقط", "price": 220},
  
     {"platform": "ChatGPT", "type": "اشتراك", "count": "شهر", "audience": "بنحتاج رابط إيميلك فقط لربط الاشتراك بحضرتك بعد الدفع", "price": 115},
     {"platform": "ChatGPT", "type": "اشتراك", "count": "3 شهور", "audience": "بنحتاج رابط إيميلك فقط لربط الاشتراك بحضرتك بعد الدفع", "price": 235},
