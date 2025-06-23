@@ -260,7 +260,7 @@ services = [
     {"platform": "ببجي", "type": "شحن شدات", "count": 660, "audience": "PUBG UC – شحن مباشر برابط ID", "price": 280},
     {"platform": "ببجي", "type": "شحن شدات", "count": 1800, "audience": "PUBG UC – شحن مباشر برابط ID", "price": 690},
     {"platform": "ببجي", "type": "شحن شدات", "count": 3850, "audience": "PUBG UC – شحن مباشر برابط ID", "price": 1390},
-    {"platform": "ببجي", "type": "شحن شدات", "count": 8100, "audience": "PUBG UC – شحن مباشر برابط ID", "price": 2750}
+    {"platform": "ببجي", "type": "شحن شدات", "count": 8100, "audience": "PUBG UC – شحن مباشر برابط ID", "price": 2750},
       
     {"platform": "فري فاير", "type": "شحن ألماس", "count": 100, "audience": "Free Fire – شحن مباشر برابط ID", "price": 30},
     {"platform": "فري فاير", "type": "شحن ألماس", "count": 310, "audience": "Free Fire – شحن مباشر برابط ID", "price": 90},
