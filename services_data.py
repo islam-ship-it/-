@@ -99,7 +99,7 @@ services = [
     {"platform": "تيك توك", "type": "مشاهدة", "count": 500000, "audience": "مصري + عربي", "price": 325},
     {"platform": "تيك توك", "type": "مشاهدة", "count": 1000000, "audience": "مصري + عربي", "price": 650},
     {"platform": "تيك توك", "type": "مشاهدة", "count": 5000000, "audience": "مصري + عربي", "price": 3250},
-    {"platform": "تيك توك", "type": "مشاهدة", "count": 10000000, "audience": "مصري + عربي", "price": 6500}
+    {"platform": "تيك توك", "type": "مشاهدة", "count": 10000000, "audience": "مصري + عربي", "price": 6500},
 
     # ✅ مشتركين يوتيوب - مصري فقط (195 لكل 1000)
     {"platform": "يوتيوب", "type": "مشترك", "count": 1000, "audience": "مصري فقط", "price": 195},
@@ -157,13 +157,13 @@ services = [
     {"platform": "سناب شات", "type": "متابع", "count": 100000, "audience": "مصري + عربي", "price": 6000},
 
     # متابعين (مصري فقط)
-   {"platform": "سناب شات", "type": "متابع", "count": 1000, "audience": "مصري فقط", "price": 100},
-   {"platform": "سناب شات", "type": "متابع", "count": 3000, "audience": "مصري فقط", "price": 300},
-   {"platform": "سناب شات", "type": "متابع", "count": 5000, "audience": "مصري فقط", "price": 500},
-   {"platform": "سناب شات", "type": "متابع", "count": 10000, "audience": "مصري فقط", "price": 1000},
-   {"platform": "سناب شات", "type": "متابع", "count": 25000, "audience": "مصري فقط", "price": 2500},
-   {"platform": "سناب شات", "type": "متابع", "count": 50000, "audience": "مصري فقط", "price": 5000},
-   {"platform": "سناب شات", "type": "متابع", "count": 100000, "audience": "مصري فقط", "price": 10000},
+    {"platform": "سناب شات", "type": "متابع", "count": 1000, "audience": "مصري فقط", "price": 100},
+    {"platform": "سناب شات", "type": "متابع", "count": 3000, "audience": "مصري فقط", "price": 300},
+    {"platform": "سناب شات", "type": "متابع", "count": 5000, "audience": "مصري فقط", "price": 500},
+    {"platform": "سناب شات", "type": "متابع", "count": 10000, "audience": "مصري فقط", "price": 1000},
+    {"platform": "سناب شات", "type": "متابع", "count": 25000, "audience": "مصري فقط", "price": 2500},
+    {"platform": "سناب شات", "type": "متابع", "count": 50000, "audience": "مصري فقط", "price": 5000},
+    {"platform": "سناب شات", "type": "متابع", "count": 100000, "audience": "مصري فقط", "price": 10000},
 
     # مشاهدة
     {"platform": "سناب شات", "type": "مشاهدة", "count": 100000, "audience": "مصري + عربي", "price": 65},
@@ -266,12 +266,12 @@ services = [
     {"platform": "فري فاير", "type": "شحن ألماس", "count": 310, "audience": "Free Fire – شحن مباشر برابط ID", "price": 90},
     {"platform": "فري فاير", "type": "شحن ألماس", "count": 520, "audience": "Free Fire – شحن مباشر برابط ID", "price": 150},
     {"platform": "فري فاير", "type": "شحن ألماس", "count": 1060, "audience": "Free Fire – شحن مباشر برابط ID", "price": 290},
-    {"platform": "فري فاير", "type": "شحن ألماس", "count": 2180, "audience": "Free Fire – شحن مباشر برابط ID", "price": 580}
+    {"platform": "فري فاير", "type": "شحن ألماس", "count": 2180, "audience": "Free Fire – شحن مباشر برابط ID", "price": 580},
 
     {"platform": "باقة اعلان ممول جاهز", "type": "باقة 3 أيام", "count": 3, "audience": "تشمل تصميم + ترويج + متابعة (بنحتاج ندخل أدمن الصفحة)", "price": 500},
     {"platform": "باقة اعلان ممول جاهز", "type": "باقة 7 أيام", "count": 7, "audience": "تشمل 3 تصميمات + إعلان + متابعة يومية (بنحتاج ندخل أدمن الصفحة)", "price": 900},
     {"platform": "باقة اعلان ممول جاهز", "type": "باقة 15 يوم", "count": 15, "audience": "5 تصميمات + حملتين + دعم مستمر (بنحتاج ندخل أدمن الصفحة)", "price": 1600},
-    {"platform": "باقة اعلان ممول جاهز", "type": "باقة 30 يوم", "count": 30, "audience": "10 تصميمات + 3 حملات + تقارير + دعم يومي (بنحتاج ندخل أدمن الصفحة)", "price": 2900}
+    {"platform": "باقة اعلان ممول جاهز", "type": "باقة 30 يوم", "count": 30, "audience": "10 تصميمات + 3 حملات + تقارير + دعم يومي (بنحتاج ندخل أدمن الصفحة)", "price": 2900},
 
 ]
 
