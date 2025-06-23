@@ -12,8 +12,11 @@ def get_session(user_id):
         }
     return session_data[user_id]
 
-def save_session(user_id, data):
-    session_data[user_id] = data
+def save_session(user_id, history, status):
+    session_data[user_id] = {
+        "history": history,
+        "status": status
+    }
 
 def reset_session(user_id):
     if user_id in session_data:
