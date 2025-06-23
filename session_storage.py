@@ -1,18 +1,18 @@
-# session_storage.py
+# ده ملف لتخزين واسترجاع المحادثات الخاصة بكل عميل (user_id) + حالة الطلب (status)
 
-# ده ملف لتخزين واسترجاع المحادثات الخاصة بكل عميل (user_id)
-# وبيستخدم Dictionary مؤقت في الذاكرة، وممكن نطوره لاحقًا ليخزن في قاعدة بيانات أو ملف
-
-session_memory = {}
+session_data = {}
 
 def get_session(user_id):
-    """استرجع المحادثة الحالية الخاصة بالمستخدم"""
-    return session_memory.get(user_id, [])
+    if user_id not in session_data:
+        session_data[user_id] = {
+            "history": [],
+            "status": "idle"
+        }
+    return session_data[user_id]
 
-def save_session(user_id, messages):
-    """خزن المحادثة الحالية للمستخدم"""
-    session_memory[user_id] = messages
+def save_session(user_id, data):
+    session_data[user_id] = data
 
 def reset_session(user_id):
-    """امسح المحادثة الخاصة بالمستخدم"""
-    session_memory.po
+    if user_id in session_data:
+        del session_data[user_id]
