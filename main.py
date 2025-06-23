@@ -1,5 +1,3 @@
-# main.py
-
 import os
 import requests
 from flask import Flask, request, jsonify
@@ -8,7 +6,7 @@ from openai import OpenAI
 from static_replies import static_prompt, replies
 from services_data import services
 from session_storage import get_session, save_session
-from message_handler import handle_message  # ✅ استدعاء الدالة بالاسم الصحيح
+from message_handler import analyze_message  # ✅ الجديد
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_API_BASE = "https://openrouter.ai/api/v1"
@@ -27,7 +25,9 @@ def build_price_prompt():
     ])
 
 def ask_chatgpt(message, sender_id):
-    history = get_session(sender_id)
+    session = get_session(sender_id)
+    history = session["history"]
+
     if not history:
         history.append({
             "role": "system",
@@ -47,7 +47,13 @@ def ask_chatgpt(message, sender_id):
         )
         reply_text = response.choices[0].message.content.strip()
         history.append({"role": "assistant", "content": reply_text})
-        save_session(sender_id, history)
+
+        # ✅ تحديث السيشن
+        save_session(sender_id, {
+            "history": history,
+            "status": session["status"]
+        })
+
         return reply_text
     except Exception as e:
         print("❌ Error:", e)
@@ -83,7 +89,7 @@ def webhook():
 
     if msg and sender:
         # ✅ تحليل ذكي للرسالة
-        smart_reply = handle_message(msg, sender, media_type)
+        smart_reply = analyze_message(msg, sender, media_type)
 
         if smart_reply:
             send_message(sender, smart_reply)
@@ -95,4 +101,3 @@ def webhook():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-
