@@ -22,51 +22,32 @@ def build_price_prompt():
         for s in services
     ])
 
-def is_payment_screenshot(message, media):
-    return ("حولت" in message or "دفعت" in message) or (media and "image" in media.lower())
-
-def is_link(msg):
-    return any(sub in msg for sub in ["http", "www.", "instagram.com", "facebook.com", "tiktok.com", "youtube.com"])
-
-def ask_chatgpt(message, sender_id, media_type=None):
-    session = get_session(sender_id)
-    if not session:
-        session = [{
+def ask_chatgpt(message, sender_id):
+    history = get_session(sender_id)
+    if not history:
+        history.append({
             "role": "system",
             "content": static_prompt.format(
                 prices=build_price_prompt(),
                 confirm_text=replies["تأكيد_الطلب"]
             )
-        }]
+        })
 
-    # حفظ النية
-    if "حولت" in message or (media_type and "image" in media_type.lower()):
-        if any("http" in msg["content"] for msg in session if msg["role"] == "user"):
-            if not any("تم تأكيد الدفع" in msg["content"] for msg in session if msg["role"] == "assistant"):
-                reply = replies["تم_الدفع"]
-                session.append({"role": "user", "content": message})
-                session.append({"role": "assistant", "content": reply})
-                save_session(sender_id, session)
-                return reply
-            else:
-                return None  # خلاص الدفع اتأكد
-        else:
-            return replies["لسه_محتاج_تفاصيل"]
+    history.append({"role": "user", "content": message})
 
-    session.append({"role": "user", "content": message})
     try:
         response = client.chat.completions.create(
             model="gpt-4.1",
-            messages=session[-10:],
+            messages=history[-10:],
             max_tokens=500
         )
         reply_text = response.choices[0].message.content.strip()
-        session.append({"role": "assistant", "content": reply_text})
-        save_session(sender_id, session)
+        history.append({"role": "assistant", "content": reply_text})
+        save_session(sender_id, history)
         return reply_text
     except Exception as e:
         print("❌ Error:", e)
-        return replies["مشكلة_تقنية"]
+        return "⚠ في مشكلة تقنية، جرب تبعت تاني بعد شوية."
 
 def send_message(phone, message):
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
@@ -92,16 +73,21 @@ def webhook():
         return "✅ Webhook جاهز", 200
 
     data = request.json
-    msg = data.get("text", {}).get("message") or data.get("body", "")
-    media = data.get("media", {}).get("mimetype") or ""
-    sender = data.get("phone") or data.get("From")
+
+    # ✅ تأكد إن data مش list
+    if isinstance(data, dict):
+        msg = data.get("text", {}).get("message") or data.get("body", "")
+        sender = data.get("phone") or data.get("From")
+    else:
+        msg = None
+        sender = None
 
     if msg and sender:
-        reply = ask_chatgpt(msg, sender, media)
-        if reply:
-            send_message(sender, reply)
+        reply = ask_chatgpt(msg, sender)
+        send_message(sender, reply)
 
     return jsonify({"status": "received"}), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
