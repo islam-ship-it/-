@@ -23,50 +23,49 @@ def handle_message(text, sender_id, message_type="text"):
     session = get_session(sender_id)
     status = session["status"]
 
-    # إذا في صورة دفع والعميل كان مستني يدفع
+    # ✅ صورة دفع والعميل مستني الدفع
     if detect_image(message_type) and status == "waiting_payment":
         session["status"] = "completed"
-        save_session(sender_id, session["history"], session["status"])
+        save_session(sender_id, session)
         return replies["تأكيد_التحويل"]
 
-    # إذا الرسالة صورة عشوائية والعميل مش مستني يدفع
+    # ❌ صورة مش مفهومة (والعميل مش مستني دفع)
     if detect_image(message_type):
         return replies["صورة_غير_مفهومة"]
 
-    # إذا العميل بيطلب خدمة جديدة
+    # 🟡 العميل طلب خدمة جديدة
     if status == "idle":
         service = match_service(text)
         if service:
             session["status"] = "waiting_link"
             session["history"].append({"role": "user", "content": text})
-            save_session(sender_id, session["history"], session["status"])
+            save_session(sender_id, session)
             return replies["طلب_الرابط"].format(price=service["price"])
 
-    # العميل بعت لينك
+    # 🟠 العميل بعت لينك للخدمة
     if detect_link(text) and status == "waiting_link":
         session["status"] = "waiting_payment"
         session["history"].append({"role": "user", "content": text})
-        save_session(sender_id, session["history"], session["status"])
+        save_session(sender_id, session)
         return replies["طلب_الدفع"]
 
-    # العميل كتب كلام عن التحويل وهو مستني الدفع
+    # 🟢 العميل قال "حولت" أو حاجة شبه كده
     if detect_payment(text) and status == "waiting_payment":
         session["status"] = "completed"
         session["history"].append({"role": "user", "content": text})
-        save_session(sender_id, session["history"], session["status"])
+        save_session(sender_id, session)
         return replies["تأكيد_التحويل"]
 
-    # إذا العميل طلب خدمة جديدة بعد إتمام الطلب
+    # 🔁 العميل طلب خدمة جديدة بعد ما خلص واحدة
     if status == "completed":
         service = match_service(text)
         if service:
             session["status"] = "waiting_link"
-            session["history"] = []
-            session["history"].append({"role": "user", "content": text})
-            save_session(sender_id, session["history"], session["status"])
+            session["history"] = [{"role": "user", "content": text}]
+            save_session(sender_id, session)
             return replies["طلب_الرابط"].format(price=service["price"])
 
-    # في أي حالة تانية هنستخدم GPT
+    # 🔚 fallback → نرجع لـ GPT
     session["history"].append({"role": "user", "content": text})
-    save_session(sender_id, session["history"], session["status"])
-    return None  # معناها البوت يرد من GPT
+    save_session(sender_id, session)
+    return None
