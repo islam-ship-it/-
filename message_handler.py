@@ -1,47 +1,72 @@
-# message_handler.py
-
+import re
 from static_replies import replies
+from session_storage import get_session, save_session
 from services_data import services
-from session_storage import get_session, save_session, reset_session
 
-def is_payment_message(msg):
-    keywords = ["حولت", "تم التحويل", "حولتلك", "حولتلِك", "بعته", "دفعت"]
-    return any(kw in msg.lower() for kw in keywords)
+def detect_link(text):
+    return "http" in text or "www." in text or "tiktok.com" in text or "facebook.com" in text
 
-def is_link(msg):
-    return "http" in msg or "www." in msg
+def detect_payment(text):
+    payment_keywords = ["تم التحويل", "حولت", "الفلوس", "وصل", "سكرين", "صورة"]
+    return any(word in text.lower() for word in payment_keywords)
 
-def build_price_prompt():
-    return "\n".join([
-        f"- {s['platform']} | {s['type']} | {s['count']} = {s['price']} جنيه ({s['audience']})"
-        for s in services
-    ])
+def detect_image(message_type):
+    return message_type == "image"
 
-def analyze_message(msg, sender, media_type=None):
-    history = get_session(sender)
-
-    # تحديد المرحلة من التاريخ
-    previous_messages = [m["content"] for m in history if m["role"] == "user"]
-
-    # 1. لو بعت صورة (سكرين شوت)
-    if media_type == "image":
-        if any("رابط" in m or "متابع" in m or "سعر" in m for m in previous_messages):
-            reset_session(sender)
-            return "✅ تم استلام صورة التحويل، الطلب قيد التنفيذ. شكرًا لثقتك ❤"
-        else:
-            return "📷 استلمت صورة، لو دي صورة التحويل ابعتلي الخدمة اللي طلبتها علشان نكمل ✨"
-
-    # 2. لو كتب جملة فيها دفع
-    if is_payment_message(msg):
-        if any("رابط" in m or "سعر" in m for m in previous_messages):
-            reset_session(sender)
-            return "✅ تم تأكيد الدفع، الطلب هيبدأ تنفيذه خلال ساعات قليلة ✨"
-        else:
-            return "💬 تمام، بس لسه ما استلمناش تفاصيل الطلب أو الرابط، ابعتهم علشان نكمل."
-
-    # 3. لو بعت رابط
-    if is_link(msg):
-        return replies["تأكيد_الطلب"]
-
-    # 4. رسالة عادية، خليه يروح للـ ChatGPT
+def match_service(text):
+    for s in services:
+        if s["platform"].lower() in text.lower() and str(s["count"]) in text:
+            return s
     return None
+
+def handle_message(text, sender_id, message_type="text"):
+    session = get_session(sender_id)
+    status = session["status"]
+
+    # إذا في صورة دفع والعميل كان مستني يدفع
+    if detect_image(message_type) and status == "waiting_payment":
+        session["status"] = "completed"
+        save_session(sender_id, session["history"], session["status"])
+        return replies["تأكيد_التحويل"]
+
+    # إذا الرسالة صورة عشوائية والعميل مش مستني يدفع
+    if detect_image(message_type):
+        return replies["صورة_غير_مفهومة"]
+
+    # إذا العميل بيطلب خدمة جديدة
+    if status == "idle":
+        service = match_service(text)
+        if service:
+            session["status"] = "waiting_link"
+            session["history"].append({"role": "user", "content": text})
+            save_session(sender_id, session["history"], session["status"])
+            return replies["طلب_الرابط"].format(price=service["price"])
+
+    # العميل بعت لينك
+    if detect_link(text) and status == "waiting_link":
+        session["status"] = "waiting_payment"
+        session["history"].append({"role": "user", "content": text})
+        save_session(sender_id, session["history"], session["status"])
+        return replies["طلب_الدفع"]
+
+    # العميل كتب كلام عن التحويل وهو مستني الدفع
+    if detect_payment(text) and status == "waiting_payment":
+        session["status"] = "completed"
+        session["history"].append({"role": "user", "content": text})
+        save_session(sender_id, session["history"], session["status"])
+        return replies["تأكيد_التحويل"]
+
+    # إذا العميل طلب خدمة جديدة بعد إتمام الطلب
+    if status == "completed":
+        service = match_service(text)
+        if service:
+            session["status"] = "waiting_link"
+            session["history"] = []
+            session["history"].append({"role": "user", "content": text})
+            save_session(sender_id, session["history"], session["status"])
+            return replies["طلب_الرابط"].format(price=service["price"])
+
+    # في أي حالة تانية هنستخدم GPT
+    session["history"].append({"role": "user", "content": text})
+    save_session(sender_id, session["history"], session["status"])
+    return None  # معناها البوت يرد من GPT
