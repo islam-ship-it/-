@@ -13,29 +13,19 @@ def detect_payment(text):
 def detect_image(message_type):
     return message_type == "image"
 
+def normalize_numbers(text):
+    # يحول الأرقام العربية إلى إنجليزية
+    arabic_nums = '٠١٢٣٤٥٦٧٨٩'
+    western_nums = '0123456789'
+    translation_table = str.maketrans(arabic_nums, western_nums)
+    return text.translate(translation_table)
+
 def match_service(text):
-    text = text.lower()
-
-    synonyms = {
-        "facebook": ["فيس", "فيسبوك", "fb"],
-        "instagram": ["انستا", "انستجرام", "انستغرام"],
-        "tiktok": ["تيك", "تيك توك", "tiktok"],
-        "youtube": ["يوتيوب", "يوتوب", "yt"],
-        "followers": ["متابع", "متابعين"],
-        "likes": ["لايك", "لايكات", "اعجاب", "اعجابات"],
-        "views": ["مشاهدة", "مشاهدات"],
-        "subscribers": ["مشتركين", "اشتراك"]
-    }
-
-    def matches(value, group):
-        return any(alt in text for alt in synonyms.get(value.lower(), [value.lower()]))
-
+    text = normalize_numbers(text.lower())
     for s in services:
-        platform_match = matches(s["platform"], synonyms)
-        type_match = matches(s["type"], synonyms)
-        count_match = str(s["count"]) in text or str(int(s["count"])) in text
-
-        if platform_match and type_match and count_match:
+        platform = s["platform"].lower()
+        count = str(s["count"])
+        if platform in text and count in text:
             return s
     return None
 
@@ -43,51 +33,45 @@ def handle_message(text, sender_id, message_type="text"):
     session = get_session(sender_id)
     status = session["status"]
 
-    # ✅ صورة دفع والعميل مستني يدفع
     if detect_image(message_type) and status == "waiting_payment":
         session["status"] = "completed"
-        save_session(sender_id, session["history"], session["status"])
+        save_session(sender_id, {
+            "history": session["history"],
+            "status": session["status"]
+        })
         return replies["تأكيد_التحويل"]
 
-    # ❌ صورة عشوائية والعميل مش مستني دفع
     if detect_image(message_type):
         return replies["صورة_غير_مفهومة"]
 
-    # 🟡 طلب خدمة جديدة
     if status == "idle":
         service = match_service(text)
         if service:
             session["status"] = "waiting_link"
             session["history"].append({"role": "user", "content": text})
-            save_session(sender_id, session["history"], session["status"])
+            save_session(sender_id, session)
             return replies["طلب_الرابط"].format(price=service["price"])
 
-    # 🔗 بعت رابط
     if detect_link(text) and status == "waiting_link":
         session["status"] = "waiting_payment"
         session["history"].append({"role": "user", "content": text})
-        save_session(sender_id, session["history"], session["status"])
+        save_session(sender_id, session)
         return replies["طلب_الدفع"]
 
-    # 💰 بعت تأكيد دفع
     if detect_payment(text) and status == "waiting_payment":
         session["status"] = "completed"
         session["history"].append({"role": "user", "content": text})
-        save_session(sender_id, session["history"], session["status"])
+        save_session(sender_id, session)
         return replies["تأكيد_التحويل"]
 
-    # 🔁 بدأ طلب جديد بعد ما خلص
     if status == "completed":
         service = match_service(text)
         if service:
             session["status"] = "waiting_link"
-            session["history"] = []
-            session["history"].append({"role": "user", "content": text})
-            save_session(sender_id, session["history"], session["status"])
+            session["history"] = [{"role": "user", "content": text}]
+            save_session(sender_id, session)
             return replies["طلب_الرابط"].format(price=service["price"])
 
-    # 🤖 أي حاجة تانية: شغّل GPT
     session["history"].append({"role": "user", "content": text})
-    save_session(sender_id, session["history"], session["status"])
+    save_session(sender_id, session)
     return None
-
