@@ -99,7 +99,6 @@ services = [
     {"platform": "تيك توك", "type": "مشاهدة", "count": 500000, "audience": "مصري + عربي", "price": 325},
     {"platform": "تيك توك", "type": "مشاهدة", "count": 1000000, "audience": "مصري + عربي", "price": 650},
     {"platform": "تيك توك", "type": "مشاهدة", "count": 5000000, "audience": "مصري + عربي", "price": 3250},
-    {"platform": "تيك توك", "type": "مشاهدة", "count": 10000000, "audience": "مصري + عربي", "price": 6500}
 
     # ✅ مشتركين يوتيوب - مصري فقط (195 لكل 1000)
     {"platform": "يوتيوب", "type": "مشترك", "count": 1000, "audience": "مصري فقط", "price": 195},
