@@ -46,9 +46,7 @@ def match_service(message):
     return None
 
 def ask_chatgpt(message, sender_id):
-    session = get_session(sender_id)
-    history = session.get("history", [])
-    status = session.get("status", "idle")
+    history = get_session(sender_id) or []
 
     if not history:
         history.append({
@@ -69,7 +67,7 @@ def ask_chatgpt(message, sender_id):
         )
         reply_text = response.choices[0].message.content.strip()
         history.append({"role": "assistant", "content": reply_text})
-        save_session(sender_id, {"history": history, "status": status})
+        save_session(sender_id, history)
         return reply_text
     except Exception as e:
         print("❌ Error:", e)
