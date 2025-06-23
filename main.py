@@ -124,32 +124,6 @@ def webhook():
         send_message(sender, replies["صورة_غير_مفهومة"])
         return jsonify({"status": "received"}), 200
 
-
-    # فلترة العدد حسب الحد الأدنى لكل خدمة
-    from services_data import services
-
-    def extract_service_request(message):
-        import re
-        pattern = r"(\d+)\s*متابع(?:\s*)([\w\s]+)"
-        matches = re.findall(pattern, message)
-        return matches
-
-    requests = extract_service_request(msg)
-    invalid_request = False
-
-    for count_str, platform in requests:
-        try:
-            count = int(count_str)
-            filtered = [s for s in services if s["platform"] in platform and int(s["count"]) <= count]
-            if not filtered:
-                invalid_request = True
-        except:
-            continue
-
-    if invalid_request:
-        send_message(sender, "الخدمة دي متاحة بس بتبدأ من عدد معين أكبر من كده. راجع الأسعار.")
-        return jsonify({"status": "received"}), 200
-
     matched = match_service(msg)
     if matched and status in ["idle", "completed"]:
         session["status"] = "waiting_link"
@@ -179,3 +153,4 @@ def webhook():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
