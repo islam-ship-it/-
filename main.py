@@ -16,37 +16,29 @@ CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 app = Flask(__name__)
 client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_API_BASE)
 
+# 🧠 أدوات ذكية
+def detect_link(text):
+    return "http" in text or "facebook.com" in text or "tiktok.com" in text or "instagram.com" in text
+
+def detect_payment_text(text):
+    keywords = ["حولت", "تم التحويل", "الفلوس", "دفعت", "دفعتلك", "صورة التحويل", "السكرين"]
+    return any(word in text.lower() for word in keywords)
+
+def match_service(text):
+    for s in services:
+        if s["platform"].lower() in text.lower() and str(s["count"]) in text:
+            return s
+    return None
+
 def build_price_prompt():
     return "\n".join([
         f"- {s['platform']} | {s['type']} | {s['count']} = {s['price']} جنيه ({s['audience']})"
         for s in services
     ])
 
-def parse_number(text):
-    text = text.replace("ألف", "000").replace("٠", "0").replace("١", "1").replace("٢", "2").replace("٣", "3").replace("٤", "4").replace("٥", "5").replace("٦", "6").replace("٧", "7").replace("٨", "8").replace("٩", "9")
-    numbers = ''.join([c if c.isdigit() else ' ' for c in text])
-    numbers = numbers.strip().split()
-    if numbers:
-        return int(numbers[0])
-    return None
-
-def match_service(message):
-    msg = message.lower()
-    count = parse_number(msg)
-    if not count:
-        return None
-
-    for s in services:
-        if s['count'] != count:
-            continue
-        if s['platform'].lower() in msg and s['type'].lower() in msg:
-            return s
-        if s['platform'].lower() in msg and any(word in msg for word in [s['type'].lower(), s['type'].lower() + "ات"]):
-            return s
-    return None
-
 def ask_chatgpt(message, sender_id):
-    history = get_session(sender_id) or []
+    session = get_session(sender_id)
+    history = session["history"]
 
     if not history:
         history.append({
@@ -67,7 +59,7 @@ def ask_chatgpt(message, sender_id):
         )
         reply_text = response.choices[0].message.content.strip()
         history.append({"role": "assistant", "content": reply_text})
-        save_session(sender_id, history)
+        save_session(sender_id, history, session["status"])
         return reply_text
     except Exception as e:
         print("❌ Error:", e)
@@ -99,12 +91,52 @@ def webhook():
     data = request.json
     msg = data.get("text", {}).get("message") or data.get("body", "")
     sender = data.get("phone") or data.get("From")
+    message_type = data.get("type")  # image / text / etc
 
-    if msg and sender:
-        reply = ask_chatgpt(msg, sender)
-        send_message(sender, reply)
+    session = get_session(sender)
+    status = session["status"]
 
-    return jsonify({"status": "received"}), 200
+    # 🎯 التعامل مع صورة تحويل حقيقية
+    if message_type == "image" and status == "waiting_payment":
+        session["status"] = "completed"
+        save_session(sender, session["history"], session["status"])
+        send_message(sender, replies["تأكيد_التحويل"])
+        return jsonify({"status": "payment_confirmed"}), 200
+
+    # 🧩 صورة لكن مش مطلوب دفع
+    if message_type == "image" and status != "waiting_payment":
+        send_message(sender, replies["صورة_غير_مفهومة"])
+        return jsonify({"status": "image_ignored"}), 200
+
+    # 🛒 العميل طلب خدمة
+    service = match_service(msg)
+    if service and status == "idle":
+        session["status"] = "waiting_link"
+        session["history"].append({"role": "user", "content": msg})
+        save_session(sender, session["history"], session["status"])
+        send_message(sender, replies["طلب_الرابط"].format(price=service["price"]))
+        return jsonify({"status": "service_matched"}), 200
+
+    # 🔗 العميل بعت رابط
+    if detect_link(msg) and status == "waiting_link":
+        session["status"] = "waiting_payment"
+        session["history"].append({"role": "user", "content": msg})
+        save_session(sender, session["history"], session["status"])
+        send_message(sender, replies["طلب_الدفع"])
+        return jsonify({"status": "link_received"}), 200
+
+    # 💸 العميل قال إنه حول
+    if detect_payment_text(msg) and status == "waiting_payment":
+        session["status"] = "completed"
+        session["history"].append({"role": "user", "content": msg})
+        save_session(sender, session["history"], session["status"])
+        send_message(sender, replies["تأكيد_التحويل"])
+        return jsonify({"status": "text_payment_confirmed"}), 200
+
+    # ✅ لو كل ده مش حاصل نرجع لـ GPT
+    reply = ask_chatgpt(msg, sender)
+    send_message(sender, reply)
+    return jsonify({"status": "replied"}), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
