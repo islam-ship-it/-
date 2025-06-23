@@ -16,33 +16,27 @@ CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 app = Flask(__name__)
 client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_API_BASE)
 
-
 def build_price_prompt():
     return "\n".join([
         f"- {s['platform']} | {s['type']} | {s['count']} = {s['price']} جنيه ({s['audience']})"
         for s in services
     ])
 
-
 def detect_link(text):
     return any(x in text.lower() for x in ["http", "facebook.com", "instagram.com", "tiktok.com", "youtu", "www."])
-
 
 def detect_payment(text):
     payment_keywords = ["حولت", "تم الدفع", "تم التحويل", "دفعت", "حول", "الفلوس", "رصيد", "صورة التحويل"]
     return any(word in text.lower() for word in payment_keywords)
 
-
-def detect_image(message_type):
-    return message_type == "image"
-
+def detect_image(data):
+    return data.get("type") in ["image", "media"] or "image" in str(data.get("body", "")).lower()
 
 def match_service(text):
     for s in services:
         if s["platform"].lower() in text.lower() and str(s["count"]) in text:
             return s
     return None
-
 
 def ask_chatgpt(message, sender_id):
     session = get_session(sender_id)
@@ -72,7 +66,6 @@ def ask_chatgpt(message, sender_id):
         print("❌ GPT Error:", e)
         return "⚠ في مشكلة تقنية مؤقتة. جرب تبعت تاني كمان شوية."
 
-
 def send_message(phone, message):
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
     headers = {
@@ -87,11 +80,9 @@ def send_message(phone, message):
         print("❌ ZAPI Error:", e)
         return {"status": "error", "message": str(e)}
 
-
 @app.route("/")
 def home():
     return "✅ البوت شغال"
-
 
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
@@ -110,14 +101,14 @@ def webhook():
     status = session.get("status", "idle")
 
     # ✅ 1. صورة دفع أثناء "waiting_payment"
-    if detect_image(media_type) and status == "waiting_payment":
+    if detect_image(data) and status == "waiting_payment":
         session["status"] = "completed"
         save_session(sender, session)
         send_message(sender, replies["تأكيد_التحويل"])
         return jsonify({"status": "received"}), 200
 
     # ✅ 2. صورة بدون ما نكون في مرحلة الدفع
-    if detect_image(media_type) and status != "waiting_payment":
+    if detect_image(data) and status != "waiting_payment":
         send_message(sender, replies["صورة_غير_مفهومة"])
         return jsonify({"status": "received"}), 200
 
@@ -151,7 +142,6 @@ def webhook():
     send_message(sender, reply)
 
     return jsonify({"status": "received"}), 200
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
