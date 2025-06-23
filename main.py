@@ -68,7 +68,7 @@ def ask_chatgpt(message, sender_id):
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4.1-mini",
+            model="gpt-4o",
             messages=session["history"][-10:],
             max_tokens=500
         )
