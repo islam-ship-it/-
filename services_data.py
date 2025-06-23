@@ -242,7 +242,7 @@ services = [
     {"platform": "تصميم", "type": "لوجو احترافي", "count": 1, "audience": "للبراندات أو الصفحات", "price": 150},
     {"platform": "تصميم", "type": "هوية بصرية كاملة", "count": 1, "audience": "شعار + ألوان + ستايل بوورد", "price": 500},
     {"platform": "تصميم", "type": "تصميم بوست سوشيال", "count": 1, "audience": "جرافيك احترافي جاهز للنشر", "price": 130},
-    {"platform": "تصميم", "type": "باقة بوستات شهرية", "count": 10, "audience": "تصميمات حسب المحتوى", "price": 400}
+    {"platform": "تصميم", "type": "باقة بوستات شهرية", "count": 10, "audience": "تصميمات حسب المحتوى", "price": 400},
 
        {"platform": "فيسبوك", "type": "توثيق شهري", "count": 1, "audience": "رابط الحساب فقط", "price": 220},
     {"platform": "إنستجرام", "type": "توثيق شهري", "count": 1, "audience": "رابط الحساب فقط", "price": 220},
