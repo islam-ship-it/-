@@ -1,29 +1,3 @@
-# نماذج متعددة حسب مستوى التعقيد
-MODEL_SIMPLE = "openchat/openchat-3.5"
-MODEL_MEDIUM = "anthropic/claude-3-sonnet"
-MODEL_COMPLEX = "openai/gpt-4o"
-
-
-# اختيار النموذج المناسب بناءً على محتوى الرسالة
-def choose_model(user_message):
-    user_message = user_message.lower()
-
-    # نموذج بسيط للأسئلة المباشرة
-    if any(word in user_message for word in ["سعر", "كام", "متابع", "لايك", "مشاهدة"]) and len(user_message.split()) <= 10:
-        return MODEL_SIMPLE
-
-    # نموذج متوسط لو فيها أكتر من خدمة أو تفاصيل كتيرة
-    elif any(word in user_message for word in ["و", "انستجرام", "تيك توك", "يوتيوب", "فيسبوك"]) and user_message.count("و") >= 1:
-        return MODEL_MEDIUM
-
-    # نموذج معقد لو فيها دفع أو رابط أو سيناريو متكامل
-    elif any(word in user_message for word in ["الرابط", "حولت", "ايصال", "تم الدفع", "تم التحويل"]):
-        return MODEL_COMPLEX
-
-    # افتراضي: نموذج بسيط
-    return MODEL_SIMPLE
-
-
 import os
 import re
 import requests
@@ -94,7 +68,7 @@ def ask_chatgpt(message, sender_id):
 
     try:
         response = client.chat.completions.create(
-            model=choose_model(user_message),
+            model="gpt-4.1-mini",
             messages=session["history"][-10:],
             max_tokens=500
         )
