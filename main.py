@@ -1,5 +1,3 @@
-# main.py
-
 import os
 import requests
 from flask import Flask, request, jsonify
@@ -8,7 +6,7 @@ from openai import OpenAI
 from static_replies import static_prompt, replies
 from services_data import services
 from session_storage import get_session, save_session
-from message_handler import handle_message  # ✅ تم تصحيحه
+from message_handler import handle_message  # ✅
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_API_BASE = "https://openrouter.ai/api/v1"
@@ -49,10 +47,10 @@ def ask_chatgpt(message, sender_id):
         )
         reply_text = response.choices[0].message.content.strip()
         history.append({"role": "assistant", "content": reply_text})
-        save_session(sender_id, {"history": history, "status": session["status"]})
+        save_session(sender_id, history, session["status"])
         return reply_text
     except Exception as e:
-        print("❌ Error:", e)
+        print("❌ GPT Error:", e)
         return "⚠ في مشكلة تقنية، جرب تبعت تاني بعد شوية."
 
 def send_message(phone, message):
@@ -81,10 +79,10 @@ def webhook():
     data = request.json
     msg = data.get("text", {}).get("message") or data.get("body", "")
     sender = data.get("phone") or data.get("From")
-    media_type = data.get("type")  # مثلاً: "image"
+    media_type = data.get("type") or "text"
 
     if msg and sender:
-        smart_reply = handle_message(msg, sender, media_type)  # ✅ تصحيح الاسم
+        smart_reply = handle_message(msg, sender, media_type)
 
         if smart_reply:
             send_message(sender, smart_reply)
@@ -96,3 +94,4 @@ def webhook():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
