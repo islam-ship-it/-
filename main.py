@@ -46,6 +46,16 @@ def detect_payment(text):
 def detect_image(message_type):
     return message_type == "image"
 
+
+def detect_payment_image(message_payload):
+    media_type = message_payload.get("type", "").lower()
+    caption = message_payload.get("caption", "").lower()
+    if media_type in ["image", "media"]:
+        keywords = ["وصل", "حولت", "إيصال", "تم التحويل", "تم الدفع", "صورة"]
+        return any(word in caption for word in keywords) or True
+    return False
+
+
 def match_service(text):
     for s in services:
         if s["platform"].lower() in text.lower() and str(s["count"]) in text:
