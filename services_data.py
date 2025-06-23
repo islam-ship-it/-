@@ -257,13 +257,11 @@ services = [
     {"platform": "ببجي", "type": "شحن شدات", "count": 660, "audience": "PUBG UC – شحن مباشر برابط ID", "price": 280},
     {"platform": "ببجي", "type": "شحن شدات", "count": 1800, "audience": "PUBG UC – شحن مباشر برابط ID", "price": 690},
     {"platform": "ببجي", "type": "شحن شدات", "count": 3850, "audience": "PUBG UC – شحن مباشر برابط ID", "price": 1390},
-    {"platform": "ببجي", "type": "شحن شدات", "count": 8100, "audience": "PUBG UC – شحن مباشر برابط ID", "price": 2750}
       
     {"platform": "فري فاير", "type": "شحن ألماس", "count": 100, "audience": "Free Fire – شحن مباشر برابط ID", "price": 30},
     {"platform": "فري فاير", "type": "شحن ألماس", "count": 310, "audience": "Free Fire – شحن مباشر برابط ID", "price": 90},
     {"platform": "فري فاير", "type": "شحن ألماس", "count": 520, "audience": "Free Fire – شحن مباشر برابط ID", "price": 150},
     {"platform": "فري فاير", "type": "شحن ألماس", "count": 1060, "audience": "Free Fire – شحن مباشر برابط ID", "price": 290},
-    {"platform": "فري فاير", "type": "شحن ألماس", "count": 2180, "audience": "Free Fire – شحن مباشر برابط ID", "price": 580}
 
     {"platform": "باقة اعلان ممول جاهز", "type": "باقة 3 أيام", "count": 3, "audience": "تشمل تصميم + ترويج + متابعة (بنحتاج ندخل أدمن الصفحة)", "price": 500},
     {"platform": "باقة اعلان ممول جاهز", "type": "باقة 7 أيام", "count": 7, "audience": "تشمل 3 تصميمات + إعلان + متابعة يومية (بنحتاج ندخل أدمن الصفحة)", "price": 900},
