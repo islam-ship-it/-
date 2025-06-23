@@ -2,11 +2,9 @@ import os
 import requests
 from flask import Flask, request, jsonify
 from openai import OpenAI
-
 from static_replies import static_prompt, replies
 from services_data import services
-from session_storage import get_session, save_session
-from message_handler import handle_message  # ✅
+from session_storage import get_session, save_session, reset_session
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_API_BASE = "https://openrouter.ai/api/v1"
@@ -25,9 +23,7 @@ def build_price_prompt():
     ])
 
 def ask_chatgpt(message, sender_id):
-    session = get_session(sender_id)
-    history = session["history"]
-
+    history = get_session(sender_id)
     if not history:
         history.append({
             "role": "system",
@@ -47,10 +43,10 @@ def ask_chatgpt(message, sender_id):
         )
         reply_text = response.choices[0].message.content.strip()
         history.append({"role": "assistant", "content": reply_text})
-        save_session(sender_id, history, session["status"])
+        save_session(sender_id, history)
         return reply_text
     except Exception as e:
-        print("❌ GPT Error:", e)
+        print("❌ Error:", e)
         return "⚠ في مشكلة تقنية، جرب تبعت تاني بعد شوية."
 
 def send_message(phone, message):
@@ -79,19 +75,12 @@ def webhook():
     data = request.json
     msg = data.get("text", {}).get("message") or data.get("body", "")
     sender = data.get("phone") or data.get("From")
-    media_type = data.get("type") or "text"
 
     if msg and sender:
-        smart_reply = handle_message(msg, sender, media_type)
-
-        if smart_reply:
-            send_message(sender, smart_reply)
-        else:
-            reply = ask_chatgpt(msg, sender)
-            send_message(sender, reply)
+        reply = ask_chatgpt(msg, sender)
+        send_message(sender, reply)
 
     return jsonify({"status": "received"}), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-
