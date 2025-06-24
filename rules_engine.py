@@ -1,3 +1,5 @@
+import time
+
 def get_next_action(session, message):
     status = session.get("status", "idle")
 
@@ -9,7 +11,6 @@ def get_next_action(session, message):
         return "📌 نحن في انتظار التحويل لإكمال تنفيذ طلبك."
 
     return None
-
 
 def match_service(message, services, detected_count=None):
     message = message.lower()
@@ -31,7 +32,22 @@ def match_service(message, services, detected_count=None):
                     matched.append(service)
     return matched
 
+# ✅ دالة لمنع الرد على رسائل متكررة متتالية
+def should_respond(session, threshold_seconds=10):
+    now = time.time()
+    last_time = session.get("last_message_time")
+
+    if last_time and (now - last_time) < threshold_seconds:
+        return False
+
+    session["last_message_time"] = now
+    return True
+
 def apply_rules(message, intent, session, services, replies):
+    # 💡 تجاهل الرسائل السريعة المتتالية
+    if not should_respond(session):
+        return None
+
     contextual_response = get_next_action(session, message)
     if contextual_response:
         return contextual_response
