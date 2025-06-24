@@ -1,26 +1,42 @@
-import re
+# intent_handler.py
 
-def detect_intent(message):
-    message = message.lower().strip()
+def detect_intent(message, session, message_type=None):
+    """
+    تحليل نية المستخدم بناءً على الرسالة ونوعها والسياق السابق في الجلسة
+    """
+    message = str(message).strip().lower()
 
-    # عبارات نية الطلب
-    if any(word in message for word in ['عايز', 'عاوزه', 'محتاج', 'ممكن', 'سعر', 'كام', 'تكلفة']):
-        return 'طلب_خدمة'
+    # لو دي صورة دفع والمرحلة انتظار الدفع
+    if message_type == "image" and session.get("stage") == "waiting_payment":
+        return "confirm_payment"
 
-    # نية التأكيد بعد ما يوافق
-    if any(word in message for word in ['تمام', 'موافق', 'كمل', 'اوكي', 'شغال', 'عاوز أبدأ']):
-        return 'تأكيد_طلب'
+    # لو قال دفع أو حولت
+    if message_type == "payment_text":
+        return "confirm_payment"
 
-    # نية إرسال الرابط
-    if any(link in message for link in ['http', 'www', '.com', 'facebook.com', 'instagram.com', 'tiktok.com', 'youtu']):
-        return 'رابط_الخدمة'
+    # لو بعت رابط
+    if message_type == "link":
+        return "send_link"
 
-    # نية دفع
-    if any(word in message for word in ['حولت', 'دفعت', 'تم الدفع', 'ارسلت', 'سكرين']):
-        return 'تأكيد_دفع'
+    # لو بيسأل على سعر أو خدمة
+    if any(word in message for word in [
+        "سعر", "كام", "بكام", "تكلفة", "ثمن",
+        "عايز", "عاوز", "متابعين", "لايكات", "مشاهدات",
+        "فولو", "لايك", "مشتركين", "تفاعل", "انستا", "فيس", "تيك", "يوتيوب", "سناب", "لينكد", "واتس", "كواي"
+    ]):
+        return "ask_price"
 
-    # كلمات استفسار عن الضمان أو المدة
-    if any(word in message for word in ['الضمان', 'هيقعد قد ايه', 'هيوصل امتى', 'بيبدأ امتى']):
-        return 'استفسار_عن_الضمان'
+    # لو العميل وافق
+    if any(word in message for word in [
+        "تمام", "موافق", "ماشي", "اوكي", "اوكى", "اوكيه", "كمل", "يلا", "اكمل"
+    ]):
+        return "confirm_order"
 
-    return 'غير_معروف'
+    # لو بيسأل على مدة التنفيذ
+    if any(word in message for word in [
+        "المدة", "قد إيه", "هيخلص", "بياخد وقت", "وقت التنفيذ", "هينفذ", "بتاخد وقت"
+    ]):
+        return "ask_duration"
+
+    # أي حاجة تانية تبقى متابعة عامة
+    return "followup"
