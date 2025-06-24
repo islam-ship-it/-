@@ -31,7 +31,6 @@ def match_service(message, services, detected_count=None):
                     matched.append(service)
     return matched
 
-
 def apply_rules(message, intent, session, services, replies):
     contextual_response = get_next_action(session, message)
     if contextual_response:
@@ -55,5 +54,8 @@ def apply_rules(message, intent, session, services, replies):
     if intent == "confirm_payment":
         session["status"] = "completed"
         return "✅ تم تأكيد الدفع بنجاح. سيتم تنفيذ طلبك خلال أقرب وقت، وسنوافيك بالتحديثات."
+
+    if intent == "followup":
+        return replies.get("رد_ترحيبي", "👋 أهلاً بيك! تقدر تسأل عن أي خدمات أو اسعار اقدر اساعدك ازاي.")
 
     return replies.get("رد_افتراضي", "❓ من فضلك وضّح طلبك بشكل أوضح.")
