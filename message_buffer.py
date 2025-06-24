@@ -1,37 +1,35 @@
-# message_buffer.py
-
 import time
-from threading import Timer
 
-# ذاكرة مؤقتة لتجميع الرسائل
-buffers = {}
-timers = {}
-BUFFER_TIMEOUT = 3  # عدد الثواني المنتظرة لتجميع الرسائل
+# البافر المؤقت لحفظ رسائل كل عميل
+buffer_store = {}
 
-def add_to_buffer(user_id, message, on_complete_callback):
-    """
-    إضافة رسالة إلى ذاكرة المستخدم المؤقتة مع مؤقت للتنفيذ بعد التأخير
-    """
-    if user_id not in buffers:
-        buffers[user_id] = []
+# المدة اللي ننتظرها لتجميع الرسائل (بالثواني)
+BUFFER_TIMEOUT = 3
 
-    buffers[user_id].append(message)
+def add_to_buffer(sender_id, message):
+    current_time = time.time()
+    buffer = buffer_store.get(sender_id, {"messages": [], "last_time": current_time})
 
-    if user_id in timers:
-        timers[user_id].cancel()
+    # إذا مر وقت طويل نبدأ من جديد
+    if current_time - buffer["last_time"] > BUFFER_TIMEOUT:
+        buffer = {"messages": [], "last_time": current_time}
 
-    timers[user_id] = Timer(BUFFER_TIMEOUT, flush_buffer, args=(user_id, on_complete_callback))
-    timers[user_id].start()
+    buffer["messages"].append(message)
+    buffer["last_time"] = current_time
+    buffer_store[sender_id] = buffer
 
-def flush_buffer(user_id, on_complete_callback):
-    """
-    تنفيذ الرد بعد تجميع الرسائل
-    """
-    messages = buffers.get(user_id, [])
-    full_message = "\n".join(messages).strip()
+    # لو عدى الوقت المحدد نرجع الرسائل المجمعة
+    if len(buffer["messages"]) > 1 and current_time - buffer["last_time"] >= BUFFER_TIMEOUT:
+        full_message = " ".join(buffer["messages"])
+        buffer_store[sender_id] = {"messages": [], "last_time": 0}
+        return full_message
 
-    buffers.pop(user_id, None)
-    timers.pop(user_id, None)
+    return None
 
-    if full_message:
-        on_complete_callback(user_id, full_message)
+def get_buffered_message(sender_id):
+    buffer = buffer_store.get(sender_id)
+    if buffer and buffer["messages"]:
+        full_message = " ".join(buffer["messages"])
+        buffer_store[sender_id] = {"messages": [], "last_time": 0}
+        return full_message
+    return None
