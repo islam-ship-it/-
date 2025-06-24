@@ -1,4 +1,5 @@
 import os
+print("📁 Running from:", os.getcwd())
 import re
 import time
 import requests
