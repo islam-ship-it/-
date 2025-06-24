@@ -1,4 +1,6 @@
 import os
+import link_validator
+print(link_validator.is_valid_service_link("https://facebook.com"))
 print("📁 Running from:", os.getcwd())
 import re
 import time
