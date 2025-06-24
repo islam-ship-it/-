@@ -1,4 +1,4 @@
-def is_valid_service_link(text):
+def validate_service_link(text):  # بدل is_valid_service_link
     if not text or not isinstance(text, str):
         return False
 
