@@ -1,11 +1,15 @@
 import time
+from link_validator import is_valid_service_link
 
 def get_next_action(session, message):
     status = session.get("status", "idle")
 
     if status == "waiting_link":
-        session["status"] = "waiting_payment"
-        return "✅ تم استلام الرابط بنجاح.\nيرجى الآن تحويل المبلغ لإتمام الطلب."
+        if is_valid_service_link(message):
+            session["status"] = "waiting_payment"
+            return "✅ تم استلام الرابط بنجاح.\nيرجى الآن تحويل المبلغ لإتمام الطلب."
+        else:
+            return None
 
     if status == "waiting_payment":
         return "📌 نحن في انتظار التحويل لإكمال تنفيذ طلبك."
@@ -32,7 +36,6 @@ def match_service(message, services, detected_count=None):
                     matched.append(service)
     return matched
 
-# ✅ دالة لمنع الرد على رسائل متكررة متتالية
 def should_respond(session, threshold_seconds=10):
     now = time.time()
     last_time = session.get("last_message_time")
@@ -44,7 +47,6 @@ def should_respond(session, threshold_seconds=10):
     return True
 
 def apply_rules(message, intent, session, services, replies):
-    # 💡 تجاهل الرسائل السريعة المتتالية
     if not should_respond(session):
         return None
 
@@ -75,3 +77,4 @@ def apply_rules(message, intent, session, services, replies):
         return replies.get("رد_ترحيبي", "👋 أهلاً بيك! تقدر تسأل عن أي خدمات أو اسعار اقدر اساعدك ازاي.")
 
     return replies.get("رد_افتراضي", "❓ من فضلك وضّح طلبك بشكل أوضح.")
+
