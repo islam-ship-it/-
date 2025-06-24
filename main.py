@@ -6,7 +6,7 @@ from openai import OpenAI
 from static_replies import static_prompt, replies
 from services_data import services
 from session_storage import get_session, save_session
-from intent_handler import analyze_intent
+from intent_handler import detect_intent as analyze_intent
 from rules_engine import apply_rules
 from link_validator import validate_service_link
 from message_classifier import classify_message_type
