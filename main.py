@@ -95,7 +95,7 @@ def webhook():
         return jsonify({"status": "bot inactive"}), 200
 
     # تصنيف نوع الرسالة
-    message_type = classify_message_type(msg, media_type)
+    message_type = classify_message_type(msg)
     # تحليل النية
     session = get_session(sender)
     intent = analyze_intent(msg, session, message_type)
