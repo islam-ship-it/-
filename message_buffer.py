@@ -8,7 +8,9 @@ BUFFER_TIMEOUT = 3
 
 def add_to_buffer(sender_id, message):
     current_time = time.time()
-    buffer = buffer_store.get(sender_id, {"messages": [], "last_time": current_time})
+   buffer = buffer_store.get(sender_id)
+if not buffer:
+    buffer = {"messages": [], "start_time": current_time}
 
     if current_time - buffer["last_time"] > BUFFER_TIMEOUT:
         # المدة انتهت، نرجّع الرسالة السابقة لو كانت موجودة
