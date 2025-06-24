@@ -3,6 +3,7 @@ import re
 import requests
 from flask import Flask, request, jsonify
 from openai import OpenAI
+
 from static_replies import static_prompt, replies
 from services_data import services
 from session_storage import get_session, save_session
@@ -89,12 +90,13 @@ def webhook():
     if not sender:
         return jsonify({"status": "no sender"}), 400
 
-    # التحقق من حالة البوت (مفعّل أم لا)
+    # التحقق من حالة البوت
     if not is_bot_active(sender):
         return jsonify({"status": "bot inactive"}), 200
 
     # تصنيف نوع الرسالة
     message_type = classify_message_type(msg)
+
     # تحليل النية
     session = get_session(sender)
     intent = analyze_intent(msg, session, message_type)
