@@ -1,5 +1,23 @@
 import re
 
+def classify_message_type(message):
+    """
+    تصنيف نوع الرسالة: صورة - رابط - نص عادي - تحويل
+    """
+    message = str(message).lower().strip()
+
+    if message.startswith("http") or "facebook.com" in message or "instagram.com" in message or "tiktok.com" in message:
+        return "link"
+
+    elif any(word in message for word in ["حولت", "دفعت", "تم الدفع", "تم التحويل"]):
+        return "payment_text"
+
+    elif message == "صورة":
+        return "image"
+
+    else:
+        return "text"
+        
 def validate_service_link(service_type, link):
     # لو مفيش لينك أصلاً
     if not link or not isinstance(link, str):
