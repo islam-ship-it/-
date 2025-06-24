@@ -10,7 +10,7 @@ from services_data import services
 from session_storage import get_session, save_session
 from intent_handler import detect_intent as analyze_intent
 from rules_engine import apply_rules
-from link_validator import validate_service_link
+from link_validator import is_valid_service_link
 from message_classifier import classify_message_type
 from bot_control import is_bot_active
 from model_selector import choose_model
