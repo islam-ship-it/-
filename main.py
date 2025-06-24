@@ -14,7 +14,7 @@ from link_validator import validate_service_link
 from message_classifier import classify_message_type
 from bot_control import is_bot_active
 from model_selector import choose_model
-from message_buffer import add_to_buffer, get_buffered_message
+from message_buffer import add_to_buffer
 
 # إعدادات OpenRouter
 OPENAI_API_KEY = os.getenv("OPENROUTER_API_KEY")
