@@ -1,7 +1,4 @@
 import os
-import link_validator
-print(link_validator.is_valid_service_link("https://facebook.com"))
-print("📁 Running from:", os.getcwd())
 import re
 import time
 import requests
@@ -99,19 +96,18 @@ def webhook():
     if not is_bot_active(sender):
         return jsonify({"status": "bot inactive"}), 200
 
-    # إضافة الرسالة إلى البافر
+    # تجميع الرسائل القصيرة المتتالية
     full_message = add_to_buffer(sender, msg)
-
     if not full_message:
-        # لو لسه بنجمع رسائل متتالية، لا ترد
         return jsonify({"status": "buffering"}), 200
 
-    # تصنيف نوع الرسالة المجمعة
+    # تصنيف نوع الرسالة
     message_type = classify_message_type(full_message)
 
     # تحليل النية
     session = get_session(sender)
     intent = analyze_intent(full_message, session, message_type)
+    print(f"📌 Intent: {intent}")
 
     # تطبيق القواعد الذكية
     response = apply_rules(
@@ -130,7 +126,7 @@ def webhook():
     # حفظ الجلسة
     save_session(sender, session)
 
-    # إرسال الرد النهائي
+    # إرسال الرد
     send_message(sender, response)
     return jsonify({"status": "received"}), 200
 
