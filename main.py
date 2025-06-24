@@ -1,5 +1,6 @@
 import os
 import re
+import time
 import requests
 from flask import Flask, request, jsonify
 from openai import OpenAI
@@ -13,6 +14,7 @@ from link_validator import validate_service_link
 from message_classifier import classify_message_type
 from bot_control import is_bot_active
 from model_selector import choose_model
+from message_buffer import add_to_buffer, get_buffered_message
 
 # إعدادات OpenRouter
 OPENAI_API_KEY = os.getenv("OPENROUTER_API_KEY")
@@ -94,16 +96,23 @@ def webhook():
     if not is_bot_active(sender):
         return jsonify({"status": "bot inactive"}), 200
 
-    # تصنيف نوع الرسالة
-    message_type = classify_message_type(msg)
+    # إضافة الرسالة إلى البافر
+    full_message = add_to_buffer(sender, msg)
+
+    if not full_message:
+        # لو لسه بنجمع رسائل متتالية، لا ترد
+        return jsonify({"status": "buffering"}), 200
+
+    # تصنيف نوع الرسالة المجمعة
+    message_type = classify_message_type(full_message)
+
     # تحليل النية
     session = get_session(sender)
-    intent = analyze_intent(msg, session, message_type)
-    print(f"🧠 Intent detected: {intent}")
+    intent = analyze_intent(full_message, session, message_type)
 
     # تطبيق القواعد الذكية
     response = apply_rules(
-        message=msg,
+        message=full_message,
         intent=intent,
         session=session,
         services=services,
@@ -112,7 +121,7 @@ def webhook():
 
     # اختيار النموذج المناسب
     matched_services = session.get("matched_services", [])
-    model, reason = choose_model(msg, matched_services)
+    model, reason = choose_model(full_message, matched_services)
     print(f"✅ Using model: {model} → {reason}")
 
     # حفظ الجلسة
