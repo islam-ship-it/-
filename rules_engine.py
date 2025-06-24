@@ -1,24 +1,23 @@
-from intent_handler import detect_intent
-
 def get_next_action(session, message):
-    intent = detect_intent(message)
+    status = session.get("status", "idle")
 
-    if session.get("completed"):
-        return "تم_الانتهاء"
+    if status == "waiting_link":
+        session["status"] = "waiting_payment"
+        return "تم استلام الرابط. يرجى تحويل المبلغ الآن لإتمام الطلب."
 
-    if intent == "طلب_خدمة":
-        return "عرض_السعر"
+    if status == "waiting_payment":
+        return "نحن في انتظار التحويل لإكمال الطلب."
 
-    if intent == "تأكيد_طلب" and session.get("last_step") == "عرض_السعر":
-        return "طلب_رابط"
+    return None
 
-    if intent == "رابط_الخدمة" and session.get("last_step") in ["عرض_السعر", "طلب_رابط"]:
-        return "طلب_دفع"
 
-    if intent == "تأكيد_دفع" and session.get("last_step") == "طلب_دفع":
-        return "تأكيد_نهائي"
+def apply_rules(message, intent, session, services, replies):
+    # نستخدم الدالة الذكية لتحديد الخطوة التالية من السياق
+    response = get_next_action(session, message)
 
-    if intent == "استفسار_عن_الضمان":
-        return "رد_على_الضمان"
+    # لو في رد من get_next_action نرجعه
+    if response:
+        return response
 
-    return "غير_معروف"
+    # لو مفيش، نستخدم رد افتراضي من ChatGPT أو غيره
+    return replies.get("رد_افتراضي", "هل يمكنك توضيح طلبك؟")
