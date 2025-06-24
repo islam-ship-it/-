@@ -95,11 +95,11 @@ def webhook():
         return jsonify({"status": "bot inactive"}), 200
 
     # تصنيف نوع الرسالة
-    message_type = classify_message_type(msg)
-
+    message_type = classify_message_type(msg, media_type)
     # تحليل النية
     session = get_session(sender)
     intent = analyze_intent(msg, session, message_type)
+    print(f"🧠 Intent detected: {intent}")
 
     # تطبيق القواعد الذكية
     response = apply_rules(
