@@ -8,30 +8,54 @@ from session_storage import get_session, save_session
 # إعدادات البيئة
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_API_BASE = "https://api.openai.com/v1"
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
 CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 
+# إعداد Flask app
 app = Flask(__name__)
-client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_API_BASE)
 
+# إنشاء العملاء للنموذجين
+client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_API_BASE)
+review_client = OpenAI(api_key=OPENROUTER_API_KEY, base_url=OPENROUTER_API_BASE)
+
+# دالة مراجعة الرد باستخدام OpenRouter
+def review_reply_with_openrouter(text):
+    try:
+        review_prompt = (
+            "راجع الرد التالي باللهجة المصرية، حسّن التنسيق والصياغة فقط من غير ما تغيّر أي معلومة أو سعر أو لهجة أو تفاصيل. "
+            "خلي الأسلوب احترافي وفي آخر الرد اسأل سؤال ذكي يحفز العميل ياخد الخطوة الجاية."
+        )
+        response = review_client.chat.completions.create(
+            model="openrouter/cohere/command-r-plus",
+            messages=[
+                {"role": "system", "content": review_prompt},
+                {"role": "user", "content": text}
+            ],
+            max_tokens=500
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print("❌ Review Error:", e)
+        return text  # fallback
+
+# دالة الرد الرئيسية
 def ask_chatgpt(message, sender_id):
     session = get_session(sender_id)
 
-    # system prompt مرة واحدة
     if not any(msg["role"] == "system" for msg in session["history"]):
-        system_prompt = {
+        session["history"].insert(0, {
             "role": "system",
             "content": "أنت مساعد ذكي ومحترف بتتكلم باللهجة المصرية، شغلك هو إنك ترد على استفسارات عملاء “متجر المتابعين” بكل وضوح وبشكل تفصيلي وتركز في الأسئلة الخاصة بالخدمات والأسعار وتسال سؤال تكميلي في اخر كل رساله عشان تدخل العميل في المرحله الي بعدها وتقفل معاه الديل ."
-        }
-        session["history"].insert(0, system_prompt)
+        })
 
-    # أضف رسالة المستخدم
     session["history"].append({"role": "user", "content": message})
 
     try:
-        # الرد الأول من النموذج المتدرب
+        # الرد من النموذج الأساسي
         response = client.chat.completions.create(
             model="ft:gpt-4.1-2025-04-14:boooot-waaaatsaaap:bot-shark:Bmcj13tH",
             messages=session["history"][-10:],
@@ -39,18 +63,9 @@ def ask_chatgpt(message, sender_id):
         )
         raw_reply = response.choices[0].message.content.strip()
 
-        # ✅ المراجعة الذاتية: خليه يراجع نفسه
-        review_response = client.chat.completions.create(
-            model="ft:gpt-4.1-2025-04-14:boooot-waaaatsaaap:bot-shark:Bmcj13tH",
-            messages=[
-                {"role": "system", "content": "راجع الرد التالي من حيث الأسلوب والتنسيق باللهجة المصرية، وعدّله لو محتاج تعديل بسيط. خليه يدي انطباع احترافي ويسأل سؤال تاني تكميلي زكي جدا يحول العميل ل المرحله الي بعدها."},
-                {"role": "user", "content": raw_reply}
-            ],
-            max_tokens=500
-        )
-        final_reply = review_response.choices[0].message.content.strip()
+        # مراجعة الرد
+        final_reply = review_reply_with_openrouter(raw_reply)
 
-        # سجل الرد النهائي
         session["history"].append({"role": "assistant", "content": final_reply})
         save_session(sender_id, session)
 
@@ -60,6 +75,7 @@ def ask_chatgpt(message, sender_id):
         print("❌ GPT Error:", e)
         return "⚠ في مشكلة تقنية مؤقتة. جرب تبعت تاني كمان شوية."
 
+# إرسال الرد عبر ZAPI
 def send_message(phone, message):
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
     headers = {
@@ -74,6 +90,7 @@ def send_message(phone, message):
         print("❌ ZAPI Error:", e)
         return {"status": "error", "message": str(e)}
 
+# Webhook
 @app.route("/")
 def home():
     return "✅ البوت شغال"
@@ -91,9 +108,8 @@ def webhook():
         return jsonify({"status": "no sender"}), 400
 
     reply = ask_chatgpt(msg, sender)
-    reply = reply.replace("[رقم_الكاش]", "01015654194")  # 🟢 استبدال رقم الكاش
     send_message(sender, reply)
     return jsonify({"status": "sent"}), 200
 
-if __name__ == "__main__":
+if __name__ == "__main_-_":
     app.run(host="0.0.0.0", port=5000)
