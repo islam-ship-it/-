@@ -74,6 +74,7 @@ def webhook():
         return jsonify({"status": "no sender"}), 400
 
     reply = ask_chatgpt(msg, sender)
+    reply = reply.replace("[رقم_الكاش]", "01015654194")  # 🟢 استبدال رقم الكاش
     send_message(sender, reply)
     return jsonify({"status": "sent"}), 200
 
