@@ -18,11 +18,20 @@ client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_API_BASE)
 
 def ask_chatgpt(message, sender_id):
     session = get_session(sender_id)
+
+    # إضافة system prompt مرة واحدة في بداية الجلسة
+    if not any(msg["role"] == "system" for msg in session["history"]):
+        system_prompt = {
+            "role": "system",
+            "content": "أنت مساعد ذكي ومحترف بتتكلم باللهجة المصرية، شغلك هو إنك ترد على استفسارات عملاء “متجر المتابعين” بكل وضوح وبشكل تفصيلي وتركز في الأسئلة الخاصة بالخدمات والأسعار وتسال سؤال تكميلي في اخر كل رساله عشان تدخل العميل في المرحله الي بعدها وتقفل معاه الديل ."
+        }
+        session["history"].insert(0, system_prompt)
+
     session["history"].append({"role": "user", "content": message})
 
     try:
         response = client.chat.completions.create(
-            model="ft:gpt-3.5-turbo-1106:boooot-waaaatsaaap::BmH1xi0x:ckpt-step-161",
+            model="ft:gpt-4.1-2025-04-14:boooot-waaaatsaaap:bot-shark:Bmcj13tH",
             messages=session["history"][-10:],
             max_tokens=500
         )
