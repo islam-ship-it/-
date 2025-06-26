@@ -16,7 +16,6 @@ ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
 CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 
-# إعداد Flask app
 app = Flask(__name__)
 
 # عملاء النماذج
@@ -27,8 +26,10 @@ review_client = OpenAI(api_key=OPENROUTER_API_KEY, base_url=OPENROUTER_API_BASE)
 def review_reply_with_openrouter(text):
     try:
         review_prompt = (
-    "راجع الرد التالي باللهجة المصرية من حيث التنسيق والأسلوب، بدون تغيير أي معلومة أو عرض أو لهجة. لو فيه حاجة مش واضحة وضّحها، ولو فيه خطوة ممكن العميل يعملها بعد كده وضّحها بشكل احترافي. تجنب الكلمات الطفولية أو المجاملات الزيادة. لازم يكون الرد مفيد ومقنع وبيساعد العميل يكمل المحادثة بوضوح."
-)
+            "راجع الرد التالي باللهجة المصرية من حيث التنسيق والأسلوب، بدون تغيير أي معلومة أو عرض أو لهجة. "
+            "لو فيه حاجة مش واضحة وضّحها، ولو فيه خطوة ممكن العميل يعملها بعد كده وضّحها بشكل احترافي. "
+            "تجنب الكلمات الطفولية أو المجاملات الزيادة. لازم يكون الرد مفيد ومقنع وبيساعد العميل يكمل المحادثة بوضوح."
+        )
         response = review_client.chat.completions.create(
             model="openrouter/cohere/command-r-plus",
             messages=[
@@ -37,14 +38,12 @@ def review_reply_with_openrouter(text):
             ],
             max_tokens=500
         )
-        final = response.choices[0].message.content.strip()
-        print("🔍 مراجعة الرد:", final)
-        return final
+        return response.choices[0].message.content.strip()
     except Exception as e:
         print("❌ Review Error:", e)
         return text  # fallback
 
-# الرد من النموذج الأساسي
+# الرد على الرسالة
 def ask_chatgpt(message, sender_id):
     session = get_session(sender_id)
 
@@ -57,28 +56,23 @@ def ask_chatgpt(message, sender_id):
     session["history"].append({"role": "user", "content": message})
 
     try:
-        response = client.chat.completions.create(
+        raw_response = client.chat.completions.create(
             model="ft:gpt-4.1-2025-04-14:boooot-waaaatsaaap:bot-shark:Bmcj13tH",
             messages=session["history"][-10:],
             max_tokens=500
         )
-        raw_reply = response.choices[0].message.content.strip()
-        print("🤖 الرد الأصلي:", raw_reply)
-
-        # مراجعة الرد
+        raw_reply = raw_response.choices[0].message.content.strip()
         final_reply = review_reply_with_openrouter(raw_reply)
 
-        # حفظ في الذاكرة
         session["history"].append({"role": "assistant", "content": final_reply})
         save_session(sender_id, session)
 
         return final_reply
-
     except Exception as e:
         print("❌ GPT Error:", e)
         return "⚠ في مشكلة تقنية مؤقتة. جرب تبعت تاني كمان شوية."
 
-# إرسال الرد عبر ZAPI
+# إرسال رسالة عبر ZAPI
 def send_message(phone, message):
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
     headers = {
