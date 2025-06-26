@@ -1,16 +1,13 @@
 import os
+import time
 import requests
 from flask import Flask, request, jsonify
 from openai import OpenAI
-
 from session_storage import get_session, save_session
 
-# إعدادات OpenAI
+# إعدادات البيئة
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_API_BASE = "https://api.openai.com/v1"
-FINE_TUNED_MODEL = "ft:gpt-3.5-turbo-1106:boooot-waaaatsaaap::BmH1xi0x:ckpt-step-161"
-
-# إعدادات ZAPI
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
@@ -19,23 +16,13 @@ CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 app = Flask(__name__)
 client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_API_BASE)
 
-# البرومو الجديد
-SYSTEM_PROMPT = """
-أنت مساعد ذكي ومحترف بتتكلم باللهجة المصرية، شغلك هو إنك ترد على استفسارات عملاء “متجر المتابعين”
-وتركز في الأسئلة الخاصة بالخدمات والأسعار وتسأل سؤال تكميلي في آخر كل رسالة علشان تدخل العميل في المرحلة اللي بعدها وتقفل معاه الديل.
-"""
-
 def ask_chatgpt(message, sender_id):
     session = get_session(sender_id)
-
-    if not session["history"]:
-        session["history"].append({"role": "system", "content": SYSTEM_PROMPT})
-
     session["history"].append({"role": "user", "content": message})
 
     try:
         response = client.chat.completions.create(
-            model=FINE_TUNED_MODEL,
+            model="ft:gpt-3.5-turbo-1106:boooot-waaaatsaaap::BmH1xi0x:ckpt-step-161",
             messages=session["history"][-10:],
             max_tokens=500
         )
@@ -77,10 +64,9 @@ def webhook():
     if not sender:
         return jsonify({"status": "no sender"}), 400
 
-    response = ask_chatgpt(msg, sender)
-    send_message(sender, response)
-    return jsonify({"status": "received"}), 200
+    reply = ask_chatgpt(msg, sender)
+    send_message(sender, reply)
+    return jsonify({"status": "sent"}), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-
