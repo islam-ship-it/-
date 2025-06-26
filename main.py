@@ -18,7 +18,7 @@ from message_buffer import add_to_buffer
 
 # إعدادات OpenRouter
 OPENAI_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENAI_API_BASE = "https://openrouter.ai/api/v1"
+OPENAI_API_BASE = "https://api.openai.com/v1"
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
