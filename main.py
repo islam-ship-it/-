@@ -13,12 +13,11 @@ from rules_engine import apply_rules
 from link_validator import is_valid_service_link
 from message_classifier import classify_message_type
 from bot_control import is_bot_active
-from model_selector import choose_model
 from message_buffer import add_to_buffer
 
-# إعدادات OpenRouter
-OPENAI_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENAI_API_BASE = "https://api.openai.com/v1"
+# إعدادات OpenAI
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # استخدم المتغير الرسمي
+OPENAI_API_BASE = "https://api.openai.com/v1"  # الرابط الرسمي
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
@@ -26,6 +25,9 @@ CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 
 app = Flask(__name__)
 client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_API_BASE)
+
+# النموذج المدرب من OpenAI
+FINE_TUNED_MODEL = "ft:gpt-3.5-turbo-1106:boooot-waaaatsaaap::BmH1xi0x:ckpt-step-161"
 
 def build_price_prompt():
     return "\n".join([
@@ -49,7 +51,7 @@ def ask_chatgpt(message, sender_id):
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o",
+            model=FINE_TUNED_MODEL,
             messages=session["history"][-10:],
             max_tokens=500
         )
@@ -117,11 +119,6 @@ def webhook():
         services=services,
         replies=replies
     )
-
-    # اختيار النموذج المناسب
-    matched_services = session.get("matched_services", [])
-    model, reason = choose_model(full_message, matched_services)
-    print(f"✅ Using model: {model} → {reason}")
 
     # حفظ الجلسة
     save_session(sender, session)
