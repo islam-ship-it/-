@@ -19,7 +19,7 @@ client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_API_BASE)
 def ask_chatgpt(message, sender_id):
     session = get_session(sender_id)
 
-    # إضافة system prompt مرة واحدة في بداية الجلسة
+    # system prompt مرة واحدة
     if not any(msg["role"] == "system" for msg in session["history"]):
         system_prompt = {
             "role": "system",
@@ -27,18 +27,35 @@ def ask_chatgpt(message, sender_id):
         }
         session["history"].insert(0, system_prompt)
 
+    # أضف رسالة المستخدم
     session["history"].append({"role": "user", "content": message})
 
     try:
+        # الرد الأول من النموذج المتدرب
         response = client.chat.completions.create(
             model="ft:gpt-4.1-2025-04-14:boooot-waaaatsaaap:bot-shark:Bmcj13tH",
             messages=session["history"][-10:],
             max_tokens=500
         )
-        reply_text = response.choices[0].message.content.strip()
-        session["history"].append({"role": "assistant", "content": reply_text})
+        raw_reply = response.choices[0].message.content.strip()
+
+        # ✅ المراجعة الذاتية: خليه يراجع نفسه
+        review_response = client.chat.completions.create(
+            model="ft:gpt-4.1-2025-04-14:boooot-waaaatsaaap:bot-shark:Bmcj13tH",
+            messages=[
+                {"role": "system", "content": "راجع الرد التالي من حيث الأسلوب والتنسيق باللهجة المصرية، وعدّله لو محتاج تعديل بسيط. خليه يدي انطباع احترافي ويسأل سؤال تاني تكميلي زكي جدا يحول العميل ل المرحله الي بعدها."},
+                {"role": "user", "content": raw_reply}
+            ],
+            max_tokens=500
+        )
+        final_reply = review_response.choices[0].message.content.strip()
+
+        # سجل الرد النهائي
+        session["history"].append({"role": "assistant", "content": final_reply})
         save_session(sender_id, session)
-        return reply_text
+
+        return final_reply
+
     except Exception as e:
         print("❌ GPT Error:", e)
         return "⚠ في مشكلة تقنية مؤقتة. جرب تبعت تاني كمان شوية."
