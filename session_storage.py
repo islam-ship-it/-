@@ -1,18 +1,17 @@
-# ده ملف لتخزين واسترجاع المحادثات الخاصة بكل عميل (user_id) + حالة الطلب (status)
+import os
+import json
 
-session_data = {}
+SESSIONS_FOLDER = "sessions"
+os.makedirs(SESSIONS_FOLDER, exist_ok=True)
 
 def get_session(user_id):
-    if user_id not in session_data:
-        session_data[user_id] = {
-            "history": [],
-            "status": "idle"
-        }
-    return session_data[user_id]
+    filepath = os.path.join(SESSIONS_FOLDER, f"{user_id}.json")
+    if os.path.exists(filepath):
+        with open(filepath, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"history": []}
 
-def save_session(user_id, data):
-    session_data[user_id] = data
-
-def reset_session(user_id):
-    if user_id in session_data:
-        del session_data[user_id]
+def save_session(user_id, session_data):
+    filepath = os.path.join(SESSIONS_FOLDER, f"{user_id}.json")
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(session_data, f, ensure_ascii=False, indent=2)
