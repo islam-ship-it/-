@@ -4,8 +4,8 @@ import requests
 from flask import Flask, request, jsonify
 from openai import OpenAI
 from session_storage import get_session, save_session
-from message_buffer import add_to_buffer
-from intent_handler import detect_intent
+#from message_buffer import add_to_buffer
+#from intent_handler import detect_intent
 from bot_control import is_bot_active
 
 # إعدادات OpenAI
