@@ -29,7 +29,6 @@ def review_reply_with_openrouter(text):
         review_prompt = (
     "راجع الرد التالي باللهجة المصرية من حيث التنسيق والأسلوب، بدون تغيير أي معلومة أو عرض أو لهجة. لو فيه حاجة مش واضحة وضّحها، ولو فيه خطوة ممكن العميل يعملها بعد كده وضّحها بشكل احترافي. تجنب الكلمات الطفولية أو المجاملات الزيادة. لازم يكون الرد مفيد ومقنع وبيساعد العميل يكمل المحادثة بوضوح."
 )
-        )
         response = review_client.chat.completions.create(
             model="openrouter/cohere/command-r-plus",
             messages=[
