@@ -5,7 +5,6 @@ from flask import Flask, request, jsonify
 from openai import OpenAI
 from session_storage import get_session, save_session
 from message_buffer import add_to_buffer
-from message_classifier import classify_message_type
 from intent_handler import detect_intent
 from bot_control import is_bot_active
 
