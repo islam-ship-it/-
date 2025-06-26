@@ -24,7 +24,7 @@ ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
 CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 
-app = Flask(_name_)
+app = Flask(__name__)
 client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_API_BASE)
 
 def build_price_prompt():
@@ -129,6 +129,6 @@ def webhook():
     send_message(sender, response)
     return jsonify({"status": "received"}), 200
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
 
