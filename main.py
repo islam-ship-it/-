@@ -1,5 +1,6 @@
 import os
 import time
+import json
 import requests
 from flask import Flask, request, jsonify
 from openai import OpenAI
@@ -18,11 +19,11 @@ CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 # إعداد Flask app
 app = Flask(__name__)
 
-# إنشاء العملاء للنموذجين
+# عملاء النماذج
 client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_API_BASE)
 review_client = OpenAI(api_key=OPENROUTER_API_KEY, base_url=OPENROUTER_API_BASE)
 
-# دالة مراجعة الرد باستخدام OpenRouter
+# مراجعة الرد باستخدام OpenRouter
 def review_reply_with_openrouter(text):
     try:
         review_prompt = (
@@ -37,12 +38,14 @@ def review_reply_with_openrouter(text):
             ],
             max_tokens=500
         )
-        return response.choices[0].message.content.strip()
+        final = response.choices[0].message.content.strip()
+        print("🔍 مراجعة الرد:", final)
+        return final
     except Exception as e:
         print("❌ Review Error:", e)
         return text  # fallback
 
-# دالة الرد الرئيسية
+# الرد من النموذج الأساسي
 def ask_chatgpt(message, sender_id):
     session = get_session(sender_id)
 
@@ -55,17 +58,18 @@ def ask_chatgpt(message, sender_id):
     session["history"].append({"role": "user", "content": message})
 
     try:
-        # الرد من النموذج الأساسي
         response = client.chat.completions.create(
             model="ft:gpt-4.1-2025-04-14:boooot-waaaatsaaap:bot-shark:Bmcj13tH",
             messages=session["history"][-10:],
             max_tokens=500
         )
         raw_reply = response.choices[0].message.content.strip()
+        print("🤖 الرد الأصلي:", raw_reply)
 
         # مراجعة الرد
         final_reply = review_reply_with_openrouter(raw_reply)
 
+        # حفظ في الذاكرة
         session["history"].append({"role": "assistant", "content": final_reply})
         save_session(sender_id, session)
 
@@ -111,5 +115,5 @@ def webhook():
     send_message(sender, reply)
     return jsonify({"status": "sent"}), 200
 
-if __name__ == "__main_-_":
+if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
