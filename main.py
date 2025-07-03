@@ -41,7 +41,7 @@ def ask_chatgpt(message, sender_id):
 
     try:
         raw_response = client.chat.completions.create(
-            model="ft:gpt-4.1-2025-04-14:boooot-waaaatsaaap:BotJ0nCz",
+            model="ft:gpt-4.1-2025-04-14:boooot-waaaatsaaap::BotJ0nCz",
             messages=session["history"][-10:],
             max_tokens=500
         )
