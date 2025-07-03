@@ -7,8 +7,6 @@ from session_storage import get_session, save_session
 # إعدادات البيئة
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_API_BASE = "https://api.openai.com/v1"
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
@@ -16,30 +14,8 @@ CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 
 app = Flask(__name__)
 
-# عملاء النماذج
+# عميل النموذج
 client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_API_BASE)
-review_client = OpenAI(api_key=OPENROUTER_API_KEY, base_url=OPENROUTER_API_BASE)
-
-# مراجعة الرد باستخدام GPT-4o
-def review_reply_with_gpt4o(text):
-    try:
-        review_prompt = (
-            "راجع الرد التالي باللهجة المصرية من حيث التنسيق والأسلوب، بدون تغيير أي معلومة أو عرض أو لهجة. "
-            "لو فيه حاجة مش واضحة وضّحها، ولو فيه خطوة ممكن العميل يعملها بعد كده وضّحها بشكل احترافي. "
-            "تجنب الكلمات الطفولية أو المجاملات الزيادة. لازم يكون الرد مفيد ومقنع وبيساعد العميل يكمل المحادثة بوضوح."
-        )
-        response = review_client.chat.completions.create(
-            model="openrouter/openai/gpt-4o",
-            messages=[
-                {"role": "system", "content": review_prompt},
-                {"role": "user", "content": text}
-            ],
-            max_tokens=500
-        )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        print("❌ Review Error:", e)
-        return text  # fallback
 
 # الرد على الرسالة
 def ask_chatgpt(message, sender_id):
@@ -65,17 +41,15 @@ def ask_chatgpt(message, sender_id):
 
     try:
         raw_response = client.chat.completions.create(
-            model="ft:gpt-4.1-2025-04-14:boooot-waaaatsaaap:bot-shark:Bmcj13tH",
+            model="ft:gpt-4.1-2025-04-14:boooot-waaaatsaaap:BotJ0nCz",
             messages=session["history"][-10:],
             max_tokens=500
         )
         raw_reply = raw_response.choices[0].message.content.strip()
-        final_reply = review_reply_with_gpt4o(raw_reply)
-
-        session["history"].append({"role": "assistant", "content": final_reply})
+        session["history"].append({"role": "assistant", "content": raw_reply})
         save_session(sender_id, session)
 
-        return final_reply
+        return raw_reply
     except Exception as e:
         print("❌ GPT Error:", e)
         return "⚠ في مشكلة تقنية مؤقتة. جرب تبعت تاني كمان شوية."
