@@ -30,16 +30,32 @@ def ask_chatgpt(message, sender_id):
     session["history"].append({"role": "user", "content": message})
 
     try:
-        raw_response = client.beta.assistants.messages.create(
-            assistant_id="asst_znBcj5OWBhyaXJ4nkXEJybtt",
-            thread_id=session.get("thread_id"),
-            messages=session["history"][-10:]
-        )
-        raw_reply = raw_response.data[0].content.strip()
-        session["history"].append({"role": "assistant", "content": raw_reply})
-        save_session(sender_id, session)
+        # إنشاء Thread جديد لو مش موجود
+        if "thread_id" not in session or not session.get("thread_id"):
+            thread = client.beta.threads.create()
+            session["thread_id"] = thread.id
 
-        return raw_reply
+        raw_response = client.beta.threads.messages.create(
+            thread_id=session["thread_id"],
+            role="user",
+            content=message
+        )
+
+        # استرجاع الرد النهائي
+        response = client.beta.threads.messages.list(
+            thread_id=session["thread_id"]
+        )
+
+        # التقاط آخر رد من المساعد
+        for msg in reversed(response.data):
+            if msg.role == "assistant":
+                raw_reply = msg.content[0].text.value.strip()
+                session["history"].append({"role": "assistant", "content": raw_reply})
+                save_session(sender_id, session)
+                return raw_reply
+
+        return "⚠ في مشكلة تقنية مؤقتة. جرب تبعت تاني كمان شوية."
+
     except Exception as e:
         print("❌ GPT Error:", e)
         return "⚠ في مشكلة تقنية مؤقتة. جرب تبعت تاني كمان شوية."
