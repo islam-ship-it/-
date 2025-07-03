@@ -24,28 +24,18 @@ def ask_chatgpt(message, sender_id):
     if not any(msg["role"] == "system" for msg in session["history"]):
         session["history"].insert(0, {
             "role": "system",
-            "content": "أنت مساعد ذكي ومحترف، هدفك الأساسي ترد على عملاء “متجر المتابعين” باللهجة المصرية بأسلوب واضح ومقنع. هدفك التاني إنك تساعد العميل على اتخاذ قرار الشراء وتقفل الصفقة بسرعة وباحتراف.\n"
-                       "افهم المرحلة اللي العميل فيها كويس:\n"
-                       "- لو بيسأل عن خدمة، اشرح له التفاصيل ببساطة والأسعار بدقة.\n"
-                       "- لو بعت رابط، راجعه سريعًا واطلب تحويل الكاش.\n"
-                       "- لو دفع أو بعت كاش، راجع البيانات وبلّغه بالخطوة الجاية.\n"
-                       "- لو محتار، اقترح له أقرب عرض مناسب يشجعه يبدأ.\n\n"
-                       "اتكلم بثقة، خليك سريع ومباشر، ودايمًا اختم كل رسالة بسؤال ذكي (CTA) يحرّك العميل للخطوة التالية، زي:\n"
-                       "- تحب أجهزلك الخدمة ونبدأ؟\n"
-                       "- أشرحلك طريقة الدفع؟\n"
-                       "- خلينا نبدأ بأول طلب نجرب بيه؟\n\n"
-                       "تجنّب المجاملات أو العبارات الإنشائية الكتير، وخليك دايمًا مركز على إقناع العميل وتحويله من مرحلة التعارف لاستفسار لاعتراض لإقناع لطلب لتقفيل التعامل وتاخد منه الكاش وتفاصيل الطلب."
+            "content": "أنت مساعد ذكي ومتخصص في الرد على استفسارات عملاء متجر المتابعين باللهجة المصرية. عندك ملف معرفة مرتبط يحتوي على بيانات الأسعار والخدمات. لما العميل يسأل عن الأسعار أو الخدمات، ابحث فقط في ملف المعرفة وطلع المعلومة الحقيقية الموجودة فيه. لو الخدمة اللي العميل بيسأل عنها مش موجودة في ملف المعرفة، ماتخترعش ولا تفترض إنك بتقدمها، قول بكل وضوح إن الخدمة غير متاحة حاليًا. اتكلم بأسلوب ودود ومقنع، وساعد العميل إنه ياخد قرار بسرعة ويكمل الطلب." 
         })
 
     session["history"].append({"role": "user", "content": message})
 
     try:
-        raw_response = client.chat.completions.create(
-            model="ft:gpt-4.1-2025-04-14:boooot-waaaatsaaap::BotJ0nCz",
-            messages=session["history"][-10:],
-            max_tokens=500
+        raw_response = client.beta.assistants.messages.create(
+            assistant_id="asst_znBcj5OWBhyaXJ4nkXEJybtt",
+            thread_id=session.get("thread_id"),
+            messages=session["history"][-10:]
         )
-        raw_reply = raw_response.choices[0].message.content.strip()
+        raw_reply = raw_response.data[0].content.strip()
         session["history"].append({"role": "assistant", "content": raw_reply})
         save_session(sender_id, session)
 
@@ -57,10 +47,7 @@ def ask_chatgpt(message, sender_id):
 # إرسال رسالة عبر ZAPI
 def send_message(phone, message):
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
-    headers = {
-        "Content-Type": "application/json",
-        "Client-Token": CLIENT_TOKEN
-    }
+    headers = {"Content-Type": "application/json", "Client-Token": CLIENT_TOKEN}
     payload = {"phone": phone, "message": message}
     try:
         response = requests.post(url, headers=headers, json=payload)
