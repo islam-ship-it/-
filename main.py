@@ -14,18 +14,16 @@ ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
 CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 
 app = Flask(__name__)
-
-# عميل النموذج
 client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_API_BASE)
 
-# الرد على الرسالة
+# دالة الرد من النموذج
 def ask_chatgpt(message, sender_id):
     session = get_session(sender_id)
 
     if not any(msg["role"] == "system" for msg in session["history"]):
         session["history"].insert(0, {
             "role": "system",
-            "content": "أنت مساعد ذكي ومتخصص في الرد على استفسارات عملاء متجر المتابعين باللهجة المصرية. عندك ملف معرفة مرتبط يحتوي على بيانات الأسعار والخدمات. لما العميل يسأل عن الأسعار أو الخدمات، ابحث فقط في ملف المعرفة وطلع المعلومة الحقيقية الموجودة فيه. لو الخدمة اللي العميل بيسأل عنها مش موجودة في ملف المعرفة، ماتخترعش ولا تفترض إنك بتقدمها، قول بكل وضوح إن الخدمة غير متاحة حاليًا. اتكلم بأسلوب ودود ومقنع، وساعد العميل إنه ياخد قرار بسرعة ويكمل الطلب." 
+            "content": "أنت مساعد ذكي بترد على عملاء متجر المتابعين باللهجة المصرية بطريقة ودودة."
         })
 
     session["history"].append({"role": "user", "content": message})
@@ -46,7 +44,6 @@ def ask_chatgpt(message, sender_id):
             assistant_id="asst_znBcj5OWBhyaXJ4nkXEJybtt"
         )
 
-        # الانتظار حتى يكتمل الـ Run
         while True:
             run_status = client.beta.threads.runs.retrieve(
                 thread_id=session["thread_id"],
@@ -56,9 +53,7 @@ def ask_chatgpt(message, sender_id):
                 break
             time.sleep(1)
 
-        response = client.beta.threads.messages.list(
-            thread_id=session["thread_id"]
-        )
+        response = client.beta.threads.messages.list(thread_id=session["thread_id"])
 
         for msg in reversed(response.data):
             if msg.role == "assistant":
@@ -78,6 +73,7 @@ def send_message(phone, message):
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
     headers = {"Content-Type": "application/json", "Client-Token": CLIENT_TOKEN}
     payload = {"phone": phone, "message": message}
+
     try:
         response = requests.post(url, headers=headers, json=payload)
         return response.json()
@@ -85,26 +81,21 @@ def send_message(phone, message):
         print("❌ ZAPI Error:", e)
         return {"status": "error", "message": str(e)}
 
-# Webhook
-@app.route("/")
-def home():
-    return "✅ البوت شغال"
-
-@app.route("/webhook", methods=["GET", "POST"])
+# نقطة استقبال الرسائل
+@app.route("/webhook", methods=["POST"])
 def webhook():
-    if request.method == "GET":
-        return "✅ Webhook جاهز", 200
+    data = request.get_json()
+    message = data.get("message")
+    sender_id = data.get("sender_id")
+    phone = data.get("phone")
 
-    data = request.json
-    msg = data.get("text", {}).get("message") or data.get("body", "")
-    sender = data.get("phone") or data.get("From")
+    if not message or not sender_id or not phone:
+        return jsonify({"error": "Missing data"}), 400
 
-    if not sender:
-        return jsonify({"status": "no sender"}), 400
+    reply = ask_chatgpt(message, sender_id)
+    send_message(phone, reply)
+    return jsonify({"status": "success", "reply": reply})
 
-    reply = ask_chatgpt(msg, sender)
-    send_message(sender, reply)
-    return jsonify({"status": "sent"}), 200
-
+# تشغيل التطبيق
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
