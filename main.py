@@ -1,4 +1,5 @@
 import os
+import time
 import requests
 from flask import Flask, request, jsonify
 from openai import OpenAI
@@ -30,23 +31,35 @@ def ask_chatgpt(message, sender_id):
     session["history"].append({"role": "user", "content": message})
 
     try:
-        # إنشاء Thread جديد لو مش موجود
         if "thread_id" not in session or not session.get("thread_id"):
             thread = client.beta.threads.create()
             session["thread_id"] = thread.id
 
-        raw_response = client.beta.threads.messages.create(
+        client.beta.threads.messages.create(
             thread_id=session["thread_id"],
             role="user",
             content=message
         )
 
-        # استرجاع الرد النهائي
+        run = client.beta.threads.runs.create(
+            thread_id=session["thread_id"],
+            assistant_id="asst_znBcj5OWBhyaXJ4nkXEJybtt"
+        )
+
+        # الانتظار حتى يكتمل الـ Run
+        while True:
+            run_status = client.beta.threads.runs.retrieve(
+                thread_id=session["thread_id"],
+                run_id=run.id
+            )
+            if run_status.status == "completed":
+                break
+            time.sleep(1)
+
         response = client.beta.threads.messages.list(
             thread_id=session["thread_id"]
         )
 
-        # التقاط آخر رد من المساعد
         for msg in reversed(response.data):
             if msg.role == "assistant":
                 raw_reply = msg.content[0].text.value.strip()
