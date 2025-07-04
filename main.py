@@ -47,8 +47,12 @@ def ask_assistant(message, sender_id):
         if msg.role == "assistant":
             for part in msg.content:
                 if part.type == "text" and part.text.value:
-                    clean_part = re.sub(r"\[.?\.txt.?\]", "", part.text.value).strip()
-                    latest_reply_parts.append(clean_part)
+                    clean_part = part.text.value
+                    # تنظيف من أسماء الملفات الثلاثة تحديدًا
+                    clean_part = re.sub(r"\[.?prices_offers_ready\.txt.?\]", "", clean_part)
+                    clean_part = re.sub(r"\[.?info_details_ready\.txt.?\]", "", clean_part)
+                    clean_part = re.sub(r"\[.?scenarios_ready\.txt.?\]", "", clean_part)
+                    latest_reply_parts.append(clean_part.strip())
             break
     final_reply = "\n".join(latest_reply_parts).strip()
     return final_reply if final_reply else "⚠ في مشكلة مؤقتة، حاول تاني."
