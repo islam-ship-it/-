@@ -5,19 +5,16 @@ from flask import Flask, request, jsonify
 from openai import OpenAI
 from session_storage import get_session, save_session
 
-# إعدادات البيئة
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
 CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
-
 ASSISTANT_ID = "asst_NZp1j8UmvcIXqk5GCQ4Qs52s"
 
 app = Flask(__name__)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# إرسال رسالة عبر ZAPI
 def send_message(phone, message):
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
     headers = {"Content-Type": "application/json", "Client-Token": CLIENT_TOKEN}
@@ -29,58 +26,35 @@ def send_message(phone, message):
         print("❌ ZAPI Error:", e)
         return {"status": "error", "message": str(e)}
 
-# التعامل مع المساعد والرد تلقائي
 def ask_assistant(message, sender_id):
     session = get_session(sender_id)
-
-    if "thread_id" not in session:
+    if not session.get("thread_id"):
         thread = client.beta.threads.create()
         session["thread_id"] = thread.id
         save_session(sender_id, session)
-
     thread_id = session["thread_id"]
-
-    # إضافة رسالة جديدة في نفس الجلسة
-    client.beta.threads.messages.create(
-        thread_id=thread_id,
-        role="user",
-        content=message
-    )
-
-    # تشغيل المساعد
-    run = client.beta.threads.runs.create(
-        thread_id=thread_id,
-        assistant_id=ASSISTANT_ID
-    )
-
-    # انتظار اكتمال الرد
+    client.beta.threads.messages.create(thread_id=thread_id, role="user", content=message)
+    run = client.beta.threads.runs.create(thread_id=thread_id, assistant_id=ASSISTANT_ID)
     while True:
         run_status = client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
         if run_status.status == "completed":
             break
         time.sleep(2)
-
-    # استخراج الرد الأخير من المساعد
     messages = client.beta.threads.messages.list(thread_id=thread_id)
     for msg in reversed(messages.data):
         if msg.role == "assistant":
             return msg.content[0].text.value
-
     return "⚠ في مشكلة مؤقتة، حاول تاني."
 
-# Webhook واتساب
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
         return "✅ Webhook شغال", 200
-
     data = request.json
     msg = data.get("text", {}).get("message") or data.get("body", "")
     sender = data.get("phone") or data.get("From")
-
     if not sender:
         return jsonify({"status": "no sender"}), 400
-
     reply = ask_assistant(msg, sender)
     send_message(sender, reply)
     return jsonify({"status": "sent"}), 200
