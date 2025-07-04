@@ -31,13 +31,24 @@ def send_message(phone, message):
         print("❌ ZAPI Error:", e)
         return {"status": "error", "message": str(e)}
 
+def deep_local_clean(text):
+    # فلترة عميقة لأي مرجع أو أكواد أو رموز تقنية
+    text = re.sub(r"\[.?\.txt.?\]", "", text)  # ملفات نصية
+    text = re.sub(r"\[.?prices.?\]", "", text)  # ملف أسعار
+    text = re.sub(r"\[.?info.?\]", "", text)    # ملف معلومات
+    text = re.sub(r"\[.?scenarios.?\]", "", text)  # ملف سيناريوهات
+    text = re.sub(r"\[.?†.?\]", "", text)  # مرجع من نوع †
+    text = re.sub(r"\[.*?\]", "", text)  # أي قوسين مربعين
+    text = re.sub(r"\s+", " ", text)  # مسافات زيادة
+    return text.strip()
+
 def clean_reply_with_mistral(text):
     url = f"{OPENROUTER_API_BASE}/chat/completions"
     headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
     payload = {
         "model": "mistral/mistral-7b-instruct",
         "messages": [
-            {"role": "system", "content": "مهمتك تنضف الجملة دي من أي رموز، أسماء ملفات، أكواد تقنية أو كلام إنجليزي زائد، وتخليها جاهزة للعميل باللهجة المصرية فقط:"},
+            {"role": "system", "content": "مهمتك تنضف الجملة دي من أي رموز، أسماء ملفات، أكواد تقنية أو كلام إنجليزي زائد، وتعيد صياغتها جاهزة للعميل باللهجة المصرية:"},
             {"role": "user", "content": text}
         ]
     }
@@ -47,7 +58,7 @@ def clean_reply_with_mistral(text):
         return data["choices"][0]["message"]["content"].strip()
     except Exception as e:
         print("❌ Mistral Cleaning Error:", e)
-        return text  # fallback
+        return text
 
 def ask_assistant(message, sender_id):
     session = get_session(sender_id)
@@ -70,7 +81,8 @@ def ask_assistant(message, sender_id):
             latest_reply = msg.content[0].text.value.strip()
             break
     if latest_reply:
-        return clean_reply_with_mistral(latest_reply)
+        cleaned = deep_local_clean(latest_reply)
+        return clean_reply_with_mistral(cleaned)
     return "⚠ في مشكلة مؤقتة، حاول تاني."
 
 @app.route("/webhook", methods=["GET", "POST"])
@@ -88,3 +100,4 @@ def webhook():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
