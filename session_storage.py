@@ -1,7 +1,7 @@
 import os
 import json
 
-SESSIONS_FOLDER = "sessions"
+SESSIONS_FOLDER = 'sessions'
 os.makedirs(SESSIONS_FOLDER, exist_ok=True)
 
 def get_session(user_id):
@@ -9,7 +9,7 @@ def get_session(user_id):
     if os.path.exists(filepath):
         with open(filepath, "r", encoding="utf-8") as f:
             return json.load(f)
-    return {"history": []}
+    return {"history": [], "thread_id": None}
 
 def save_session(user_id, session_data):
     filepath = os.path.join(SESSIONS_FOLDER, f"{user_id}.json")
