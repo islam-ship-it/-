@@ -42,15 +42,16 @@ def ask_assistant(message, sender_id):
             break
         time.sleep(2)
     messages = client.beta.threads.messages.list(thread_id=thread_id)
-    latest_reply = None
+    latest_reply_parts = []
     for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
         if msg.role == "assistant":
-            raw_reply = msg.content[0].text.value
-            # تنظيف الرد نهائي من أسماء الملفات والرموز
-            clean_reply = re.sub(r"\[.?\.txt.?\]", "", raw_reply).strip()
-            latest_reply = clean_reply
+            for part in msg.content:
+                if part.type == "text" and part.text.value:
+                    clean_part = re.sub(r"\[.?\.txt.?\]", "", part.text.value).strip()
+                    latest_reply_parts.append(clean_part)
             break
-    return latest_reply if latest_reply else "⚠ في مشكلة مؤقتة، حاول تاني."
+    final_reply = "\n".join(latest_reply_parts).strip()
+    return final_reply if final_reply else "⚠ في مشكلة مؤقتة، حاول تاني."
 
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
