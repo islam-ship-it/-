@@ -46,7 +46,7 @@ def ask_assistant(message, sender_id):
     for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
         if msg.role == "assistant":
             raw_reply = msg.content[0].text.value
-            # تنظيف الرد من الرموز التقنية وأسماء الملفات
+            # تنظيف الرد بالكامل من أسماء الملفات والرموز
             clean_reply = re.sub(r"\[.?\.txt.?\]", "", raw_reply).strip()
             latest_reply = clean_reply
             break
