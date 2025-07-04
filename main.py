@@ -1,4 +1,5 @@
 import os
+import time
 import requests
 from flask import Flask, request, jsonify
 from openai import OpenAI
@@ -6,61 +7,20 @@ from session_storage import get_session, save_session
 
 # إعدادات البيئة
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENAI_API_BASE = "https://api.openai.com/v1"
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
 CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 
+ASSISTANT_ID = "asst_NZp1j8UmvcIXqk5GCQ4Qs52s"
+
 app = Flask(__name__)
-
-# عميل النموذج
-client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_API_BASE)
-
-# الرد على الرسالة
-def ask_chatgpt(message, sender_id):
-    session = get_session(sender_id)
-
-    if not any(msg["role"] == "system" for msg in session["history"]):
-        session["history"].insert(0, {
-            "role": "system",
-            "content": "أنت مساعد ذكي ومحترف، هدفك الأساسي ترد على عملاء “متجر المتابعين” باللهجة المصرية بأسلوب واضح ومقنع. هدفك التاني إنك تساعد العميل على اتخاذ قرار الشراء وتقفل الصفقة بسرعة وباحتراف.\n"
-                       "افهم المرحلة اللي العميل فيها كويس:\n"
-                       "- لو بيسأل عن خدمة، اشرح له التفاصيل ببساطة والأسعار بدقة.\n"
-                       "- لو بعت رابط، راجعه سريعًا واطلب تحويل الكاش.\n"
-                       "- لو دفع أو بعت كاش، راجع البيانات وبلّغه بالخطوة الجاية.\n"
-                       "- لو محتار، اقترح له أقرب عرض مناسب يشجعه يبدأ.\n\n"
-                       "اتكلم بثقة، خليك سريع ومباشر، ودايمًا اختم كل رسالة بسؤال ذكي (CTA) يحرّك العميل للخطوة التالية، زي:\n"
-                       "- تحب أجهزلك الخدمة ونبدأ؟\n"
-                       "- أشرحلك طريقة الدفع؟\n"
-                       "- خلينا نبدأ بأول طلب نجرب بيه؟\n\n"
-                       "تجنّب المجاملات أو العبارات الإنشائية الكتير، وخليك دايمًا مركز على إقناع العميل وتحويله من مرحلة التعارف لاستفسار لاعتراض لإقناع لطلب لتقفيل التعامل وتاخد منه الكاش وتفاصيل الطلب."
-        })
-
-    session["history"].append({"role": "user", "content": message})
-
-    try:
-        raw_response = client.chat.completions.create(
-            model="ft:gpt-4.1-2025-04-14:boooot-waaaatsaaap::BotJ0nCz",
-            messages=session["history"][-10:],
-            max_tokens=500
-        )
-        raw_reply = raw_response.choices[0].message.content.strip()
-        session["history"].append({"role": "assistant", "content": raw_reply})
-        save_session(sender_id, session)
-
-        return raw_reply
-    except Exception as e:
-        print("❌ GPT Error:", e)
-        return "⚠ في مشكلة تقنية مؤقتة. جرب تبعت تاني كمان شوية."
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # إرسال رسالة عبر ZAPI
 def send_message(phone, message):
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
-    headers = {
-        "Content-Type": "application/json",
-        "Client-Token": CLIENT_TOKEN
-    }
+    headers = {"Content-Type": "application/json", "Client-Token": CLIENT_TOKEN}
     payload = {"phone": phone, "message": message}
     try:
         response = requests.post(url, headers=headers, json=payload)
@@ -69,15 +29,50 @@ def send_message(phone, message):
         print("❌ ZAPI Error:", e)
         return {"status": "error", "message": str(e)}
 
-# Webhook
-@app.route("/")
-def home():
-    return "✅ البوت شغال"
+# التعامل مع المساعد والرد تلقائي
+def ask_assistant(message, sender_id):
+    session = get_session(sender_id)
 
+    if "thread_id" not in session:
+        thread = client.beta.threads.create()
+        session["thread_id"] = thread.id
+        save_session(sender_id, session)
+
+    thread_id = session["thread_id"]
+
+    # إضافة رسالة جديدة في نفس الجلسة
+    client.beta.threads.messages.create(
+        thread_id=thread_id,
+        role="user",
+        content=message
+    )
+
+    # تشغيل المساعد
+    run = client.beta.threads.runs.create(
+        thread_id=thread_id,
+        assistant_id=ASSISTANT_ID
+    )
+
+    # انتظار اكتمال الرد
+    while True:
+        run_status = client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
+        if run_status.status == "completed":
+            break
+        time.sleep(2)
+
+    # استخراج الرد الأخير من المساعد
+    messages = client.beta.threads.messages.list(thread_id=thread_id)
+    for msg in reversed(messages.data):
+        if msg.role == "assistant":
+            return msg.content[0].text.value
+
+    return "⚠ في مشكلة مؤقتة، حاول تاني."
+
+# Webhook واتساب
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
-        return "✅ Webhook جاهز", 200
+        return "✅ Webhook شغال", 200
 
     data = request.json
     msg = data.get("text", {}).get("message") or data.get("body", "")
@@ -86,7 +81,7 @@ def webhook():
     if not sender:
         return jsonify({"status": "no sender"}), 400
 
-    reply = ask_chatgpt(msg, sender)
+    reply = ask_assistant(msg, sender)
     send_message(sender, reply)
     return jsonify({"status": "sent"}), 200
 
