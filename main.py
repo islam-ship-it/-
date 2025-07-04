@@ -45,14 +45,12 @@ def ask_assistant(message, sender_id):
     latest_reply_parts = []
     for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
         if msg.role == "assistant":
+            print("📦 الرد بالكامل اللي راجع من المساعد:")
+            print(msg)  # طباعة الرسالة كاملة لتحليلها
             for part in msg.content:
                 if part.type == "text" and part.text.value:
-                    clean_part = part.text.value
-                    # تنظيف من أسماء الملفات الثلاثة تحديدًا
-                    clean_part = re.sub(r"\[.?prices_offers_ready\.txt.?\]", "", clean_part)
-                    clean_part = re.sub(r"\[.?info_details_ready\.txt.?\]", "", clean_part)
-                    clean_part = re.sub(r"\[.?scenarios_ready\.txt.?\]", "", clean_part)
-                    latest_reply_parts.append(clean_part.strip())
+                    clean_part = re.sub(r"\[.?\.txt.?\]", "", part.text.value).strip()
+                    latest_reply_parts.append(clean_part)
             break
     final_reply = "\n".join(latest_reply_parts).strip()
     return final_reply if final_reply else "⚠ في مشكلة مؤقتة، حاول تاني."
