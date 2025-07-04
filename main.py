@@ -41,10 +41,12 @@ def ask_assistant(message, sender_id):
             break
         time.sleep(2)
     messages = client.beta.threads.messages.list(thread_id=thread_id)
-    for msg in reversed(messages.data):
+    latest_reply = None
+    for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
         if msg.role == "assistant":
-            return msg.content[0].text.value
-    return "⚠ في مشكلة مؤقتة، حاول تاني."
+            latest_reply = msg.content[0].text.value
+            break
+    return latest_reply if latest_reply else "⚠ في مشكلة مؤقتة، حاول تاني."
 
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
