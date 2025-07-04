@@ -1,5 +1,6 @@
 import os
 import time
+import re
 import requests
 from flask import Flask, request, jsonify
 from openai import OpenAI
@@ -44,7 +45,10 @@ def ask_assistant(message, sender_id):
     latest_reply = None
     for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
         if msg.role == "assistant":
-            latest_reply = msg.content[0].text.value
+            raw_reply = msg.content[0].text.value
+            # تنظيف الرد من الرموز التقنية وأسماء الملفات
+            clean_reply = re.sub(r"\[.?\.txt.?\]", "", raw_reply).strip()
+            latest_reply = clean_reply
             break
     return latest_reply if latest_reply else "⚠ في مشكلة مؤقتة، حاول تاني."
 
