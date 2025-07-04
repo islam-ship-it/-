@@ -6,12 +6,16 @@ from flask import Flask, request, jsonify
 from openai import OpenAI
 from session_storage import get_session, save_session
 
+# إعدادات البيئة
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
 CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 ASSISTANT_ID = "asst_NZp1j8UmvcIXqk5GCQ4Qs52s"
+
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 
 app = Flask(__name__)
 client = OpenAI(api_key=OPENAI_API_KEY)
@@ -26,6 +30,24 @@ def send_message(phone, message):
     except Exception as e:
         print("❌ ZAPI Error:", e)
         return {"status": "error", "message": str(e)}
+
+def clean_reply_with_mistral(text):
+    url = f"{OPENROUTER_API_BASE}/chat/completions"
+    headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
+    payload = {
+        "model": "mistral/mistral-7b-instruct",
+        "messages": [
+            {"role": "system", "content": "مهمتك تنضف الجملة دي من أي رموز، أسماء ملفات، أكواد تقنية أو كلام إنجليزي زائد، وتخليها جاهزة للعميل باللهجة المصرية فقط:"},
+            {"role": "user", "content": text}
+        ]
+    }
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        data = response.json()
+        return data["choices"][0]["message"]["content"].strip()
+    except Exception as e:
+        print("❌ Mistral Cleaning Error:", e)
+        return text  # fallback
 
 def ask_assistant(message, sender_id):
     session = get_session(sender_id)
@@ -42,18 +64,14 @@ def ask_assistant(message, sender_id):
             break
         time.sleep(2)
     messages = client.beta.threads.messages.list(thread_id=thread_id)
-    latest_reply_parts = []
+    latest_reply = None
     for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
         if msg.role == "assistant":
-            print("📦 الرد بالكامل اللي راجع من المساعد:")
-            print(msg)  # طباعة الرسالة كاملة لتحليلها
-            for part in msg.content:
-                if part.type == "text" and part.text.value:
-                    clean_part = re.sub(r"\[.?\.txt.?\]", "", part.text.value).strip()
-                    latest_reply_parts.append(clean_part)
+            latest_reply = msg.content[0].text.value.strip()
             break
-    final_reply = "\n".join(latest_reply_parts).strip()
-    return final_reply if final_reply else "⚠ في مشكلة مؤقتة، حاول تاني."
+    if latest_reply:
+        return clean_reply_with_mistral(latest_reply)
+    return "⚠ في مشكلة مؤقتة، حاول تاني."
 
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
@@ -70,4 +88,3 @@ def webhook():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-
