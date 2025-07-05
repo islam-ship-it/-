@@ -1,9 +1,9 @@
 import os
 import time
+import json
 import requests
 from flask import Flask, request, jsonify
 from openai import OpenAI
-from session_storage import get_session, save_session
 
 # إعدادات البيئة
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -15,8 +15,24 @@ ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
 CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 ASSISTANT_ID = "asst_NZp1j8UmvcIXqk5GCQ4Qs52s"
 
+SESSIONS_FOLDER = 'sessions'
+os.makedirs(SESSIONS_FOLDER, exist_ok=True)
+
 app = Flask(__name__)
 client = OpenAI(api_key=OPENAI_API_KEY)
+
+# تخزين الجلسات الدائم في ملفات منفصلة
+def get_session(user_id):
+    filepath = os.path.join(SESSIONS_FOLDER, f"{user_id}.json")
+    if os.path.exists(filepath):
+        with open(filepath, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"history": [], "thread_id": None}
+
+def save_session(user_id, session_data):
+    filepath = os.path.join(SESSIONS_FOLDER, f"{user_id}.json")
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(session_data, f, ensure_ascii=False, indent=2)
 
 @app.route("/", methods=["GET"])
 def home():
@@ -72,22 +88,29 @@ def ask_assistant(message, sender_id):
         thread = client.beta.threads.create()
         session["thread_id"] = thread.id
         save_session(sender_id, session)
+    
     thread_id = session["thread_id"]
+    
     client.beta.threads.messages.create(thread_id=thread_id, role="user", content=message)
     run = client.beta.threads.runs.create(thread_id=thread_id, assistant_id=ASSISTANT_ID)
+    
     while True:
         run_status = client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
         if run_status.status == "completed":
             break
         time.sleep(2)
+    
     messages = client.beta.threads.messages.list(thread_id=thread_id)
     latest_reply = None
+    
     for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
         if msg.role == "assistant":
             latest_reply = msg.content[0].text.value.strip()
             break
+    
     if latest_reply:
         return organize_reply(latest_reply)
+    
     return "⚠ في مشكلة مؤقتة، حاول تاني."
 
 def ask_assistant_with_image(image_url, sender_id):
@@ -96,32 +119,34 @@ def ask_assistant_with_image(image_url, sender_id):
         thread = client.beta.threads.create()
         session["thread_id"] = thread.id
         save_session(sender_id, session)
+    
     thread_id = session["thread_id"]
-
+    
     client.beta.threads.messages.create(
         thread_id=thread_id,
         role="user",
-        content=[
-            {"type": "image_url", "image_url": image_url}
-        ]
+        content=[{"type": "image_url", "image_url": image_url}]
     )
-
+    
     run = client.beta.threads.runs.create(thread_id=thread_id, assistant_id=ASSISTANT_ID)
+    
     while True:
         run_status = client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
         if run_status.status == "completed":
             break
         time.sleep(2)
-
+    
     messages = client.beta.threads.messages.list(thread_id=thread_id)
     latest_reply = None
+    
     for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
         if msg.role == "assistant":
             latest_reply = msg.content[0].text.value.strip()
             break
-
+    
     if latest_reply:
         return organize_reply(latest_reply)
+    
     return "⚠ في مشكلة مؤقتة مع معالجة الصورة، حاول تاني."
 
 @app.route("/webhook", methods=["GET", "POST"])
@@ -130,6 +155,11 @@ def webhook():
         return "✅ Webhook شغال", 200
 
     data = request.json
+    print("\n=======================")
+    print("📦 البيانات اللي جاية من ZAPI:")
+    print(data)
+    print("=======================\n")
+
     sender = data.get("phone") or data.get("From")
     if not sender:
         return jsonify({"status": "no sender"}), 400
@@ -138,6 +168,9 @@ def webhook():
     msg_type = data.get("type")
 
     if msg_type == "image":
+        print("🖼 صورة جات من العميل، بيانات الصورة:")
+        print(data.get("image", {}))
+
         media_id = data.get("image", {}).get("id")
         if media_id:
             image_url = download_image(media_id)
@@ -155,4 +188,3 @@ def webhook():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-
