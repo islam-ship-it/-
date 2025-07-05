@@ -18,6 +18,10 @@ ASSISTANT_ID = "asst_NZp1j8UmvcIXqk5GCQ4Qs52s"
 app = Flask(__name__)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+@app.route("/", methods=["GET"])
+def home():
+    return "✅ السيرفر شغال تمام!"
+
 def send_message(phone, message):
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
     headers = {"Content-Type": "application/json", "Client-Token": CLIENT_TOKEN}
