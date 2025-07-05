@@ -51,6 +51,21 @@ def organize_reply(text):
         print("❌ Organizing Error:", e)
         return text
 
+def download_image(media_id):
+    url = f"https://graph.facebook.com/v19.0/{media_id}"
+    headers = {"Authorization": f"Bearer {ZAPI_TOKEN}"}
+    try:
+        response = requests.get(url, headers=headers)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("url")
+        else:
+            print("❌ Image Download Error:", response.text)
+            return None
+    except Exception as e:
+        print("❌ Exception during image download:", e)
+        return None
+
 def ask_assistant(message, sender_id):
     session = get_session(sender_id)
     if not session.get("thread_id"):
@@ -75,18 +90,69 @@ def ask_assistant(message, sender_id):
         return organize_reply(latest_reply)
     return "⚠ في مشكلة مؤقتة، حاول تاني."
 
+def ask_assistant_with_image(image_url, sender_id):
+    session = get_session(sender_id)
+    if not session.get("thread_id"):
+        thread = client.beta.threads.create()
+        session["thread_id"] = thread.id
+        save_session(sender_id, session)
+    thread_id = session["thread_id"]
+
+    client.beta.threads.messages.create(
+        thread_id=thread_id,
+        role="user",
+        content=[
+            {"type": "image_url", "image_url": image_url}
+        ]
+    )
+
+    run = client.beta.threads.runs.create(thread_id=thread_id, assistant_id=ASSISTANT_ID)
+    while True:
+        run_status = client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
+        if run_status.status == "completed":
+            break
+        time.sleep(2)
+
+    messages = client.beta.threads.messages.list(thread_id=thread_id)
+    latest_reply = None
+    for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
+        if msg.role == "assistant":
+            latest_reply = msg.content[0].text.value.strip()
+            break
+
+    if latest_reply:
+        return organize_reply(latest_reply)
+    return "⚠ في مشكلة مؤقتة مع معالجة الصورة، حاول تاني."
+
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
         return "✅ Webhook شغال", 200
+
     data = request.json
-    msg = data.get("text", {}).get("message") or data.get("body", "")
     sender = data.get("phone") or data.get("From")
     if not sender:
         return jsonify({"status": "no sender"}), 400
-    reply = ask_assistant(msg, sender)
-    send_message(sender, reply)
-    return jsonify({"status": "sent"}), 200
+
+    msg = data.get("text", {}).get("message") or data.get("body", "")
+    msg_type = data.get("type")
+
+    if msg_type == "image":
+        media_id = data.get("image", {}).get("id")
+        if media_id:
+            image_url = download_image(media_id)
+            if image_url:
+                reply = ask_assistant_with_image(image_url, sender)
+                send_message(sender, reply)
+                return jsonify({"status": "sent"}), 200
+
+    if msg:
+        reply = ask_assistant(msg, sender)
+        send_message(sender, reply)
+        return jsonify({"status": "sent"}), 200
+
+    return jsonify({"status": "ignored"}), 200
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
