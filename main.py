@@ -109,12 +109,12 @@ def process_pending_messages(sender, name):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
-    sender = data.get("phone") or data.get("From")
-    msg = data.get("text", {}).get("message") or data.get("body", "")
-    msg_type = data.get("type", "")
-    name = data.get("pushname") or data.get("senderName") or data.get("profileName") or ""
+    print(f"\n📥 البيانات الكاملة:\n{json.dumps(data, ensure_ascii=False, indent=2)}")
 
-    print(f"\n📥 بيانات كاملة للرسالة:\n{json.dumps(data, ensure_ascii=False, indent=2)}")
+    sender = data.get("phone") or data.get("From")
+    msg_type = data.get("type", "")
+    msg = data.get("text", {}).get("message") or data.get("body", "")
+    name = data.get("pushname") or data.get("senderName") or data.get("profileName") or ""
 
     if not sender:
         return jsonify({"status": "no sender"}), 400
@@ -124,25 +124,24 @@ def webhook():
         send_message(sender, "✅ طلبك تحت التنفيذ بالفعل، نرجو الانتظار.")
         return jsonify({"status": "blocked"}), 200
 
-    # معالجة الصور بناءً على الرابط الظاهر
-    if msg_type == "image":
-        image_data = data.get("image", {})
-        image_url = image_data.get("url") or data.get("imageUrl")
-        caption = image_data.get("caption", "") or msg
+    ### معالجة الصور بأي شكل
+    image_url = None
 
-        if image_url:
-            print(f"✅ تم استقبال صورة بالرابط المباشر:\n{image_url}\nتعليق الصورة: {caption}")
+    # روابط مباشرة للصور لو موجودة في الداتا
+    if "imageUrl" in data:
+        image_url = data["imageUrl"]
+    elif "image" in data and "url" in data["image"]:
+        image_url = data["image"]["url"]
 
-            message_content = f"العميل أرسل صورة: {image_url}"
-            if caption:
-                message_content += f"\nتعليق الصورة: {caption}"
+    if image_url:
+        print(f"✅ تم استقبال صورة بالرابط:\n{image_url}")
+        caption = data.get("image", {}).get("caption", "") or msg or "لا يوجد تعليق"
 
-            ask_assistant(message_content, sender, name)
-            return jsonify({"status": "image processed"}), 200
-        else:
-            print("⚠ لم يتم العثور على رابط الصورة في البيانات.")
-            return jsonify({"status": "no image url"}), 200
+        msg_content = f"العميل أرسل صورة:\n{image_url}\nتعليق: {caption}"
+        ask_assistant(msg_content, sender, name)
+        return jsonify({"status": "image processed"}), 200
 
+    ### باقي الرسائل النصية العادية
     if msg:
         if sender not in pending_messages:
             pending_messages[sender] = []
