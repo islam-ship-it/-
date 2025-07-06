@@ -4,6 +4,7 @@ import json
 import requests
 from flask import Flask, request, jsonify
 from openai import OpenAI
+from pymongo import MongoClient
 
 # إعدادات البيئة
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -15,28 +16,33 @@ ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
 CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 ASSISTANT_ID = "asst_NZp1j8UmvcIXqk5GCQ4Qs52s"
 
-SESSIONS_FOLDER = 'sessions'
-os.makedirs(SESSIONS_FOLDER, exist_ok=True)
+# رابط اتصال MongoDB
+MONGO_URI = "mongodb+srv://islamtamersa3ed:L0oeAr8FJaVKMJK2@cluster0.xe3tl2p.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+client_db = MongoClient(MONGO_URI)
+db = client_db["whatsapp_bot"]
+sessions_collection = db["sessions"]
 
 app = Flask(__name__)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# تخزين الجلسات الدائم في ملفات منفصلة
+
+# تخزين الجلسات في MongoDB
 def get_session(user_id):
-    filepath = os.path.join(SESSIONS_FOLDER, f"{user_id}.json")
-    if os.path.exists(filepath):
-        with open(filepath, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {"history": [], "thread_id": None}
+    session = sessions_collection.find_one({"_id": user_id})
+    if session:
+        return session
+    return {"_id": user_id, "history": [], "thread_id": None}
+
 
 def save_session(user_id, session_data):
-    filepath = os.path.join(SESSIONS_FOLDER, f"{user_id}.json")
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(session_data, f, ensure_ascii=False, indent=2)
+    session_data["_id"] = user_id
+    sessions_collection.replace_one({"_id": user_id}, session_data, upsert=True)
+
 
 @app.route("/", methods=["GET"])
 def home():
     return "✅ السيرفر شغال تمام!"
+
 
 def send_message(phone, message):
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
@@ -48,6 +54,7 @@ def send_message(phone, message):
     except Exception as e:
         print("❌ ZAPI Error:", e)
         return {"status": "error", "message": str(e)}
+
 
 def organize_reply(text):
     url = f"{OPENROUTER_API_BASE}/chat/completions"
@@ -67,6 +74,7 @@ def organize_reply(text):
         print("❌ Organizing Error:", e)
         return text
 
+
 def download_image(media_id):
     url = f"https://graph.facebook.com/v19.0/{media_id}"
     headers = {"Authorization": f"Bearer {ZAPI_TOKEN}"}
@@ -82,36 +90,35 @@ def download_image(media_id):
         print("❌ Exception during image download:", e)
         return None
 
+
 def ask_assistant(message, sender_id):
     session = get_session(sender_id)
     if not session.get("thread_id"):
         thread = client.beta.threads.create()
         session["thread_id"] = thread.id
         save_session(sender_id, session)
-    
+
     thread_id = session["thread_id"]
-    
     client.beta.threads.messages.create(thread_id=thread_id, role="user", content=message)
+
     run = client.beta.threads.runs.create(thread_id=thread_id, assistant_id=ASSISTANT_ID)
-    
     while True:
         run_status = client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
         if run_status.status == "completed":
             break
         time.sleep(2)
-    
+
     messages = client.beta.threads.messages.list(thread_id=thread_id)
     latest_reply = None
-    
     for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
         if msg.role == "assistant":
             latest_reply = msg.content[0].text.value.strip()
             break
-    
+
     if latest_reply:
         return organize_reply(latest_reply)
-    
     return "⚠ في مشكلة مؤقتة، حاول تاني."
+
 
 def ask_assistant_with_image(image_url, sender_id):
     session = get_session(sender_id)
@@ -119,35 +126,32 @@ def ask_assistant_with_image(image_url, sender_id):
         thread = client.beta.threads.create()
         session["thread_id"] = thread.id
         save_session(sender_id, session)
-    
+
     thread_id = session["thread_id"]
-    
     client.beta.threads.messages.create(
         thread_id=thread_id,
         role="user",
         content=[{"type": "image_url", "image_url": image_url}]
     )
-    
+
     run = client.beta.threads.runs.create(thread_id=thread_id, assistant_id=ASSISTANT_ID)
-    
     while True:
         run_status = client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
         if run_status.status == "completed":
             break
         time.sleep(2)
-    
+
     messages = client.beta.threads.messages.list(thread_id=thread_id)
     latest_reply = None
-    
     for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
         if msg.role == "assistant":
             latest_reply = msg.content[0].text.value.strip()
             break
-    
+
     if latest_reply:
         return organize_reply(latest_reply)
-    
     return "⚠ في مشكلة مؤقتة مع معالجة الصورة، حاول تاني."
+
 
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
@@ -185,6 +189,7 @@ def webhook():
         return jsonify({"status": "sent"}), 200
 
     return jsonify({"status": "ignored"}), 200
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
