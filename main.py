@@ -2,6 +2,7 @@ import os
 import time
 import json
 import requests
+import threading
 from flask import Flask, request, jsonify
 from openai import OpenAI
 from pymongo import MongoClient
@@ -25,6 +26,9 @@ sessions_collection = db["sessions"]
 app = Flask(__name__)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+# تخزين مؤقت للرسائل
+pending_messages = {}
+timers = {}
 
 # الكلمات المفتاحية اللي بتأكد إن الطلب اتنفذ أو الدفع وصل
 confirmation_keywords = [
@@ -85,11 +89,9 @@ def send_message(phone, message):
     headers = {"Content-Type": "application/json", "Client-Token": CLIENT_TOKEN}
     payload = {"phone": phone, "message": message}
     try:
-        response = requests.post(url, headers=headers, json=payload)
-        return response.json()
+        requests.post(url, headers=headers, json=payload)
     except Exception as e:
-        print("❌ ZAPI Error:", e)
-        return {"status": "error", "message": str(e)}
+        print(f"❌ ZAPI Error: {e}")
 
 
 def organize_reply(text):
@@ -106,7 +108,7 @@ def organize_reply(text):
         response = requests.post(url, headers=headers, json=payload, timeout=10)
         return response.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
-        print("❌ Organizing Error:", e)
+        print(f"❌ Organizing Error: {e}")
         return text
 
 
@@ -126,10 +128,7 @@ def ask_assistant(message, sender_id, name=""):
     save_session(sender_id, session)
 
     intro = f"أنت تتعامل مع عميل اسمه: {session['name'] or 'غير معروف'}، رقمه: {sender_id}. هذه الرسالة رقم {session['message_count']} من العميل."
-    full_message = f"{intro}\n\nالرسالة: {message}"
-
-    print(f"📨 رسالة جديدة من: {sender_id} - الاسم: {session['name']}")
-    print(f"🔢 عدد الرسائل: {session['message_count']}")
+    full_message = f"{intro}\n\nالرسالة:\n{message}"
 
     client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", content=full_message)
     run = client.beta.threads.runs.create(thread_id=session["thread_id"], assistant_id=ASSISTANT_ID)
@@ -147,24 +146,31 @@ def ask_assistant(message, sender_id, name=""):
 
             if any(kw in reply for kw in confirmation_keywords):
                 block_client_24h(sender_id)
-                reply += "\n✅ تم استقبال طلبك، نرجو الانتظار حتى انتهاء التنفيذ لمدة 24 ساعة."
+                reply += "\n✅ تم استقبال طلبك، برجاء الانتظار حتى انتهاء التنفيذ ."
 
             return organize_reply(reply)
 
     return "⚠ حصلت مشكلة مؤقتة، حاول تاني."
 
 
+def process_pending_messages(sender, name):
+    time.sleep(8)  # تجميع الرسائل 5 ثواني
+    combined = "\n".join(pending_messages[sender])
+    reply = ask_assistant(combined, sender, name)
+    send_message(sender, reply)
+    pending_messages[sender] = []
+    timers.pop(sender, None)
+
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
-    print("\n📥 بيانات ZAPI:", data)
-
     sender = data.get("phone") or data.get("From")
     msg = data.get("text", {}).get("message") or data.get("body", "")
     msg_type = data.get("type", "")
     name = data.get("pushname") or data.get("senderName") or data.get("profileName") or ""
 
-    if not sender:
+    if not sender or not msg:
         return jsonify({"status": "no sender"}), 400
 
     session = get_session(sender)
@@ -176,12 +182,16 @@ def webhook():
             send_message(sender, "✅ تم استقبال طلبك، نرجو الانتظار حتى انتهاء التنفيذ.")
             return jsonify({"status": "blocked"}), 200
 
-    if msg:
-        reply = ask_assistant(msg, sender, name)
-        send_message(sender, reply)
-        return jsonify({"status": "sent"}), 200
+    if sender not in pending_messages:
+        pending_messages[sender] = []
 
-    return jsonify({"status": "ignored"}), 200
+    pending_messages[sender].append(msg)
+
+    if sender not in timers:
+        timers[sender] = threading.Thread(target=process_pending_messages, args=(sender, name))
+        timers[sender].start()
+
+    return jsonify({"status": "received"}), 200
 
 
 if __name__ == "__main__":
