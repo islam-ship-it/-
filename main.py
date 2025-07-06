@@ -8,6 +8,7 @@ from openai import OpenAI
 from pymongo import MongoClient
 from datetime import datetime, timedelta
 
+# إعدادات البيئة
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
@@ -43,15 +44,17 @@ def get_session(user_id):
 def save_session(user_id, session_data):
     session_data["_id"] = user_id
     sessions_collection.replace_one({"_id": user_id}, session_data, upsert=True)
+    print(f"💾 تم حفظ بيانات الجلسة للعميل {user_id}.")
 
 def block_client_24h(user_id):
     session = get_session(user_id)
     session["block_until"] = (datetime.utcnow() + timedelta(hours=24)).isoformat()
     save_session(user_id, session)
+    print(f"🚫 العميل {user_id} تم حظره من الرد لمدة 24 ساعة.")
 
 @app.route("/", methods=["GET"])
 def home():
-    return "â Ø§ÙØ³ÙØ±ÙØ± Ø´ØºØ§Ù ØªÙØ§Ù!"
+    return "✅ السيرفر شغال تمام!"
 
 def send_message(phone, message):
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
@@ -59,18 +62,24 @@ def send_message(phone, message):
     payload = {"phone": phone, "message": message}
     try:
         response = requests.post(url, headers=headers, json=payload)
-    except:
-        pass
+        print(f"📤 تم إرسال رسالة للعميل {phone}، الحالة: {response.status_code}")
+    except Exception as e:
+        print(f"❌ خطأ أثناء إرسال الرسالة: {e}")
 
 def download_image(media_id):
     url = f"https://graph.facebook.com/v19.0/{media_id}"
     headers = {"Authorization": f"Bearer {ZAPI_TOKEN}"}
+    print(f"📥 محاولة تحميل الصورة من الرابط: {url}")
     try:
         response = requests.get(url, headers=headers)
         if response.status_code == 200:
-            return response.json().get("url")
-    except:
-        pass
+            image_url = response.json().get("url")
+            print(f"✅ رابط الصورة المستلم: {image_url}")
+            return image_url
+        else:
+            print(f"❌ فشل تحميل الصورة، الكود: {response.status_code}, التفاصيل: {response.text}")
+    except Exception as e:
+        print(f"❌ خطأ أثناء تحميل الصورة: {e}")
     return None
 
 def ask_assistant(message, sender_id, name=""):
@@ -86,8 +95,10 @@ def ask_assistant(message, sender_id, name=""):
     session["history"] = session["history"][-10:]
     save_session(sender_id, session)
 
-    intro = f"Ø¹ÙÙÙ Ø§Ø³ÙÙ: {session['name'] or 'ØºÙØ± ÙØ¹Ø±ÙÙ'}, Ø±ÙÙÙ: {sender_id}."
+    intro = f"عميل اسمه: {session['name'] or 'غير معروف'}, رقمه: {sender_id}."
     full_message = f"{intro}\n{message}"
+
+    print(f"📨 إرسال للمساعد:\n{full_message}")
 
     client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", content=full_message)
     run = client.beta.threads.runs.create(thread_id=session["thread_id"], assistant_id=ASSISTANT_ID)
@@ -102,19 +113,24 @@ def ask_assistant(message, sender_id, name=""):
     for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
         if msg.role == "assistant":
             reply = msg.content[0].text.value.strip()
+            print(f"💬 رد المساعد:\n{reply}")
+
             if "##BLOCK_CLIENT_24H##" in reply:
                 block_client_24h(sender_id)
-                return "â Ø·ÙØ¨Ù ØªØ­Øª Ø§ÙØªÙÙÙØ°Ø Ø§ÙØªØ¸Ø± 24 Ø³Ø§Ø¹Ø©."
+                return "✅ تم استقبال طلبك، نرجو الانتظار حتى انتهاء التنفيذ."
+
             return reply
-    return "â  Ø­ØµÙØª ÙØ´ÙÙØ© ÙØ¤ÙØªØ©."
+    return "⚠ مشكلة مؤقتة، حاول مرة أخرى."
 
 def process_pending_messages(sender, name):
+    print(f"⏳ تجميع رسائل العميل {sender} لمدة 8 ثواني.")
     time.sleep(8)
     combined = "\n".join(pending_messages[sender])
     reply = ask_assistant(combined, sender, name)
     send_message(sender, reply)
     pending_messages[sender] = []
     timers.pop(sender, None)
+    print(f"🎯 الرد تم على جميع رسائل {sender}.")
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -124,21 +140,28 @@ def webhook():
     msg_type = data.get("type", "")
     name = data.get("pushname") or data.get("senderName") or data.get("profileName") or ""
 
+    print(f"\n📥 استقبال رسالة جديدة:\nرقم العميل: {sender}\nنوع الرسالة: {msg_type}\nمحتوى:\n{msg}")
+
     if not sender:
         return jsonify({"status": "no sender"}), 400
 
     session = get_session(sender)
     if session.get("block_until") and datetime.utcnow() < datetime.fromisoformat(session["block_until"]):
-        send_message(sender, "â Ø·ÙØ¨Ù Ø¨Ø§ÙÙØ¹Ù ØªØ­Øª Ø§ÙØªÙÙÙØ°Ø ÙØ±Ø¬Ù Ø§ÙØ§ÙØªØ¸Ø§Ø±.")
+        print(f"🚫 العميل {sender} في فترة الحظر.")
+        send_message(sender, "✅ تم استقبال طلبك بالفعل، نرجو الانتظار حتى انتهاء التنفيذ.")
         return jsonify({"status": "blocked"}), 200
 
     if msg_type == "image":
         media_id = data.get("image", {}).get("id")
         caption = data.get("image", {}).get("caption", "")
+        print(f"🖼 صورة مستلمة من العميل، معرف الصورة: {media_id}, التعليق: {caption}")
+
         if media_id:
             image_url = download_image(media_id)
             if image_url:
-                ask_assistant(f"ØµÙØ±Ø© ÙÙ Ø§ÙØ¹ÙÙÙ: {image_url}\nØªØ¹ÙÙÙ: {caption}", sender, name)
+                message = f"رابط الصورة: {image_url}\nتعليق العميل: {caption}"
+                reply = ask_assistant(message, sender, name)
+                send_message(sender, reply)
                 return jsonify({"status": "image processed"}), 200
 
     if msg:
@@ -154,4 +177,3 @@ def webhook():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-
