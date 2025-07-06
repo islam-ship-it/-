@@ -9,7 +9,7 @@ from pymongo import MongoClient
 # إعدادات البيئة
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_API_BASE = os.getenv("OPENROUTER_API_BASE", "https://openrouter.ai/api/v1")
+OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
@@ -17,13 +17,45 @@ CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 ASSISTANT_ID = os.getenv("ASSISTANT_ID")
 MONGO_URI = os.getenv("MONGO_URI")
 
-# اتصال MongoDB
 client_db = MongoClient(MONGO_URI)
 db = client_db["whatsapp_bot"]
 sessions_collection = db["sessions"]
 
 app = Flask(__name__)
 client = OpenAI(api_key=OPENAI_API_KEY)
+
+
+# كشف إعدادات البيئة واختبار الاتصال
+def check_environment():
+    print("\n=======================")
+    print("✅ فحص الإعدادات والمتغيرات البيئية:")
+    
+    keys = [
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "ZAPI_BASE_URL",
+        "ZAPI_INSTANCE_ID",
+        "ZAPI_TOKEN",
+        "CLIENT_TOKEN",
+        "ASSISTANT_ID",
+        "MONGO_URI"
+    ]
+    
+    for key in keys:
+        value = os.getenv(key)
+        if value:
+            print(f"✔ {key} = موجود ✅")
+        else:
+            print(f"❌ {key} = ناقص أو مش متسجل ❗")
+
+    try:
+        client_db.server_info()
+        print("✅ تم الاتصال بقاعدة البيانات MongoDB بنجاح!")
+    except Exception as e:
+        print(f"❌ فشل الاتصال بـ MongoDB: {e}")
+
+    print("=======================\n")
+
 
 # تخزين الجلسات
 def get_session(user_id):
@@ -191,4 +223,5 @@ def webhook():
 
 
 if __name__ == "__main__":
+    check_environment()
     app.run(host="0.0.0.0", port=5000)
