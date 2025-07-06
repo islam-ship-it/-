@@ -5,7 +5,6 @@ import requests
 from flask import Flask, request, jsonify
 from openai import OpenAI
 from pymongo import MongoClient
-from datetime import datetime
 
 # إعدادات البيئة
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -26,23 +25,31 @@ app = Flask(__name__)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 
+# إدارة الجلسات
 def get_session(user_id):
     session = sessions_collection.find_one({"_id": user_id})
-    if session:
-        return session
-    return {
-        "_id": user_id,
-        "history": [],
-        "thread_id": None,
-        "name": None,
-        "message_count": 0,
-        "first_message_date": None
-    }
+    if not session:
+        session = {"_id": user_id, "history": [], "thread_id": None, "message_count": 0, "name": ""}
+    else:
+        if "history" not in session:
+            session["history"] = []
+        if "thread_id" not in session:
+            session["thread_id"] = None
+        if "message_count" not in session:
+            session["message_count"] = 0
+        if "name" not in session:
+            session["name"] = ""
+    return session
 
 
 def save_session(user_id, session_data):
     session_data["_id"] = user_id
     sessions_collection.replace_one({"_id": user_id}, session_data, upsert=True)
+
+
+@app.route("/", methods=["GET"])
+def home():
+    return "✅ السيرفر شغال تمام!"
 
 
 def send_message(phone, message):
@@ -63,168 +70,75 @@ def organize_reply(text):
     payload = {
         "model": "mistral/mistral-7b-instruct",
         "messages": [
-            {"role": "system", "content": "نظملي الرد بشكل احترافي مع الرموز ✅ 🔹 💬."},
+            {"role": "system", "content": "من فضلك نظملي الرسالة بشكل احترافي، استخدم رموز (✅ 🔹 💳)، خلي كل معلومة بسطر واضح."},
             {"role": "user", "content": text}
         ]
     }
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=10)
-        return response.json()["choices"][0]["message"]["content"].strip()
+        data = response.json()
+        return data["choices"][0]["message"]["content"].strip()
     except Exception as e:
         print("❌ Organizing Error:", e)
         return text
 
 
-def download_image(media_id):
-    url = f"https://graph.facebook.com/v19.0/{media_id}"
-    headers = {"Authorization": f"Bearer {ZAPI_TOKEN}"}
-    try:
-        response = requests.get(url, headers=headers)
-        if response.status_code == 200:
-            return response.json().get("url")
-        else:
-            print("❌ Image Download Error:", response.text)
-    except Exception as e:
-        print("❌ Exception during image download:", e)
-    return None
-
-
-def ask_assistant(message, sender_id, sender_name=None):
+def ask_assistant(message, sender_id, name=""):
     session = get_session(sender_id)
-    
-    if not session.get("thread_id"):
-        thread = client.beta.threads.create()
-        session["thread_id"] = thread.id
 
-    if sender_name and not session.get("name"):
-        session["name"] = sender_name
-
-    session["message_count"] += 1
-    if not session.get("first_message_date"):
-        session["first_message_date"] = datetime.utcnow().isoformat()
-
-    history = session.get("history", [])
-    last_messages = history[-10:]
-
-    context_history = "\n".join([
-        f"{msg['role'].capitalize()}: {msg['content']}" for msg in last_messages
-    ])
-
-    context_message = (
-        f"بيانات العميل:\n"
-        f"- الاسم: {session.get('name') or 'غير معروف'}\n"
-        f"- الرقم: {sender_id}\n"
-        f"- عدد مرات التواصل السابقة: {session['message_count'] - 1}\n"
-        f"- تاريخ أول تواصل: {session.get('first_message_date')}\n"
-        f"\nسياق آخر المحادثة:\n{context_history}\n"
-        f"\nالرسالة الجديدة:\n{message}"
-    )
-
-    session.setdefault("history", []).append({"role": "user", "content": message})
-    save_session(sender_id, session)
-
-    thread_id = session["thread_id"]
-    client.beta.threads.messages.create(thread_id=thread_id, role="user", content=context_message)
-
-    run = client.beta.threads.runs.create(thread_id=thread_id, assistant_id=ASSISTANT_ID)
-    while True:
-        if client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id).status == "completed":
-            break
-        time.sleep(2)
-
-    for msg in sorted(client.beta.threads.messages.list(thread_id=thread_id).data, key=lambda x: x.created_at, reverse=True):
-        if msg.role == "assistant":
-            reply = msg.content[0].text.value.strip()
-            session["history"].append({"role": "assistant", "content": reply})
-            save_session(sender_id, session)
-            return organize_reply(reply)
-
-    return "⚠ في مشكلة مؤقتة، حاول تاني."
-
-
-def ask_assistant_with_image(image_url, sender_id, sender_name=None):
-    session = get_session(sender_id)
+    # تسجيل الاسم لو مش موجود
+    if name and not session.get("name"):
+        session["name"] = name
 
     if not session.get("thread_id"):
         thread = client.beta.threads.create()
         session["thread_id"] = thread.id
 
-    if sender_name and not session.get("name"):
-        session["name"] = sender_name
-
+    # تحديث بيانات الجلسة
     session["message_count"] += 1
-    if not session.get("first_message_date"):
-        session["first_message_date"] = datetime.utcnow().isoformat()
-
-    history = session.get("history", [])
-    last_messages = history[-10:]
-
-    context_history = "\n".join([
-        f"{msg['role'].capitalize()}: {msg['content']}" for msg in last_messages
-    ])
-
-    context_message = (
-        f"بيانات العميل:\n"
-        f"- الاسم: {session.get('name') or 'غير معروف'}\n"
-        f"- الرقم: {sender_id}\n"
-        f"- عدد مرات التواصل السابقة: {session['message_count'] - 1}\n"
-        f"- تاريخ أول تواصل: {session.get('first_message_date')}\n"
-        f"\nسياق آخر المحادثة:\n{context_history}\n"
-        f"\nالعميل أرسل الصورة التالية: {image_url}"
-    )
-
-    session.setdefault("history", []).append({"role": "user", "content": f"[صورة] {image_url}"})
+    session["history"].append({"role": "user", "content": message})
     save_session(sender_id, session)
 
-    thread_id = session["thread_id"]
-    client.beta.threads.messages.create(thread_id=thread_id, role="user", content=context_message)
+    # تجهيز محتوى للمساعد مع بيانات إضافية
+    intro = f"أنت تتعامل مع عميل اسمه: {session['name'] or 'غير معروف'}، رقمه: {sender_id}. هذه الرسالة رقم {session['message_count']} من العميل."
+    full_message = f"{intro}\n\nالرسالة: {message}"
 
-    run = client.beta.threads.runs.create(thread_id=thread_id, assistant_id=ASSISTANT_ID)
+    client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", content=full_message)
+    run = client.beta.threads.runs.create(thread_id=session["thread_id"], assistant_id=ASSISTANT_ID)
+
     while True:
-        if client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id).status == "completed":
+        run_status = client.beta.threads.runs.retrieve(thread_id=session["thread_id"], run_id=run.id)
+        if run_status.status == "completed":
             break
         time.sleep(2)
 
-    for msg in sorted(client.beta.threads.messages.list(thread_id=thread_id).data, key=lambda x: x.created_at, reverse=True):
+    messages = client.beta.threads.messages.list(thread_id=session["thread_id"])
+    for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
         if msg.role == "assistant":
             reply = msg.content[0].text.value.strip()
-            session["history"].append({"role": "assistant", "content": reply})
-            save_session(sender_id, session)
             return organize_reply(reply)
+    return "⚠ حصلت مشكلة مؤقتة، حاول تاني."
 
-    return "⚠ في مشكلة مؤقتة مع معالجة الصورة، حاول تاني."
 
-
-@app.route("/webhook", methods=["GET", "POST"])
+@app.route("/webhook", methods=["POST"])
 def webhook():
-    if request.method == "GET":
-        return "✅ Webhook شغال", 200
-
     data = request.json
+    print("\n📥 بيانات ZAPI:", data)
+
     sender = data.get("phone") or data.get("From")
-    sender_name = data.get("pushname") or data.get("name") or None
-
     msg = data.get("text", {}).get("message") or data.get("body", "")
-    msg_type = data.get("type")
+    msg_type = data.get("type", "")
+    name = data.get("pushname", "")
 
-    if msg_type == "image":
-        media_id = data.get("image", {}).get("id")
-        if media_id:
-            image_url = download_image(media_id)
-            if image_url:
-                send_message(sender, ask_assistant_with_image(image_url, sender, sender_name))
-                return jsonify({"status": "sent"}), 200
+    if not sender:
+        return jsonify({"status": "no sender"}), 400
 
     if msg:
-        send_message(sender, ask_assistant(msg, sender, sender_name))
+        reply = ask_assistant(msg, sender, name)
+        send_message(sender, reply)
         return jsonify({"status": "sent"}), 200
 
     return jsonify({"status": "ignored"}), 200
-
-
-@app.route("/", methods=["GET"])
-def home():
-    return "✅ السيرفر شغال تمام!"
 
 
 if __name__ == "__main__":
