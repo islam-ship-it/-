@@ -17,16 +17,15 @@ CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 ASSISTANT_ID = os.getenv("ASSISTANT_ID")
 MONGO_URI = os.getenv("MONGO_URI")
 
-# اتصال MongoDB
 client_db = MongoClient(MONGO_URI)
 db = client_db["whatsapp_bot"]
 sessions_collection = db["sessions"]
 
-# تهيئة التطبيق
 app = Flask(__name__)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# فحص المتغيرات والتأكد من الاتصال
+
+# فحص البيئة والاتصال
 def check_environment():
     print("\n=========== فحص البيئة ===========")
     keys = ["OPENAI_API_KEY", "OPENROUTER_API_KEY", "ZAPI_BASE_URL", "ZAPI_INSTANCE_ID",
@@ -94,7 +93,7 @@ def organize_reply(text):
         return text
 
 
-# تحميل الصورة من واتساب
+# تحميل الصور
 def download_image(media_id):
     url = f"https://graph.facebook.com/v19.0/{media_id}"
     headers = {"Authorization": f"Bearer {ZAPI_TOKEN}"}
@@ -111,7 +110,7 @@ def download_image(media_id):
         return None
 
 
-# التفاعل مع المساعد النصي
+# التفاعل مع النصوص وتسجيل history
 def ask_assistant(message, sender_id):
     session = get_session(sender_id)
 
@@ -121,6 +120,10 @@ def ask_assistant(message, sender_id):
         save_session(sender_id, session)
 
     thread_id = session["thread_id"]
+
+    session.setdefault("history", []).append({"role": "user", "content": message})
+    save_session(sender_id, session)
+
     client.beta.threads.messages.create(thread_id=thread_id, role="user", content=message)
     run = client.beta.threads.runs.create(thread_id=thread_id, assistant_id=ASSISTANT_ID)
 
@@ -133,11 +136,15 @@ def ask_assistant(message, sender_id):
     messages = client.beta.threads.messages.list(thread_id=thread_id)
     for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
         if msg.role == "assistant":
-            return organize_reply(msg.content[0].text.value.strip())
+            reply = organize_reply(msg.content[0].text.value.strip())
+            session["history"].append({"role": "assistant", "content": reply})
+            save_session(sender_id, session)
+            return reply
+
     return "⚠ حدثت مشكلة مؤقتة، حاول مرة أخرى."
 
 
-# التفاعل مع صورة
+# التفاعل مع الصور وتسجيل history
 def ask_assistant_with_image(image_url, sender_id):
     session = get_session(sender_id)
 
@@ -147,11 +154,16 @@ def ask_assistant_with_image(image_url, sender_id):
         save_session(sender_id, session)
 
     thread_id = session["thread_id"]
+
+    session.setdefault("history", []).append({"role": "user", "content": f"[صورة مرسلة] {image_url}"})
+    save_session(sender_id, session)
+
     client.beta.threads.messages.create(
         thread_id=thread_id,
         role="user",
         content=[{"type": "image_url", "image_url": image_url}]
     )
+
     run = client.beta.threads.runs.create(thread_id=thread_id, assistant_id=ASSISTANT_ID)
 
     while True:
@@ -163,11 +175,15 @@ def ask_assistant_with_image(image_url, sender_id):
     messages = client.beta.threads.messages.list(thread_id=thread_id)
     for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
         if msg.role == "assistant":
-            return organize_reply(msg.content[0].text.value.strip())
+            reply = organize_reply(msg.content[0].text.value.strip())
+            session["history"].append({"role": "assistant", "content": reply})
+            save_session(sender_id, session)
+            return reply
+
     return "⚠ حدثت مشكلة مؤقتة في معالجة الصورة، حاول مجددًا."
 
 
-# نقاط النهاية
+# نقطة البداية
 @app.route("/", methods=["GET"])
 def home():
     return "✅ السيرفر يعمل بنجاح!"
@@ -205,7 +221,7 @@ def webhook():
     return jsonify({"status": "تم التجاهل"}), 200
 
 
-# بدء التطبيق
+# تشغيل السيرفر
 if __name__ == "__main__":
     check_environment()
     app.run(host="0.0.0.0", port=5000)
