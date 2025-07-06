@@ -23,7 +23,7 @@ client_db = MongoClient(MONGO_URI)
 db = client_db["whatsapp_bot"]
 sessions_collection = db["sessions"]
 
-app = Flask(__name_-_)
+app = Flask(__name__)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 pending_messages = {}
