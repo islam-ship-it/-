@@ -135,34 +135,45 @@ def process_pending_messages(sender, name):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
+    print(f"\n📥 استقبال داتا كاملة:\n{json.dumps(data, indent=2, ensure_ascii=False)}")
+
     sender = data.get("phone") or data.get("From")
     msg = data.get("text", {}).get("message") or data.get("body", "")
     msg_type = data.get("type", "")
     name = data.get("pushname") or data.get("senderName") or data.get("profileName") or ""
 
-    print(f"\n📥 استقبال رسالة جديدة:\nرقم العميل: {sender}\nنوع الرسالة: {msg_type}\nمحتوى:\n{msg}")
+    print(f"\n📊 تفاصيل:\nالرقم: {sender}\nالنوع: {msg_type}\nالرسالة: {msg}")
 
     if not sender:
+        print("❌ رقم العميل غير موجود.")
         return jsonify({"status": "no sender"}), 400
 
     session = get_session(sender)
     if session.get("block_until") and datetime.utcnow() < datetime.fromisoformat(session["block_until"]):
         print(f"🚫 العميل {sender} في فترة الحظر.")
-        send_message(sender, "✅ تم استقبال طلبك بالفعل، نرجو الانتظار حتى انتهاء التنفيذ.")
+        send_message(sender, "✅ طلبك تحت التنفيذ، نرجو الانتظار.")
         return jsonify({"status": "blocked"}), 200
+
+    # ✅ طباعة بيانات الصورة لو وصلت
+    if "image" in data:
+        print(f"🖼 بيانات الصورة:\n{json.dumps(data.get('image'), indent=2, ensure_ascii=False)}")
 
     if msg_type == "image":
         media_id = data.get("image", {}).get("id")
         caption = data.get("image", {}).get("caption", "")
-        print(f"🖼 صورة مستلمة من العميل، معرف الصورة: {media_id}, التعليق: {caption}")
+        print(f"📷 استقبال صورة | media_id: {media_id} | caption: {caption}")
 
         if media_id:
             image_url = download_image(media_id)
+            print(f"🌐 رابط الصورة بعد التحميل: {image_url}")
+
             if image_url:
-                message = f"رابط الصورة: {image_url}\nتعليق العميل: {caption}"
-                reply = ask_assistant(message, sender, name)
-                send_message(sender, reply)
+                ask_assistant(f"📷 صورة من العميل: {image_url}\nتعليق: {caption}", sender, name)
                 return jsonify({"status": "image processed"}), 200
+            else:
+                print("⚠️ لم يتمكن من تحميل رابط الصورة.")
+        else:
+            print("⚠️ لم يتم العثور على media_id.")
 
     if msg:
         if sender not in pending_messages:
