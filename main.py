@@ -5,6 +5,7 @@ import requests
 from flask import Flask, request, jsonify
 from openai import OpenAI
 from pymongo import MongoClient
+from datetime import datetime, timedelta
 
 # إعدادات البيئة
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -25,11 +26,29 @@ app = Flask(__name__)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 
+# الكلمات المفتاحية اللي بتأكد إن الطلب اتنفذ أو الدفع وصل
+confirmation_keywords = [
+    "تم تأكيد طلبك",
+    "تم استلام التحويل",
+    "تم تسجيل الطلب",
+    "تم تأكيد العملية",
+    "تم تنفيذ الطلب",
+    "تم التفعيل",
+    "تم شحن الحساب",
+    "تم تجهيز الطلب",
+    "جاري التنفيذ",
+    "تم إنهاء العملية بنجاح",
+    "✅ طلبك تحت التنفيذ",
+    "✅ تم تنفيذ العملية",
+    "✅ تم معالجة طلبك"
+]
+
+
 # إدارة الجلسات
 def get_session(user_id):
     session = sessions_collection.find_one({"_id": user_id})
     if not session:
-        session = {"_id": user_id, "history": [], "thread_id": None, "message_count": 0, "name": ""}
+        session = {"_id": user_id, "history": [], "thread_id": None, "message_count": 0, "name": "", "block_until": None}
     else:
         if "history" not in session:
             session["history"] = []
@@ -39,12 +58,21 @@ def get_session(user_id):
             session["message_count"] = 0
         if "name" not in session:
             session["name"] = ""
+        if "block_until" not in session:
+            session["block_until"] = None
     return session
 
 
 def save_session(user_id, session_data):
     session_data["_id"] = user_id
     sessions_collection.replace_one({"_id": user_id}, session_data, upsert=True)
+
+
+# إيقاف الرد 24 ساعة
+def block_client_24h(user_id):
+    session = get_session(user_id)
+    session["block_until"] = (datetime.utcnow() + timedelta(hours=24)).isoformat()
+    save_session(user_id, session)
 
 
 @app.route("/", methods=["GET"])
@@ -70,14 +98,13 @@ def organize_reply(text):
     payload = {
         "model": "mistral/mistral-7b-instruct",
         "messages": [
-            {"role": "system", "content": "من فضلك نظملي الرسالة بشكل احترافي، استخدم رموز (✅ 🔹 💳)، خلي كل معلومة بسطر واضح."},
+            {"role": "system", "content": "نظملي الرد بشكل احترافي مع الرموز ✅ 🔹 💳."},
             {"role": "user", "content": text}
         ]
     }
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=10)
-        data = response.json()
-        return data["choices"][0]["message"]["content"].strip()
+        return response.json()["choices"][0]["message"]["content"].strip()
     except Exception as e:
         print("❌ Organizing Error:", e)
         return text
@@ -86,7 +113,6 @@ def organize_reply(text):
 def ask_assistant(message, sender_id, name=""):
     session = get_session(sender_id)
 
-    # تسجيل الاسم لو مش موجود
     if name and not session.get("name"):
         session["name"] = name
 
@@ -94,13 +120,11 @@ def ask_assistant(message, sender_id, name=""):
         thread = client.beta.threads.create()
         session["thread_id"] = thread.id
 
-    # تحديث بيانات الجلسة
     session["message_count"] += 1
     session["history"].append({"role": "user", "content": message})
-    session["history"] = session["history"][-10:]  # آخر 10 رسائل فقط
+    session["history"] = session["history"][-10:]
     save_session(sender_id, session)
 
-    # تجهيز محتوى للمساعد مع بيانات إضافية
     intro = f"أنت تتعامل مع عميل اسمه: {session['name'] or 'غير معروف'}، رقمه: {sender_id}. هذه الرسالة رقم {session['message_count']} من العميل."
     full_message = f"{intro}\n\nالرسالة: {message}"
 
@@ -120,7 +144,13 @@ def ask_assistant(message, sender_id, name=""):
     for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
         if msg.role == "assistant":
             reply = msg.content[0].text.value.strip()
+
+            if any(kw in reply for kw in confirmation_keywords):
+                block_client_24h(sender_id)
+                reply += "\n✅ تم استقبال طلبك، نرجو الانتظار حتى انتهاء التنفيذ لمدة 24 ساعة."
+
             return organize_reply(reply)
+
     return "⚠ حصلت مشكلة مؤقتة، حاول تاني."
 
 
@@ -136,6 +166,15 @@ def webhook():
 
     if not sender:
         return jsonify({"status": "no sender"}), 400
+
+    session = get_session(sender)
+    block_until = session.get("block_until")
+
+    if block_until:
+        block_time = datetime.fromisoformat(block_until)
+        if datetime.utcnow() < block_time:
+            send_message(sender, "✅ تم استقبال طلبك، نرجو الانتظار حتى انتهاء التنفيذ.")
+            return jsonify({"status": "blocked"}), 200
 
     if msg:
         reply = ask_assistant(msg, sender, name)
