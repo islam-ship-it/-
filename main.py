@@ -97,11 +97,15 @@ def ask_assistant(message, sender_id, name=""):
     # تحديث بيانات الجلسة
     session["message_count"] += 1
     session["history"].append({"role": "user", "content": message})
+    session["history"] = session["history"][-10:]  # آخر 10 رسائل فقط
     save_session(sender_id, session)
 
     # تجهيز محتوى للمساعد مع بيانات إضافية
     intro = f"أنت تتعامل مع عميل اسمه: {session['name'] or 'غير معروف'}، رقمه: {sender_id}. هذه الرسالة رقم {session['message_count']} من العميل."
     full_message = f"{intro}\n\nالرسالة: {message}"
+
+    print(f"📨 رسالة جديدة من: {sender_id} - الاسم: {session['name']}")
+    print(f"🔢 عدد الرسائل: {session['message_count']}")
 
     client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", content=full_message)
     run = client.beta.threads.runs.create(thread_id=session["thread_id"], assistant_id=ASSISTANT_ID)
@@ -128,7 +132,7 @@ def webhook():
     sender = data.get("phone") or data.get("From")
     msg = data.get("text", {}).get("message") or data.get("body", "")
     msg_type = data.get("type", "")
-    name = data.get("pushname", "")
+    name = data.get("pushname") or data.get("senderName") or data.get("profileName") or ""
 
     if not sender:
         return jsonify({"status": "no sender"}), 400
