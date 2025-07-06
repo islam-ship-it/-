@@ -9,15 +9,15 @@ from pymongo import MongoClient
 # إعدادات البيئة
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
+OPENROUTER_API_BASE = os.getenv("OPENROUTER_API_BASE", "https://openrouter.ai/api/v1")
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
 CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
-ASSISTANT_ID = "asst_NZp1j8UmvcIXqk5GCQ4Qs52s"
+ASSISTANT_ID = os.getenv("ASSISTANT_ID")
+MONGO_URI = os.getenv("MONGO_URI")
 
-# رابط اتصال MongoDB
-MONGO_URI = "mongodb+srv://islamtamersa3ed:L0oeAr8FJaVKMJK2@cluster0.xe3tl2p.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+# اتصال MongoDB
 client_db = MongoClient(MONGO_URI)
 db = client_db["whatsapp_bot"]
 sessions_collection = db["sessions"]
@@ -25,8 +25,7 @@ sessions_collection = db["sessions"]
 app = Flask(__name__)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-
-# تخزين الجلسات في MongoDB
+# تخزين الجلسات
 def get_session(user_id):
     session = sessions_collection.find_one({"_id": user_id})
     if session:
