@@ -143,7 +143,7 @@ def webhook():
         send_message(sender, "✅ طلبك تحت التنفيذ، نرجو الانتظار.")
         return jsonify({"status": "blocked"}), 200
 
-   if msg_type == "image":
+    if msg_type == "image":
     print(f"📥 داتا كاملة جاية من العميل:\n{json.dumps(data, indent=2, ensure_ascii=False)}", flush=True)
 
     media_id = data.get("image", {}).get("id")
