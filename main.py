@@ -91,12 +91,16 @@ def ask_assistant(content, sender_id, name=""):
 
     print(f"🚀 الداتا اللي داخلة للمساعد:\n{json.dumps(content, indent=2, ensure_ascii=False)}", flush=True)
 
+    # تمييز إذا كانت الداتا نص أو محتوى مركب
     if isinstance(content, list):
-        # إرسال محتوى مركب صورة + نص
-        client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", content=content)
+        # محتوى مركب (صورة + نص)
+        payload = { "content": content }
     else:
-        # إرسال نص فقط
-        client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", content=content)
+        # نص فقط
+        payload = { "content": [{"type": "text", "text": content}] }
+
+    # التأكد إن المساعد يستقبل التنسيق بشكل صحيح
+    client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", **payload)
 
     run = client.beta.threads.runs.create(thread_id=session["thread_id"], assistant_id=ASSISTANT_ID)
 
