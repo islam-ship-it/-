@@ -91,7 +91,13 @@ def ask_assistant(content, sender_id, name=""):
 
     print(f"🚀 الداتا اللي داخلة للمساعد:\n{json.dumps(content, indent=2, ensure_ascii=False)}", flush=True)
 
-    client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", content=content)
+    if isinstance(content, list):
+        # إرسال محتوى مركب صورة + نص
+        client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", content=content)
+    else:
+        # إرسال نص فقط
+        client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", content=content)
+
     run = client.beta.threads.runs.create(thread_id=session["thread_id"], assistant_id=ASSISTANT_ID)
 
     while True:
@@ -105,9 +111,11 @@ def ask_assistant(content, sender_id, name=""):
         if msg.role == "assistant":
             reply = msg.content[0].text.value.strip()
             print(f"💬 رد المساعد:\n{reply}", flush=True)
+
             if "##BLOCK_CLIENT_24H##" in reply:
                 block_client_24h(sender_id)
                 return "✅ تم استقبال طلبك، نرجو الانتظار حتى انتهاء التنفيذ."
+
             return reply
     return "⚠ مشكلة مؤقتة، حاول مرة أخرى."
 
