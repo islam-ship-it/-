@@ -27,6 +27,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 pending_messages = {}
 timers = {}
 
+# إدارة الجلسات
 def get_session(user_id):
     session = sessions_collection.find_one({"_id": user_id})
     if not session:
@@ -50,6 +51,7 @@ def block_client_24h(user_id):
     save_session(user_id, session)
     print(f"🚫 العميل {user_id} تم حظره من الرد لمدة 24 ساعة.")
 
+# إرسال رسالة واتساب
 def send_message(phone, message):
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
     headers = {"Content-Type": "application/json", "Client-Token": CLIENT_TOKEN}
@@ -60,6 +62,7 @@ def send_message(phone, message):
     except Exception as e:
         print(f"❌ خطأ أثناء إرسال الرسالة: {e}")
 
+# استعلام صورة من واتساب
 def download_image(media_id):
     url = f"https://graph.facebook.com/v19.0/{media_id}"
     headers = {"Authorization": f"Bearer {ZAPI_TOKEN}"}
@@ -76,6 +79,7 @@ def download_image(media_id):
         print(f"❌ خطأ أثناء تحميل الصورة: {e}")
     return None
 
+# التفاعل مع المساعد
 def ask_assistant(message, sender_id, name=""):
     session = get_session(sender_id)
     if name and not session.get("name"):
@@ -92,10 +96,9 @@ def ask_assistant(message, sender_id, name=""):
     intro = f"عميل اسمه: {session['name'] or 'غير معروف'}, رقمه: {sender_id}."
     full_message = f"{intro}\n{message}"
 
-    print(f"📨 إرسال الرسالة للمساعد:\n{full_message}")
+    print(f"📨 إرسال للمساعد:\n{full_message}")
 
-    msg_content = [{"type": "text", "text": full_message}]
-    client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", content=msg_content)
+    client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", content=full_message)
     run = client.beta.threads.runs.create(thread_id=session["thread_id"], assistant_id=ASSISTANT_ID)
 
     while True:
@@ -109,23 +112,26 @@ def ask_assistant(message, sender_id, name=""):
         if msg.role == "assistant":
             reply = msg.content[0].text.value.strip()
             print(f"💬 رد المساعد:\n{reply}")
-            return reply
 
-    print("⚠ لم يتم استلام رد من المساعد.")
+            if "##BLOCK_CLIENT_24H##" in reply:
+                block_client_24h(sender_id)
+                return "✅ تم استقبال طلبك، نرجو الانتظار حتى انتهاء التنفيذ."
+
+            return reply
     return "⚠ مشكلة مؤقتة، حاول مرة أخرى."
 
+# تجميع رسائل العميل
 def process_pending_messages(sender, name):
     print(f"⏳ تجميع رسائل العميل {sender} لمدة 8 ثواني.")
     time.sleep(8)
     combined = "\n".join(pending_messages[sender])
-    print(f"✅ الرسائل المجمعة من العميل:\n{combined}")
-
     reply = ask_assistant(combined, sender, name)
     send_message(sender, reply)
     pending_messages[sender] = []
     timers.pop(sender, None)
-    print(f"🎯 تم إرسال الرد للعميل {sender}.")
+    print(f"🎯 الرد تم على جميع رسائل {sender}.")
 
+# استقبال webhook
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
@@ -136,76 +142,32 @@ def webhook():
     msg_type = data.get("type", "")
     name = data.get("pushname") or data.get("senderName") or data.get("profileName") or ""
 
-    print(f"\n📊 تفاصيل:\nالرقم: {sender}\nالنوع: {msg_type}\nالرسالة: {msg}")
-
     if not sender:
-        print("❌ رقم العميل غير موجود.")
         return jsonify({"status": "no sender"}), 400
 
     session = get_session(sender)
     if session.get("block_until") and datetime.utcnow() < datetime.fromisoformat(session["block_until"]):
-        print(f"🚫 العميل {sender} في فترة الحظر.")
         send_message(sender, "✅ طلبك تحت التنفيذ، نرجو الانتظار.")
         return jsonify({"status": "blocked"}), 200
 
-    if msg_type == "image":
-        image_data = data.get("image", {})
-        media_id = image_data.get("id")
-        caption = image_data.get("caption", "")
-        print(f"📷 استقبال صورة | media_id: {media_id} | caption: {caption}")
-
-        if media_id:
-            image_url = download_image(media_id)
-            print(f"🌐 رابط الصورة بعد التحميل: {image_url}")
-
-            if image_url:
-                session = get_session(sender)
-                if not session.get("thread_id"):
-                    thread = client.beta.threads.create()
-                    session["thread_id"] = thread.id
-
-                msg_content = [
-                    {"type": "text", "text": "دي صورة من العميل"},
-                    {"type": "image_url", "image_url": {"url": image_url}}
-                ]
-                if caption:
-                    msg_content.append({"type": "text", "text": f"تعليق العميل:\n{caption}"})
-
-                print(f"✅ الرسالة اللي رايحة للمساعد:\n{json.dumps(msg_content, indent=2, ensure_ascii=False)}")
-
-                client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", content=msg_content)
-                run = client.beta.threads.runs.create(thread_id=session["thread_id"], assistant_id=ASSISTANT_ID)
-
-                while True:
-                    run_status = client.beta.threads.runs.retrieve(thread_id=session["thread_id"], run_id=run.id)
-                    if run_status.status == "completed":
-                        break
-                    time.sleep(2)
-
-                messages = client.beta.threads.messages.list(thread_id=session["thread_id"])
-                for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
-                    if msg.role == "assistant":
-                        reply = msg.content[0].text.value.strip()
-                        print(f"💬 رد المساعد على الصورة:\n{reply}")
-                        send_message(sender, reply)
-                        return jsonify({"status": "image processed"}), 200
-
-            else:
-                print("⚠ لم يتمكن من تحميل رابط الصورة.")
-
     if msg:
-        print(f"\n💬 استقبال رسالة نصية من العميل:\n{msg}")
-
         if sender not in pending_messages:
             pending_messages[sender] = []
         pending_messages[sender].append(msg)
 
         if sender not in timers:
-            print(f"⏳ بدء تجميع رسائل العميل {sender} لمدة 8 ثواني.")
             timers[sender] = threading.Thread(target=process_pending_messages, args=(sender, name))
             timers[sender].start()
 
     return jsonify({"status": "received"}), 200
 
-if __name__ == "__main_-_":
-    app.run(host="0.0.0.0", port=5000)
+# الصفحة الرئيسية
+@app.route("/", methods=["GET"])
+def home():
+    return "✅ السيرفر شغال تمام!"
+
+# تشغيل التطبيق
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    print(f"\n🚀 السيرفر شغال على البورت: {port}\n")
+    app.run(host="0.0.0.0", port=port)
