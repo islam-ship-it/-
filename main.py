@@ -132,6 +132,8 @@ def process_pending_messages(sender, name):
     timers.pop(sender, None)
     print(f"🎯 الرد تم على جميع رسائل {sender}.")
 
+# ... باقي الكود زي ما هو فوق ...
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
@@ -154,26 +156,28 @@ def webhook():
         send_message(sender, "✅ طلبك تحت التنفيذ، نرجو الانتظار.")
         return jsonify({"status": "blocked"}), 200
 
-    # ✅ طباعة بيانات الصورة لو وصلت
-    if "image" in data:
-        print(f"🖼 بيانات الصورة:\n{json.dumps(data.get('image'), indent=2, ensure_ascii=False)}")
-
     if msg_type == "image":
-        media_id = data.get("image", {}).get("id")
-        caption = data.get("image", {}).get("caption", "")
-        print(f"📷 استقبال صورة | media_id: {media_id} | caption: {caption}")
+        image_data = data.get("image", {})
+        direct_url = image_data.get("url") or image_data.get("link")
+        caption = image_data.get("caption", "")
+        media_id = image_data.get("id")
+
+        if direct_url:
+            print(f"✅ رابط الصورة المباشر: {direct_url}")
+            ask_assistant(f"📷 صورة من العميل: {direct_url}\nتعليق: {caption}", sender, name)
+            return jsonify({"status": "image processed"}), 200
 
         if media_id:
+            print(f"📥 محاولة تحميل الصورة باستخدام media_id: {media_id}")
             image_url = download_image(media_id)
-            print(f"🌐 رابط الصورة بعد التحميل: {image_url}")
-
             if image_url:
+                print(f"✅ رابط الصورة بعد التحميل: {image_url}")
                 ask_assistant(f"📷 صورة من العميل: {image_url}\nتعليق: {caption}", sender, name)
                 return jsonify({"status": "image processed"}), 200
             else:
-                print("⚠️ لم يتمكن من تحميل رابط الصورة.")
+                print("⚠ لم يتمكن من تحميل رابط الصورة.")
         else:
-            print("⚠️ لم يتم العثور على media_id.")
+            print("⚠ لم يتم العثور على media_id.")
 
     if msg:
         if sender not in pending_messages:
