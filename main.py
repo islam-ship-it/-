@@ -27,7 +27,6 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 pending_messages = {}
 timers = {}
 
-# إدارة الجلسة
 def get_session(user_id):
     session = sessions_collection.find_one({"_id": user_id})
     if not session:
@@ -92,16 +91,7 @@ def ask_assistant(content, sender_id, name=""):
 
     print(f"🚀 الداتا اللي داخلة للمساعد:\n{json.dumps(content, indent=2, ensure_ascii=False)}", flush=True)
 
-    messages_payload = [
-        {"role": "system", "content": "انت بتستقبل صور وروابط ونصوص من العميل، اتعامل معاهم وكمل الحوار بشكل طبيعي باللهجة المصرية."},
-    ]
-
-    if isinstance(content, list):
-        messages_payload += content
-    else:
-        messages_payload.append({"role": "user", "content": content})
-
-    client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", content=messages_payload)
+    client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", content=content)
     run = client.beta.threads.runs.create(thread_id=session["thread_id"], assistant_id=ASSISTANT_ID)
 
     while True:
@@ -115,18 +105,27 @@ def ask_assistant(content, sender_id, name=""):
         if msg.role == "assistant":
             reply = msg.content[0].text.value.strip()
             print(f"💬 رد المساعد:\n{reply}", flush=True)
-
             if "##BLOCK_CLIENT_24H##" in reply:
                 block_client_24h(sender_id)
                 return "✅ تم استقبال طلبك، نرجو الانتظار حتى انتهاء التنفيذ."
-
             return reply
     return "⚠ مشكلة مؤقتة، حاول مرة أخرى."
+
+def process_pending_messages(sender, name):
+    print(f"⏳ تجميع رسائل العميل {sender} لمدة 8 ثواني.", flush=True)
+    time.sleep(8)
+    combined = "\n".join(pending_messages[sender])
+    content = [{"type": "text", "text": combined}]
+    reply = ask_assistant(content, sender, name)
+    send_message(sender, reply)
+    pending_messages[sender] = []
+    timers.pop(sender, None)
+    print(f"🎯 الرد تم على جميع رسائل {sender}.", flush=True)
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
-    print(f"\n📥 البيانات المستلمة كاملة:\n{json.dumps(data, indent=2, ensure_ascii=False)}", flush=True)
+    print(f"\n📥 البيانات المستلمة:\n{json.dumps(data, indent=2, ensure_ascii=False)}", flush=True)
 
     sender = data.get("phone") or data.get("From")
     msg = data.get("text", {}).get("message") or data.get("body", "")
@@ -146,23 +145,24 @@ def webhook():
     if msg_type == "image":
         media_id = data.get("image", {}).get("id")
         caption = data.get("image", {}).get("caption", "")
-        print(f"📷 استقبال صورة - media_id: {media_id} - caption: {caption}", flush=True)
+        print(f"📷 صورة مستلمة - media_id: {media_id}, caption: {caption}", flush=True)
 
         if media_id:
             image_url = download_image(media_id)
-            print(f"🌐 رابط الصورة بعد التحميل: {image_url}", flush=True)
-
             if image_url:
                 message_content = [
-                    { "type": "text", "text": f"دي صورة من العميل رقم: {sender} - الاسم: {name}" },
-                    { "type": "image_url", "image_url": { "url": image_url } }
+                    {"type": "text", "text": f"دي صورة من العميل رقم: {sender} - الاسم: {name}"},
+                    {"type": "image_url", "image_url": {"url": image_url}}
                 ]
                 if caption:
-                    message_content.append({ "type": "text", "text": f"تعليق داخل الصورة:\n{caption}" })
+                    message_content.append({"type": "text", "text": f"تعليق: {caption}"})
 
+                print(f"🚀 الداتا المرسلة للمساعد:\n{json.dumps(message_content, indent=2, ensure_ascii=False)}", flush=True)
                 reply = ask_assistant(message_content, sender, name)
                 send_message(sender, reply)
                 return jsonify({"status": "image processed"}), 200
+            else:
+                print("⚠ لم يتمكن من تحميل الصورة.", flush=True)
 
     if msg:
         if sender not in pending_messages:
