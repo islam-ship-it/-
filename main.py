@@ -3,7 +3,6 @@ import time
 import json
 import requests
 import threading
-import sys
 from flask import Flask, request, jsonify
 from openai import OpenAI
 from pymongo import MongoClient
@@ -11,8 +10,6 @@ from datetime import datetime, timedelta
 
 # إعدادات البيئة
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
@@ -80,28 +77,6 @@ def download_image(media_id):
         print(f"❌ خطأ أثناء تحميل الصورة: {e}", flush=True)
     return None
 
-def organize_reply(text):
-    url = f"{OPENROUTER_API_BASE}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": "mistral/mistral-7b-instruct",
-        "messages": [
-            {"role": "system", "content": "من فضلك نظم الرد باستخدام الرموز ✅ 🔹 💳 بشكل احترافي."},
-            {"role": "user", "content": text}
-        ]
-    }
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=10)
-        organized = response.json()["choices"][0]["message"]["content"].strip()
-        print(f"✅ الرد بعد التنظيم:\n{organized}", flush=True)
-        return organized
-    except Exception as e:
-        print(f"❌ خطأ أثناء تنظيم الرد: {e}", flush=True)
-        return text
-
 def ask_assistant(message, sender_id, name=""):
     session = get_session(sender_id)
     if name and not session.get("name"):
@@ -118,7 +93,7 @@ def ask_assistant(message, sender_id, name=""):
     intro = f"عميل اسمه: {session['name'] or 'غير معروف'}, رقمه: {sender_id}."
     full_message = f"{intro}\n{message}"
 
-    print(f"📨 إرسال للمساعد:\n{full_message}", flush=True)
+    print(f"🚀 الرسالة اللي داخلة للمساعد:\n{full_message}", flush=True)
 
     client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", content=full_message)
     run = client.beta.threads.runs.create(thread_id=session["thread_id"], assistant_id=ASSISTANT_ID)
@@ -139,7 +114,7 @@ def ask_assistant(message, sender_id, name=""):
                 block_client_24h(sender_id)
                 return "✅ تم استقبال طلبك، نرجو الانتظار حتى انتهاء التنفيذ."
 
-            return organize_reply(reply)
+            return reply
     return "⚠ مشكلة مؤقتة، حاول مرة أخرى."
 
 def process_pending_messages(sender, name):
@@ -172,39 +147,33 @@ def webhook():
         send_message(sender, "✅ طلبك تحت التنفيذ، نرجو الانتظار.")
         return jsonify({"status": "blocked"}), 200
 
- if msg_type == "image":
-    print(f"\n📥 داتا كاملة جاية من العميل:\n{json.dumps(data, indent=2, ensure_ascii=False)}", flush=True)
+    if msg_type == "image":
+        print(f"\n📥 داتا كاملة جاية من العميل:\n{json.dumps(data, indent=2, ensure_ascii=False)}", flush=True)
 
-    media_id = data.get("image", {}).get("id")
-    caption = data.get("image", {}).get("caption", "")
-    print(f"📷 بيانات الصورة:\nmedia_id: {media_id}\ncaption: {caption}", flush=True)
+        media_id = data.get("image", {}).get("id")
+        caption = data.get("image", {}).get("caption", "")
+        print(f"📷 بيانات الصورة:\nmedia_id: {media_id}\ncaption: {caption}", flush=True)
 
-    if media_id:
-        image_url = download_image(media_id)
-        print(f"🌐 رابط الصورة اللي جاية من ZAPI:\n{image_url}", flush=True)
+        if media_id:
+            image_url = download_image(media_id)
+            print(f"🌐 رابط الصورة بعد التحميل:\n{image_url}", flush=True)
 
-        if image_url:
-            session = get_session(sender)
-            if not session.get("thread_id"):
-                thread = client.beta.threads.create()
-                session["thread_id"] = thread.id
-                save_session(sender, session)
+            if image_url:
+                message_text = f"📷 صورة من العميل: {image_url}"
+                if caption:
+                    message_text += f"\nتعليق: {caption}"
 
-            message_text = f"📷 صورة من العميل: {image_url}"
-            if caption:
-                message_text += f"\nتعليق: {caption}"
+                print(f"🚀 الرسالة اللي داخلة للمساعد:\n{message_text}", flush=True)
 
-            print(f"🚀 الرسالة اللي داخلة للمساعد:\n{message_text}", flush=True)
+                reply = ask_assistant(message_text, sender, name)
+                print(f"💬 رد المساعد:\n{reply}", flush=True)
 
-            reply = ask_assistant(message_text, sender, name)
-            print(f"💬 رد المساعد:\n{reply}", flush=True)
-
-            send_message(sender, reply)
-            return jsonify({"status": "image processed"}), 200
+                send_message(sender, reply)
+                return jsonify({"status": "image processed"}), 200
+            else:
+                print("⚠ فشل تحميل الصورة من ZAPI.", flush=True)
         else:
-            print("⚠ فشل تحميل الصورة من ZAPI.", flush=True)
-    else:
-        print("⚠ media_id غير موجود.", flush=True)
+            print("⚠ media_id غير موجود.", flush=True)
 
     if msg:
         if sender not in pending_messages:
@@ -223,3 +192,4 @@ def home():
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
+
