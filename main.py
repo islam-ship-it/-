@@ -27,6 +27,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 pending_messages = {}
 timers = {}
 
+# إدارة الجلسة
 def get_session(user_id):
     session = sessions_collection.find_one({"_id": user_id})
     if not session:
@@ -144,59 +145,26 @@ def webhook():
         return jsonify({"status": "blocked"}), 200
 
     if msg_type == "image":
-    print(f"📥 داتا كاملة جاية من العميل:\n{json.dumps(data, indent=2, ensure_ascii=False)}", flush=True)
+        media_id = data.get("image", {}).get("id")
+        caption = data.get("image", {}).get("caption", "")
+        print(f"📷 استقبال صورة | media_id: {media_id} | caption: {caption}", flush=True)
 
-    media_id = data.get("image", {}).get("id")
-    caption = data.get("image", {}).get("caption", "")
-    msg_text = data.get("text", {}).get("message") or data.get("body", "")
+        if media_id:
+            image_url = download_image(media_id)
+            print(f"🌐 رابط الصورة بعد التحميل: {image_url}", flush=True)
 
-    print(f"📷 media_id: {media_id}", flush=True)
-    print(f"📝 التعليق داخل الصورة (caption): {caption}", flush=True)
-    print(f"💬 نص إضافي خارج الصورة: {msg_text}", flush=True)
+            if image_url:
+                message_text = f"📷 صورة من العميل: {image_url}"
+                if caption:
+                    message_text += f"\nتعليق: {caption}"
 
-    if media_id:
-        image_url = download_image(media_id)
-        print(f"🌐 رابط الصورة بعد التحميل: {image_url}", flush=True)
-
-        if image_url:
-            if not session.get("thread_id"):
-                thread = client.beta.threads.create()
-                session["thread_id"] = thread.id
-                save_session(sender, session)
-
-            msg_content = []
-
-            msg_content.append({"type": "text", "text": f"دي صورة من العميل رقم: {sender} - الاسم: {name}"})
-            msg_content.append({"type": "image_url", "image_url": {"url": image_url}})
-
-            if caption:
-                msg_content.append({"type": "text", "text": f"تعليق داخل الصورة:\n{caption}"})
-
-            if msg_text and msg_text != caption:
-                msg_content.append({"type": "text", "text": f"رسالة إضافية تحت الصورة:\n{msg_text}"})
-
-            print(f"🚀 الداتا الكاملة داخلة للمساعد:\n{json.dumps(msg_content, indent=2, ensure_ascii=False)}", flush=True)
-
-            client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", content=msg_content)
-            run = client.beta.threads.runs.create(thread_id=session["thread_id"], assistant_id=ASSISTANT_ID)
-
-            while True:
-                run_status = client.beta.threads.runs.retrieve(thread_id=session["thread_id"], run_id=run.id)
-                if run_status.status == "completed":
-                    break
-                time.sleep(2)
-
-            messages = client.beta.threads.messages.list(thread_id=session["thread_id"])
-            for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
-                if msg.role == "assistant":
-                    reply = msg.content[0].text.value.strip()
-                    print(f"💬 رد المساعد:\n{reply}", flush=True)
-                    send_message(sender, reply)
-                    return jsonify({"status": "image processed"}), 200
+                reply = ask_assistant(message_text, sender, name)
+                send_message(sender, reply)
+                return jsonify({"status": "image processed"}), 200
             else:
                 print("⚠ لم يتمكن من تحميل رابط الصورة.", flush=True)
         else:
-            print("⚠ media_id غير موجود.", flush=True)
+            print("⚠ لم يتم العثور على media_id.", flush=True)
 
     if msg:
         if sender not in pending_messages:
