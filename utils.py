@@ -1,26 +1,54 @@
 import requests
-from config import ZAPI_BASE_URL, ZAPI_INSTANCE_ID, ZAPI_TOKEN, CLIENT_TOKEN
 
-def send_message(phone, message):
-    url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
-    headers = {"Content-Type": "application/json", "Client-Token": CLIENT_TOKEN}
-    payload = {"phone": phone, "message": message}
+def extract_image_url_from_message(data):
+    """
+    استخراج رابط الصورة سواء موجود مباشرة أو باستخدام media_id
+    """
     try:
-        response = requests.post(url, headers=headers, json=payload)
-        if response.status_code == 200:
-            print(f"📤 رسالة أُرسلت بنجاح إلى {phone}")
-        else:
-            print(f"⚠ فشل الإرسال - كود: {response.status_code} - التفاصيل: {response.text}")
-    except Exception as e:
-        print(f"❌ خطأ أثناء إرسال الرسالة: {e}")
+        # محاولة قراءة الرابط المباشر من بيانات الرسالة
+        image_data = data.get("image", {})
+        direct_url = image_data.get("url") or image_data.get("link")
 
-def download_image(media_id):
+        if direct_url:
+            print(f"✅ تم العثور على رابط الصورة مباشرة: {direct_url}")
+            return direct_url
+
+        # لو مفيش رابط مباشر، نجرب باستخدام media_id
+        media_id = image_data.get("id")
+        if media_id:
+            print(f"📥 جاري محاولة تحميل الصورة باستخدام media_id: {media_id}")
+            return download_image_from_zapi(media_id, zapi_token=data.get("zapi_token"))
+
+    except Exception as e:
+        print(f"❌ حصل استثناء أثناء استخراج رابط الصورة: {e}")
+
+    print("⚠ لم يتم العثور على رابط الصورة.")
+    return None
+
+
+def download_image_from_zapi(media_id, zapi_token):
+    """
+    تحميل رابط الصورة من ZAPI باستخدام media_id
+    """
     url = f"https://graph.facebook.com/v19.0/{media_id}"
-    headers = {"Authorization": f"Bearer {ZAPI_TOKEN}"}
+    headers = {"Authorization": f"Bearer {zapi_token}"}
+
+    print(f"🔧 محاولة تحميل الصورة من ZAPI: {url}")
+
     try:
         response = requests.get(url, headers=headers)
+        print(f"🔧 كود الاستجابة: {response.status_code}")
+        print(f"📝 محتوى الرد: {response.text}")
+
         if response.status_code == 200:
-            return response.json().get("url")
+            image_url = response.json().get("url")
+            if image_url:
+                print(f"✅ تم الحصول على رابط الصورة: {image_url}")
+                return image_url
+            else:
+                print("⚠ لم يتم العثور على رابط الصورة داخل بيانات ZAPI.")
+
     except Exception as e:
-        print(f"❌ خطأ أثناء تحميل الصورة: {e}")
+        print(f"❌ خطأ أثناء تحميل الصورة من ZAPI: {e}")
+
     return None
