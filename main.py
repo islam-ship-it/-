@@ -27,7 +27,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 pending_messages = {}
 timers = {}
 
-# إدارة الجلسة
+# جلسة العميل
 def get_session(user_id):
     session = sessions_collection.find_one({"_id": user_id})
     if not session:
@@ -51,6 +51,7 @@ def block_client_24h(user_id):
     save_session(user_id, session)
     print(f"🚫 العميل {user_id} تم حظره من الرد لمدة 24 ساعة.", flush=True)
 
+# إرسال رسالة واتساب
 def send_message(phone, message):
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
     headers = {"Content-Type": "application/json", "Client-Token": CLIENT_TOKEN}
@@ -61,6 +62,7 @@ def send_message(phone, message):
     except Exception as e:
         print(f"❌ خطأ أثناء إرسال الرسالة: {e}", flush=True)
 
+# تحميل الصورة من ZAPI
 def download_image(media_id):
     url = f"https://graph.facebook.com/v19.0/{media_id}"
     headers = {"Authorization": f"Bearer {ZAPI_TOKEN}"}
@@ -77,6 +79,7 @@ def download_image(media_id):
         print(f"❌ خطأ أثناء تحميل الصورة: {e}", flush=True)
     return None
 
+# إرسال للمساعد
 def ask_assistant(message, sender_id, name=""):
     session = get_session(sender_id)
     if name and not session.get("name"):
@@ -106,14 +109,10 @@ def ask_assistant(message, sender_id, name=""):
         if msg.role == "assistant":
             reply = msg.content[0].text.value.strip()
             print(f"💬 رد المساعد:\n{reply}", flush=True)
-
-            if "##BLOCK_CLIENT_24H##" in reply:
-                block_client_24h(sender_id)
-                return "✅ تم استقبال طلبك، نرجو الانتظار حتى انتهاء التنفيذ."
-
             return reply
     return "⚠ مشكلة مؤقتة، حاول مرة أخرى."
 
+# تجميع الرسائل
 def process_pending_messages(sender, name):
     print(f"⏳ تجميع رسائل العميل {sender} لمدة 8 ثواني.", flush=True)
     time.sleep(8)
@@ -124,6 +123,7 @@ def process_pending_messages(sender, name):
     timers.pop(sender, None)
     print(f"🎯 الرد تم على جميع رسائل {sender}.", flush=True)
 
+# نقطة الاستقبال
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
@@ -144,28 +144,65 @@ def webhook():
         send_message(sender, "✅ طلبك تحت التنفيذ، نرجو الانتظار.")
         return jsonify({"status": "blocked"}), 200
 
+    # معالجة الصور
     if msg_type == "image":
+        print(f"\n📥 داتا كاملة جاية من العميل:\n{json.dumps(data, indent=2, ensure_ascii=False)}", flush=True)
+
         media_id = data.get("image", {}).get("id")
         caption = data.get("image", {}).get("caption", "")
-        print(f"📷 استقبال صورة | media_id: {media_id} | caption: {caption}", flush=True)
+        msg_text = data.get("text", {}).get("message") or data.get("body", "")
+
+        print(f"📷 media_id: {media_id}", flush=True)
+        print(f"📝 التعليق داخل الصورة (caption): {caption}", flush=True)
+        print(f"💬 نص إضافي خارج الصورة: {msg_text}", flush=True)
 
         if media_id:
             image_url = download_image(media_id)
             print(f"🌐 رابط الصورة بعد التحميل: {image_url}", flush=True)
 
             if image_url:
-                message_text = f"📷 صورة من العميل: {image_url}"
+                session = get_session(sender)
+                if not session.get("thread_id"):
+                    thread = client.beta.threads.create()
+                    session["thread_id"] = thread.id
+                    save_session(sender, session)
+
+                msg_content = []
+                msg_content.append({"type": "text", "text": f"دي صورة من العميل رقم: {sender} - الاسم: {name}"})
+                msg_content.append({"type": "image_url", "image_url": {"url": image_url}})
+
                 if caption:
-                    message_text += f"\nتعليق: {caption}"
+                    msg_content.append({"type": "text", "text": f"تعليق داخل الصورة:\n{caption}"})
 
-                reply = ask_assistant(message_text, sender, name)
-                send_message(sender, reply)
-                return jsonify({"status": "image processed"}), 200
+                if msg_text and msg_text != caption:
+                    msg_content.append({"type": "text", "text": f"رسالة إضافية تحت الصورة:\n{msg_text}"})
+
+                print(f"🚀 الداتا الكاملة داخلة للمساعد:\n{json.dumps(msg_content, indent=2, ensure_ascii=False)}", flush=True)
+
+                for item in msg_content:
+                    client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", content=item)
+
+                run = client.beta.threads.runs.create(thread_id=session["thread_id"], assistant_id=ASSISTANT_ID)
+
+                while True:
+                    run_status = client.beta.threads.runs.retrieve(thread_id=session["thread_id"], run_id=run.id)
+                    if run_status.status == "completed":
+                        break
+                    time.sleep(2)
+
+                messages = client.beta.threads.messages.list(thread_id=session["thread_id"])
+                for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
+                    if msg.role == "assistant":
+                        reply = msg.content[0].text.value.strip()
+                        print(f"💬 رد المساعد:\n{reply}", flush=True)
+                        send_message(sender, reply)
+                        return jsonify({"status": "image processed"}), 200
             else:
-                print("⚠ لم يتمكن من تحميل رابط الصورة.", flush=True)
+                print("⚠ فشل تحميل الصورة من ZAPI.", flush=True)
         else:
-            print("⚠ لم يتم العثور على media_id.", flush=True)
+            print("⚠ media_id غير موجود.", flush=True)
 
+    # باقي الرسائل العادية
     if msg:
         if sender not in pending_messages:
             pending_messages[sender] = []
