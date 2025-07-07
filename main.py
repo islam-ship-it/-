@@ -159,35 +159,28 @@ def webhook():
         return jsonify({"status": "blocked"}), 200
 
     if msg_type == "image":
-        print("\n🖼 استقبال رسالة صورة")
-
         image_data = data.get("image", {})
-        print(f"\n📷 بيانات الصورة:\n{json.dumps(image_data, indent=2, ensure_ascii=False)}")
-
-        image_url = image_data.get("url") or image_data.get("link")
-        caption = image_data.get("caption", "")
         media_id = image_data.get("id")
-
-        if image_url:
-            print(f"✅ رابط الصورة المباشر: {image_url}")
-            print(f"\n🌍 جرب تفتح الرابط في المتصفح:\n{image_url}\n")
-
-            ask_assistant(f"📷 صورة من العميل: {image_url}\nتعليق: {caption}", sender, name)
-            return jsonify({"status": "image processed"}), 200
+        caption = image_data.get("caption", "")
+        print(f"📷 استقبال صورة | media_id: {media_id} | caption: {caption}")
 
         if media_id:
-            print(f"📥 محاولة تحميل الصورة باستخدام media_id: {media_id}")
             image_url = download_image(media_id)
-            if image_url:
-                print(f"✅ رابط الصورة بعد التحميل: {image_url}")
-                print(f"\n🌍 جرب تفتح الرابط في المتصفح:\n{image_url}\n")
+            print(f"🌐 رابط الصورة بعد التحميل: {image_url}")
 
-                ask_assistant(f"📷 صورة من العميل: {image_url}\nتعليق: {caption}", sender, name)
+            if image_url:
+                message_content = f"📷 صورة من العميل:\nرابط الصورة: {image_url}"
+                if caption:
+                    message_content += f"\nتعليق العميل: {caption}"
+
+                print(f"✅ الرسالة اللي رايحة للمساعد:\n{message_content}")
+
+                ask_assistant(message_content, sender, name)
                 return jsonify({"status": "image processed"}), 200
             else:
-                print("⚠ لم يتمكن من تحميل الصورة باستخدام media_id.")
+                print("⚠ لم يتمكن من تحميل رابط الصورة.")
         else:
-            print("⚠ لا يوجد media_id للصورة.")
+            print("⚠ لم يتم العثور على media_id للصورة.")
 
     if msg:
         print(f"\n💬 استقبال رسالة نصية: {msg}")
