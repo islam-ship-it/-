@@ -1,11 +1,12 @@
 import requests
+import json
 
 def extract_image_url_from_message(data):
     """
-    استخراج رابط الصورة سواء موجود مباشرة أو باستخدام media_id
+    استخراج رابط الصورة سواء موجود مباشر أو باستخدام media_id
     """
     try:
-        print(f"📥 استقبال بيانات الصورة: {data.get('image', {})}")
+        print(f"📥 بيانات الصورة المستلمة:\n{json.dumps(data.get('image', {}), indent=2, ensure_ascii=False)}")
 
         image_data = data.get("image", {})
         direct_url = image_data.get("url") or image_data.get("link")
@@ -22,7 +23,7 @@ def extract_image_url_from_message(data):
     except Exception as e:
         print(f"❌ استثناء أثناء استخراج رابط الصورة: {e}")
 
-    print("⚠ لم يتم العثور على رابط الصورة.")
+    print("⚠️ لم يتم العثور على رابط الصورة.")
     return None
 
 
@@ -46,7 +47,7 @@ def download_image_from_zapi(media_id, zapi_token):
                 print(f"✅ تم استخراج رابط الصورة: {image_url}")
                 return image_url
             else:
-                print("⚠ لم يتم العثور على رابط الصورة داخل بيانات ZAPI.")
+                print("⚠️ لم يتم العثور على رابط الصورة داخل بيانات ZAPI.")
 
     except Exception as e:
         print(f"❌ خطأ أثناء تحميل الصورة من ZAPI: {e}")
