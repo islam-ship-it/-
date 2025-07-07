@@ -165,7 +165,7 @@ def webhook():
                 message_content = [
                     {"type": "text", "text": f"دي صورة من العميل رقم: {sender} - الاسم: {name}"},
                     {"type": "text", "text": f"رابط مباشر للصورة: {image_url}"},
-                    {"type": "image_url", "image_url": {"url": image_url}}
+                    {"type": "image_url", "image_url": image_url}
                 ]
                 if caption:
                     message_content.append({"type": "text", "text": f"تعليق: {caption}"})
