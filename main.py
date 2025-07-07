@@ -26,7 +26,30 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 pending_messages = {}
 timers = {}
 
-# دوال الجلسات (نفس اللي عندك)
+def get_session(user_id):
+    session = sessions_collection.find_one({"_id": user_id})
+    if not session:
+        session = {"_id": user_id, "history": [], "thread_id": None, "message_count": 0, "name": "", "block_until": None}
+    return session
+
+def save_session(user_id, session_data):
+    sessions_collection.replace_one({"_id": user_id}, session_data, upsert=True)
+
+def send_message(phone, message):
+    url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
+    headers = {"Content-Type": "application/json", "Client-Token": CLIENT_TOKEN}
+    payload = {"phone": phone, "message": message}
+    try:
+        requests.post(url, headers=headers, json=payload)
+    except Exception as e:
+        print(f"❌ Error sending message: {e}")
+
+def process_pending_messages(sender, name):
+    time.sleep(8)
+    combined = "\n".join(pending_messages[sender])
+    send_message(sender, f"📩 رسالتك:\n{combined}")
+    pending_messages[sender] = []
+    timers.pop(sender, None)
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -47,46 +70,49 @@ def webhook():
         send_message(sender, "✅ طلبك تحت التنفيذ، نرجو الانتظار.")
         return jsonify({"status": "blocked"}), 200
 
-if msg_type == "image":
-    print(f"🖼️ استقبال بيانات الصورة كاملة:\n{json.dumps(data, indent=2, ensure_ascii=False)}")
-    data["zapi_token"] = ZAPI_TOKEN
-    image_url = extract_image_url_from_message(data)
-    caption = data.get("image", {}).get("caption", "")
+    if msg_type == "image":
+        print(f"🖼 استقبال بيانات الصورة كاملة:\n{data}")
+        data["zapi_token"] = ZAPI_TOKEN
+        image_url = extract_image_url_from_message(data)
+        caption = data.get("image", {}).get("caption", "")
 
-    if image_url:
-        print(f"✅ رابط الصورة المستخرج: {image_url}")
+        if image_url:
+            print(f"✅ رابط الصورة المستخرج: {image_url}")
 
-        session = get_session(sender)
-        if not session.get("thread_id"):
-            thread = client.beta.threads.create()
-            session["thread_id"] = thread.id
+            if not session.get("thread_id"):
+                thread = client.beta.threads.create()
+                session["thread_id"] = thread.id
+                save_session(sender, session)
 
-        msg_content = [
-            {"type": "text", "text": "دي صورة من العميل"},
-            {"type": "image_url", "image_url": {"url": image_url}}
-        ]
+            msg_content = [
+                {"type": "text", "text": "دي صورة من العميل"},
+                {"type": "image_url", "image_url": {"url": image_url}}
+            ]
 
-        if caption:
-            msg_content.append({"type": "text", "text": f"تعليق العميل:\n{caption}"})
+            if caption:
+                msg_content.append({"type": "text", "text": f"تعليق العميل:\n{caption}"})
 
-        client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", content=msg_content)
-        run = client.beta.threads.runs.create(thread_id=session["thread_id"], assistant_id=ASSISTANT_ID)
+            client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", content=msg_content)
+            run = client.beta.threads.runs.create(thread_id=session["thread_id"], assistant_id=ASSISTANT_ID)
 
-        while True:
-            run_status = client.beta.threads.runs.retrieve(thread_id=session["thread_id"], run_id=run.id)
-            if run_status.status == "completed":
-                break
-            time.sleep(2)
+            while True:
+                run_status = client.beta.threads.runs.retrieve(thread_id=session["thread_id"], run_id=run.id)
+                if run_status.status == "completed":
+                    break
+                time.sleep(2)
 
-        messages = client.beta.threads.messages.list(thread_id=session["thread_id"])
-        for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
-            if msg.role == "assistant":
-                reply = msg.content[0].text.value.strip()
-                send_message(sender, reply)
-                return jsonify({"status": "image processed"}), 200
+            messages = client.beta.threads.messages.list(thread_id=session["thread_id"])
+            for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
+                if msg.role == "assistant":
+                    reply = msg.content[0].text.value.strip()
+                    send_message(sender, reply)
+                    return jsonify({"status": "image processed"}), 200
 
-    else:
-        print("⚠️ لم يتمكن من استخراج رابط الصورة.")
+        else:
+            print("⚠ لم يتمكن من استخراج رابط الصورة.")
+            send_message(sender, "❌ في مشكلة في تحميل الصورة، جرب تبعتها تاني.")
+
+        return jsonify({"status": "image failed"}), 200
 
     if msg:
         print(f"📩 رسالة نصية من العميل: {msg}")
@@ -102,4 +128,3 @@ if msg_type == "image":
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
-
