@@ -60,22 +60,6 @@ def send_message(phone, message):
     except Exception as e:
         print(f"❌ خطأ أثناء إرسال الرسالة: {e}", flush=True)
 
-def download_image(media_id):
-    url = f"https://graph.facebook.com/v19.0/{media_id}"
-    headers = {"Authorization": f"Bearer {ZAPI_TOKEN}"}
-    print(f"📥 محاولة تحميل الصورة من الرابط: {url}", flush=True)
-    try:
-        response = requests.get(url, headers=headers)
-        if response.status_code == 200:
-            image_url = response.json().get("url")
-            print(f"✅ رابط الصورة المستلم: {image_url}", flush=True)
-            return image_url
-        else:
-            print(f"❌ فشل تحميل الصورة، الكود: {response.status_code}, التفاصيل: {response.text}", flush=True)
-    except Exception as e:
-        print(f"❌ خطأ أثناء تحميل الصورة: {e}", flush=True)
-    return None
-
 def ask_assistant(content, sender_id, name=""):
     session = get_session(sender_id)
     if name and not session.get("name"):
@@ -153,27 +137,22 @@ def webhook():
         return jsonify({"status": "blocked"}), 200
 
     if msg_type == "image":
-        media_id = data.get("image", {}).get("id")
+        image_url = data.get("image", {}).get("imageUrl")
         caption = data.get("image", {}).get("caption", "")
-        print(f"📷 استقبال صورة - media_id: {media_id} - caption: {caption}", flush=True)
+        print(f"🌐 رابط الصورة المباشر المستلم: {image_url}", flush=True)
 
-        if media_id:
-            image_url = download_image(media_id)
-            print(f"🌐 رابط الصورة بعد التحميل: {image_url}", flush=True)
+        if image_url:
+            message_content = [
+                {"type": "text", "text": f"دي صورة من العميل رقم: {sender} - الاسم: {name}"},
+                {"type": "image_url", "image_url": {"url": image_url}}
+            ]
+            if caption:
+                message_content.append({"type": "text", "text": f"تعليق داخل الصورة:\n{caption}"})
 
-            if image_url:
-                message_content = [
-                    {"type": "text", "text": f"دي صورة من العميل رقم: {sender} - الاسم: {name}"},
-                    {"type": "image_url", "image_url": {"url": image_url}}
-                ]
-                if caption:
-                    message_content.append({"type": "text", "text": f"تعليق داخل الصورة:\n{caption}"})
-
-                ask_assistant(message_content, sender, name)
-                return jsonify({"status": "image processed"}), 200
-
-            else:
-                print("⚠ لم يتمكن من تحميل رابط الصورة.", flush=True)
+            ask_assistant(message_content, sender, name)
+            return jsonify({"status": "image processed"}), 200
+        else:
+            print("⚠ لم يتم العثور على imageUrl داخل الرسالة.", flush=True)
 
     if msg:
         print(f"💬 استقبال رسالة نصية من العميل: {msg}", flush=True)
