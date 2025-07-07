@@ -134,66 +134,55 @@ def process_pending_messages(sender, name):
 
 # ... باقي الكود زي ما هو فوق ...
 
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    print("\n✅ تم استقبال Webhook جديد")
+if msg_type == "image":
+    image_data = data.get("image", {})
+    media_id = image_data.get("id")
+    caption = image_data.get("caption", "")
+    print(f"📷 استقبال صورة | media_id: {media_id} | caption: {caption}")
 
-    data = request.json
-    print(f"\n📦 البيانات الكاملة:\n{json.dumps(data, indent=2, ensure_ascii=False)}")
+    if media_id:
+        image_url = download_image(media_id)
+        print(f"🌐 رابط الصورة بعد التحميل: {image_url}")
 
-    sender = data.get("phone") or data.get("From")
-    msg = data.get("text", {}).get("message") or data.get("body", "")
-    msg_type = data.get("type", "")
-    name = data.get("pushname") or data.get("senderName") or data.get("profileName") or ""
+        if image_url:
+            print(f"\n🌍 جرب تفتح الرابط في المتصفح:\n{image_url}\n")
 
-    print(f"\n📊 بيانات الرسالة:\nالرقم: {sender}\nالنوع: {msg_type}\nالرسالة: {msg}")
+            session = get_session(sender)
+            if not session.get("thread_id"):
+                thread = client.beta.threads.create()
+                session["thread_id"] = thread.id
 
-    if not sender:
-        print("❌ لم يتم العثور على رقم العميل.")
-        return jsonify({"status": "no sender"}), 400
+            msg_content = [
+                {"type": "text", "text": "دي صورة من العميل"},
+                {"type": "image_url", "image_url": {"url": image_url}}
+            ]
 
-    session = get_session(sender)
-    if session.get("block_until") and datetime.utcnow() < datetime.fromisoformat(session["block_until"]):
-        print(f"🚫 العميل {sender} في فترة الحظر.")
-        send_message(sender, "✅ طلبك بالفعل تحت التنفيذ، نرجو الانتظار.")
-        return jsonify({"status": "blocked"}), 200
+            if caption:
+                msg_content.append({"type": "text", "text": f"تعليق العميل:\n{caption}"})
 
-    if msg_type == "image":
-        image_data = data.get("image", {})
-        media_id = image_data.get("id")
-        caption = image_data.get("caption", "")
-        print(f"📷 استقبال صورة | media_id: {media_id} | caption: {caption}")
+            print(f"✅ الرسالة اللي رايحة للمساعد:\n{json.dumps(msg_content, indent=2, ensure_ascii=False)}")
 
-        if media_id:
-            image_url = download_image(media_id)
-            print(f"🌐 رابط الصورة بعد التحميل: {image_url}")
+            client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", content=msg_content)
+            run = client.beta.threads.runs.create(thread_id=session["thread_id"], assistant_id=ASSISTANT_ID)
 
-            if image_url:
-                message_content = f"📷 صورة من العميل:\nرابط الصورة: {image_url}"
-                if caption:
-                    message_content += f"\nتعليق العميل: {caption}"
+            while True:
+                run_status = client.beta.threads.runs.retrieve(thread_id=session["thread_id"], run_id=run.id)
+                if run_status.status == "completed":
+                    break
+                time.sleep(2)
 
-                print(f"✅ الرسالة اللي رايحة للمساعد:\n{message_content}")
+            messages = client.beta.threads.messages.list(thread_id=session["thread_id"])
+            for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
+                if msg.role == "assistant":
+                    reply = msg.content[0].text.value.strip()
+                    print(f"💬 رد المساعد:\n{reply}")
+                    send_message(sender, reply)
+                    return jsonify({"status": "image processed"}), 200
 
-                ask_assistant(message_content, sender, name)
-                return jsonify({"status": "image processed"}), 200
-            else:
-                print("⚠ لم يتمكن من تحميل رابط الصورة.")
         else:
-            print("⚠ لم يتم العثور على media_id للصورة.")
-
-    if msg:
-        print(f"\n💬 استقبال رسالة نصية: {msg}")
-
-        if sender not in pending_messages:
-            pending_messages[sender] = []
-        pending_messages[sender].append(msg)
-
-        if sender not in timers:
-            timers[sender] = threading.Thread(target=process_pending_messages, args=(sender, name))
-            timers[sender].start()
-
-    return jsonify({"status": "received"}), 200
+            print("⚠ لم يتمكن من تحميل رابط الصورة.")
+    else:
+        print("⚠ لم يتم العثور على media_id للصورة.")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
