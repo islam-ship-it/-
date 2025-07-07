@@ -143,49 +143,56 @@ def webhook():
         send_message(sender, "✅ طلبك تحت التنفيذ، نرجو الانتظار.")
         return jsonify({"status": "blocked"}), 200
 
-    if msg_type == "image":
-        print(f"\n📥 داتا كاملة جاية من العميل:\n{json.dumps(data, indent=2, ensure_ascii=False)}", flush=True)
+   if msg_type == "image":
+    print(f"📥 داتا كاملة جاية من العميل:\n{json.dumps(data, indent=2, ensure_ascii=False)}", flush=True)
 
-        media_id = data.get("image", {}).get("id")
-        caption = data.get("image", {}).get("caption", "")
-        print(f"📷 بيانات الصورة:\nmedia_id: {media_id}\ncaption: {caption}", flush=True)
+    media_id = data.get("image", {}).get("id")
+    caption = data.get("image", {}).get("caption", "")
+    msg_text = data.get("text", {}).get("message") or data.get("body", "")
 
-        if media_id:
-            image_url = download_image(media_id)
-            print(f"🌐 رابط الصورة بعد التحميل:\n{image_url}", flush=True)
+    print(f"📷 media_id: {media_id}", flush=True)
+    print(f"📝 التعليق داخل الصورة (caption): {caption}", flush=True)
+    print(f"💬 نص إضافي خارج الصورة: {msg_text}", flush=True)
 
-            if image_url:
-                if not session.get("thread_id"):
-                    thread = client.beta.threads.create()
-                    session["thread_id"] = thread.id
-                    save_session(sender, session)
+    if media_id:
+        image_url = download_image(media_id)
+        print(f"🌐 رابط الصورة بعد التحميل: {image_url}", flush=True)
 
-                msg_content = [
-                    {"type": "text", "text": f"دي صورة من العميل، الرقم: {sender}, الاسم: {session.get('name') or 'غير معروف'}"},
-                    {"type": "image_url", "image_url": {"url": image_url}}
-                ]
+        if image_url:
+            if not session.get("thread_id"):
+                thread = client.beta.threads.create()
+                session["thread_id"] = thread.id
+                save_session(sender, session)
 
-                if caption:
-                    msg_content.append({"type": "text", "text": f"تعليق العميل:\n{caption}"})
+            msg_content = []
 
-                print(f"🚀 الرسالة اللي داخلة للمساعد (Structured):\n{json.dumps(msg_content, indent=2, ensure_ascii=False)}", flush=True)
+            msg_content.append({"type": "text", "text": f"دي صورة من العميل رقم: {sender} - الاسم: {name}"})
+            msg_content.append({"type": "image_url", "image_url": {"url": image_url}})
 
-                client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", content=msg_content)
-                run = client.beta.threads.runs.create(thread_id=session["thread_id"], assistant_id=ASSISTANT_ID)
+            if caption:
+                msg_content.append({"type": "text", "text": f"تعليق داخل الصورة:\n{caption}"})
 
-                while True:
-                    run_status = client.beta.threads.runs.retrieve(thread_id=session["thread_id"], run_id=run.id)
-                    if run_status.status == "completed":
-                        break
-                    time.sleep(2)
+            if msg_text and msg_text != caption:
+                msg_content.append({"type": "text", "text": f"رسالة إضافية تحت الصورة:\n{msg_text}"})
 
-                messages = client.beta.threads.messages.list(thread_id=session["thread_id"])
-                for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
-                    if msg.role == "assistant":
-                        reply = msg.content[0].text.value.strip()
-                        print(f"💬 رد المساعد على الصورة:\n{reply}", flush=True)
-                        send_message(sender, reply)
-                        return jsonify({"status": "image processed"}), 200
+            print(f"🚀 الداتا الكاملة داخلة للمساعد:\n{json.dumps(msg_content, indent=2, ensure_ascii=False)}", flush=True)
+
+            client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", content=msg_content)
+            run = client.beta.threads.runs.create(thread_id=session["thread_id"], assistant_id=ASSISTANT_ID)
+
+            while True:
+                run_status = client.beta.threads.runs.retrieve(thread_id=session["thread_id"], run_id=run.id)
+                if run_status.status == "completed":
+                    break
+                time.sleep(2)
+
+            messages = client.beta.threads.messages.list(thread_id=session["thread_id"])
+            for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
+                if msg.role == "assistant":
+                    reply = msg.content[0].text.value.strip()
+                    print(f"💬 رد المساعد:\n{reply}", flush=True)
+                    send_message(sender, reply)
+                    return jsonify({"status": "image processed"}), 200
             else:
                 print("⚠ لم يتمكن من تحميل رابط الصورة.", flush=True)
         else:
