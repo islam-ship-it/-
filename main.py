@@ -10,8 +10,6 @@ from datetime import datetime, timedelta
 
 # إعدادات البيئة
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
@@ -51,10 +49,6 @@ def block_client_24h(user_id):
     session["block_until"] = (datetime.utcnow() + timedelta(hours=24)).isoformat()
     save_session(user_id, session)
     print(f"🚫 العميل {user_id} تم حظره من الرد لمدة 24 ساعة.")
-
-@app.route("/", methods=["GET"])
-def home():
-    return "✅ السيرفر شغال تمام!"
 
 def send_message(phone, message):
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
@@ -98,7 +92,7 @@ def ask_assistant(message, sender_id, name=""):
     intro = f"عميل اسمه: {session['name'] or 'غير معروف'}, رقمه: {sender_id}."
     full_message = f"{intro}\n{message}"
 
-    print(f"📨 إرسال للمساعد:\n{full_message}")
+    print(f"📨 إرسال الرسالة للمساعد:\n{full_message}")
 
     msg_content = [{"type": "text", "text": full_message}]
     client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", content=msg_content)
@@ -115,23 +109,22 @@ def ask_assistant(message, sender_id, name=""):
         if msg.role == "assistant":
             reply = msg.content[0].text.value.strip()
             print(f"💬 رد المساعد:\n{reply}")
-
-            if "##BLOCK_CLIENT_24H##" in reply:
-                block_client_24h(sender_id)
-                return "✅ تم استقبال طلبك، نرجو الانتظار حتى انتهاء التنفيذ."
-
             return reply
+
+    print("⚠ لم يتم استلام رد من المساعد.")
     return "⚠ مشكلة مؤقتة، حاول مرة أخرى."
 
 def process_pending_messages(sender, name):
     print(f"⏳ تجميع رسائل العميل {sender} لمدة 8 ثواني.")
     time.sleep(8)
     combined = "\n".join(pending_messages[sender])
+    print(f"✅ الرسائل المجمعة من العميل:\n{combined}")
+
     reply = ask_assistant(combined, sender, name)
     send_message(sender, reply)
     pending_messages[sender] = []
     timers.pop(sender, None)
-    print(f"🎯 الرد تم على جميع رسائل {sender}.")
+    print(f"🎯 تم إرسال الرد للعميل {sender}.")
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -155,12 +148,10 @@ def webhook():
         send_message(sender, "✅ طلبك تحت التنفيذ، نرجو الانتظار.")
         return jsonify({"status": "blocked"}), 200
 
-    if "image" in data:
-        print(f"🖼 بيانات الصورة:\n{json.dumps(data.get('image'), indent=2, ensure_ascii=False)}")
-
     if msg_type == "image":
-        media_id = data.get("image", {}).get("id")
-        caption = data.get("image", {}).get("caption", "")
+        image_data = data.get("image", {})
+        media_id = image_data.get("id")
+        caption = image_data.get("caption", "")
         print(f"📷 استقبال صورة | media_id: {media_id} | caption: {caption}")
 
         if media_id:
@@ -168,6 +159,11 @@ def webhook():
             print(f"🌐 رابط الصورة بعد التحميل: {image_url}")
 
             if image_url:
+                session = get_session(sender)
+                if not session.get("thread_id"):
+                    thread = client.beta.threads.create()
+                    session["thread_id"] = thread.id
+
                 msg_content = [
                     {"type": "text", "text": "دي صورة من العميل"},
                     {"type": "image_url", "image_url": {"url": image_url}}
@@ -175,10 +171,7 @@ def webhook():
                 if caption:
                     msg_content.append({"type": "text", "text": f"تعليق العميل:\n{caption}"})
 
-                session = get_session(sender)
-                if not session.get("thread_id"):
-                    thread = client.beta.threads.create()
-                    session["thread_id"] = thread.id
+                print(f"✅ الرسالة اللي رايحة للمساعد:\n{json.dumps(msg_content, indent=2, ensure_ascii=False)}")
 
                 client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", content=msg_content)
                 run = client.beta.threads.runs.create(thread_id=session["thread_id"], assistant_id=ASSISTANT_ID)
@@ -201,15 +194,18 @@ def webhook():
                 print("⚠ لم يتمكن من تحميل رابط الصورة.")
 
     if msg:
+        print(f"\n💬 استقبال رسالة نصية من العميل:\n{msg}")
+
         if sender not in pending_messages:
             pending_messages[sender] = []
         pending_messages[sender].append(msg)
 
         if sender not in timers:
+            print(f"⏳ بدء تجميع رسائل العميل {sender} لمدة 8 ثواني.")
             timers[sender] = threading.Thread(target=process_pending_messages, args=(sender, name))
             timers[sender].start()
 
     return jsonify({"status": "received"}), 200
 
-if __name__ == "__main__":
+if __name__ == "__main_-_":
     app.run(host="0.0.0.0", port=5000)
