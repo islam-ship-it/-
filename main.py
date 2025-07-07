@@ -156,7 +156,7 @@ def webhook():
             if image_url:
                 msg_content = [
                     { "type": "text", "text": f"دي صورة من العميل رقم: {sender} - الاسم: {name}" },
-                    { "type": "image_url", "image_url": { "url": image_url } }
+                    { "type": "image_url", "image_url": image_url }
                 ]
 
                 if caption:
