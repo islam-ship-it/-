@@ -182,23 +182,39 @@ def webhook():
             print(f"🌐 رابط الصورة بعد التحميل: {image_url}", flush=True)
 
             if image_url:
-                ask_assistant(f"📷 صورة من العميل: {image_url}\nتعليق: {caption}", sender, name)
-                return jsonify({"status": "image processed"}), 200
-            else:
-                print("⚠ لم يتمكن من تحميل رابط الصورة.", flush=True)
-        else:
-            print("⚠ لم يتم العثور على media_id.", flush=True)
+         if image_url:
+    print(f"✅ جاري إرسال الصورة للمساعد مع رابط مباشر: {image_url}", flush=True)
 
-    if msg:
-        if sender not in pending_messages:
-            pending_messages[sender] = []
-        pending_messages[sender].append(msg)
+    session = get_session(sender)
+    if not session.get("thread_id"):
+        thread = client.beta.threads.create()
+        session["thread_id"] = thread.id
+        save_session(sender, session)
 
-        if sender not in timers:
-            timers[sender] = threading.Thread(target=process_pending_messages, args=(sender, name))
-            timers[sender].start()
+    msg_content = [
+        {"type": "text", "text": f"دي صورة من العميل رقم: {sender} - الاسم: {session.get('name', 'غير معروف')}"},
+        {"type": "image_url", "image_url": {"url": image_url}}
+    ]
 
-    return jsonify({"status": "received"}), 200
+    if caption:
+        msg_content.append({"type": "text", "text": f"تعليق العميل:\n{caption}"})
+
+    client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", content=msg_content)
+    run = client.beta.threads.runs.create(thread_id=session["thread_id"], assistant_id=ASSISTANT_ID)
+
+    while True:
+        run_status = client.beta.threads.runs.retrieve(thread_id=session["thread_id"], run_id=run.id)
+        if run_status.status == "completed":
+            break
+        time.sleep(2)
+
+    messages = client.beta.threads.messages.list(thread_id=session["thread_id"])
+    for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
+        if msg.role == "assistant":
+            reply = msg.content[0].text.value.strip()
+            print(f"💬 رد المساعد على الصورة:\n{reply}", flush=True)
+            send_message(sender, organize_reply(reply))
+            return jsonify({"status": "image processed"}), 200
 
 @app.route("/", methods=["GET"])
 def home():
