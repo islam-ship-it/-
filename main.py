@@ -128,13 +128,11 @@ def ask_assistant(content, sender_id, name=""):
             print(f"❌ فشل إنشاء Thread جديد: {e}", flush=True)
             return "⚠ مشكلة مؤقتة في إنشاء المحادثة، حاول تاني."
 
-    # تحديث عداد الرسائل وحفظ المحتوى في التاريخ
+    # إضافة رسالة المستخدم إلى الـ history
     session["message_count"] += 1
     session["history"].append({"role": "user", "content": content})
-    session["history"] = session["history"][-10:] # الاحتفاظ بآخر 10 إدخالات فقط
-    save_session(sender_id, session)
+    # لا تحفظ هنا، سنحفظ بعد إضافة رد المساعد
 
-    # طباعة المحتوى الذي سيتم إرساله إلى OpenAI للتشخيص
     print(f"\n🚀 الداتا داخلة للمساعد (OpenAI):\n{json.dumps(content, indent=2, ensure_ascii=False)}", flush=True)
 
     try:
@@ -158,6 +156,10 @@ def ask_assistant(content, sender_id, name=""):
                 break
             elif run_status.status in ["failed", "cancelled", "expired"]:
                 print(f"❌ الـ Run فشل أو تم إلغاؤه/انتهت صلاحيته: {run_status.status}", flush=True)
+                # حفظ الجلسة حتى لو فشل الـ Run لتحديث حالة الـ history
+                session["history"].append({"role": "assistant", "content": "⚠ حدث خطأ أثناء معالجة طلبك."})
+                session["history"] = session["history"][-10:]
+                save_session(sender_id, session)
                 return "⚠ حدث خطأ أثناء معالجة طلبك، حاول تاني."
             time.sleep(2) # انتظار ثانيتين قبل التحقق مرة أخرى
 
@@ -165,28 +167,39 @@ def ask_assistant(content, sender_id, name=""):
         messages = client.beta.threads.messages.list(thread_id=session["thread_id"])
         
         # البحث عن أحدث رد من المساعد
-        for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
-            if msg.role == "assistant":
+        for msg_obj in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
+            if msg_obj.role == "assistant":
                 # التأكد من أن الرد يحتوي على نص قبل محاولة الوصول إلى .text.value
-                if msg.content and hasattr(msg.content[0], 'text') and hasattr(msg.content[0].text, 'value'):
-                    reply = msg.content[0].text.value.strip()
+                if msg_obj.content and hasattr(msg_obj.content[0], 'text') and hasattr(msg_obj.content[0].text, 'value'):
+                    reply = msg_obj.content[0].text.value.strip()
                     print(f"💬 رد المساعد:\n{reply}", flush=True)
                     
-                    # التحقق من علامة الحظر
+                    # --- إضافة رد المساعد إلى الـ history هنا ---
+                    session["history"].append({"role": "assistant", "content": reply})
+                    session["history"] = session["history"][-10:] # الاحتفاظ بآخر 10 إدخالات فقط
+                    save_session(sender_id, session) # حفظ الجلسة بعد إضافة رد المساعد
+                    # ------------------------------------------
+
                     if "##BLOCK_CLIENT_24H##" in reply:
                         block_client_24h(sender_id)
-                        # يمكنك تعديل الرسالة هنا لتكون أكثر وضوحاً للمستخدم المحظور
                         return "✅ طلبك تحت التنفيذ، نرجو الانتظار." 
                     return reply
                 else:
-                    print(f"⚠️ رد المساعد لا يحتوي على نص متوقع: {msg.content}", flush=True)
+                    print(f"⚠️ رد المساعد لا يحتوي على نص متوقع: {msg_obj.content}", flush=True)
+                    # حفظ الجلسة حتى لو الرد غير متوقع
+                    session["history"].append({"role": "assistant", "content": "⚠ مشكلة في استلام رد المساعد."})
+                    session["history"] = session["history"][-10:]
+                    save_session(sender_id, session)
                     return "⚠ مشكلة في استلام رد المساعد، حاول تاني."
 
     except Exception as e:
         print(f"❌ حصل استثناء أثناء الإرسال للمساعد أو استلام الرد: {e}", flush=True)
-        # طباعة تفاصيل الخطأ لمزيد من التشخيص
         import traceback
         traceback.print_exc()
+        # حفظ الجلسة حتى لو حصل استثناء
+        session["history"].append({"role": "assistant", "content": "⚠ حدث خطأ عام."})
+        session["history"] = session["history"][-10:]
+        save_session(sender_id, session)
     return "⚠ مشكلة مؤقتة، حاول تاني."
 
 # ==============================================================================
