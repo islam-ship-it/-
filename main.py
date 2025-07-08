@@ -30,7 +30,14 @@ timers = {}
 def get_session(user_id):
     session = sessions_collection.find_one({"_id": user_id})
     if not session:
-        session = {"_id": user_id, "history": [], "thread_id": None, "message_count": 0, "name": "", "block_until": None}
+        session = {
+            "_id": user_id,
+            "history": [],
+            "thread_id": None,
+            "message_count": 0,
+            "name": "",
+            "block_until": None
+        }
     else:
         session.setdefault("history", [])
         session.setdefault("thread_id", None)
@@ -42,39 +49,23 @@ def get_session(user_id):
 def save_session(user_id, session_data):
     session_data["_id"] = user_id
     sessions_collection.replace_one({"_id": user_id}, session_data, upsert=True)
-    print(f"💾 تم حفظ بيانات الجلسة للعميل {user_id}.", flush=True)
+    print(f"💾 تم حفظ بيانات الجلسة للعميل {user_id}", flush=True)
 
 def block_client_24h(user_id):
     session = get_session(user_id)
     session["block_until"] = (datetime.utcnow() + timedelta(hours=24)).isoformat()
     save_session(user_id, session)
-    print(f"🚫 العميل {user_id} تم حظره من الرد لمدة 24 ساعة.", flush=True)
+    print(f"🚫 العميل {user_id} تم حظره 24 ساعة", flush=True)
 
 def send_message(phone, message):
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
     headers = {"Content-Type": "application/json", "Client-Token": CLIENT_TOKEN}
     payload = {"phone": phone, "message": message}
     try:
-        response = requests.post(url, headers=headers, json=payload)
-        print(f"📤 تم إرسال رسالة للعميل {phone}، الحالة: {response.status_code}", flush=True)
+        res = requests.post(url, headers=headers, json=payload)
+        print(f"📤 تم الإرسال إلى {phone} - status: {res.status_code}", flush=True)
     except Exception as e:
-        print(f"❌ خطأ أثناء إرسال الرسالة: {e}", flush=True)
-
-def download_image(media_id):
-    url = f"https://graph.facebook.com/v19.0/{media_id}"
-    headers = {"Authorization": f"Bearer {ZAPI_TOKEN}"}
-    print(f"📥 محاولة تحميل الصورة من الرابط: {url}", flush=True)
-    try:
-        response = requests.get(url, headers=headers)
-        if response.status_code == 200:
-            image_url = response.json().get("url")
-            print(f"✅ رابط الصورة المستلم: {image_url}", flush=True)
-            return image_url
-        else:
-            print(f"❌ فشل تحميل الصورة، الكود: {response.status_code}, التفاصيل: {response.text}", flush=True)
-    except Exception as e:
-        print(f"❌ خطأ أثناء تحميل الصورة: {e}", flush=True)
-    return None
+        print(f"❌ إرسال الرد فشل: {e}", flush=True)
 
 def ask_assistant(content, sender_id, name=""):
     session = get_session(sender_id)
@@ -89,7 +80,7 @@ def ask_assistant(content, sender_id, name=""):
     session["history"] = session["history"][-10:]
     save_session(sender_id, session)
 
-    print(f"\n🚀 الداتا داخلة للمساعد:\n{json.dumps(content, indent=2, ensure_ascii=False)}", flush=True)
+    print(f"\n🚀 داتا داخلة للمساعد:\n{json.dumps(content, indent=2, ensure_ascii=False)}", flush=True)
 
     try:
         client.beta.threads.messages.create(
@@ -97,8 +88,6 @@ def ask_assistant(content, sender_id, name=""):
             role="user",
             content=content
         )
-        print(f"✅ تم إرسال الداتا للمساعد بنجاح.", flush=True)
-
         run = client.beta.threads.runs.create(thread_id=session["thread_id"], assistant_id=ASSISTANT_ID)
 
         while True:
@@ -112,17 +101,14 @@ def ask_assistant(content, sender_id, name=""):
             if msg.role == "assistant":
                 reply = msg.content[0].text.value.strip()
                 print(f"💬 رد المساعد:\n{reply}", flush=True)
-                if "##BLOCK_CLIENT_24H##" in reply:
-                    block_client_24h(sender_id)
                 return reply
-
     except Exception as e:
-        print(f"❌ حصل استثناء أثناء الإرسال للمساعد: {e}", flush=True)
+        print(f"❌ فشل الإرسال إلى المساعد: {e}", flush=True)
 
-    return "⚠ مشكلة مؤقتة، حاول تاني."
+    return "⚠ حصلت مشكلة مؤقتة، حاول تاني."
 
 def process_pending_messages(sender, name):
-    print(f"⏳ تجميع رسائل العميل {sender} لمدة 8 ثواني.", flush=True)
+    print(f"⏳ انتظار 8 ثواني لتجميع رسائل {sender}", flush=True)
     time.sleep(8)
     combined = "\n".join(pending_messages[sender])
     content = [{"type": "text", "text": combined}]
@@ -130,57 +116,49 @@ def process_pending_messages(sender, name):
     send_message(sender, reply)
     pending_messages[sender] = []
     timers.pop(sender, None)
-    print(f"🎯 الرد تم على جميع رسائل {sender}.", flush=True)
+    print(f"🎯 تم الرد على {sender}", flush=True)
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
-    print(f"\n📥 البيانات المستلمة كاملة:\n{json.dumps(data, indent=2, ensure_ascii=False)}", flush=True)
+    print(f"\n📥 البيانات المستلمة:\n{json.dumps(data, indent=2, ensure_ascii=False)}", flush=True)
 
     sender = data.get("phone") or data.get("From")
     msg = data.get("text", {}).get("message") or data.get("body", "")
     msg_type = data.get("type", "")
     name = data.get("pushname") or data.get("senderName") or data.get("profileName") or ""
+    image_url = data.get("image", {}).get("imageUrl", "")
+    caption = data.get("image", {}).get("caption", "")
 
     if not sender:
-        print("❌ رقم العميل غير موجود.", flush=True)
         return jsonify({"status": "no sender"}), 400
 
     session = get_session(sender)
     if session.get("block_until") and datetime.utcnow() < datetime.fromisoformat(session["block_until"]):
-        print(f"🚫 العميل {sender} في فترة الحظر.", flush=True)
-        send_message(sender, "✅ طلبك تحت التنفيذ، نرجو الانتظار.")
+        send_message(sender, "✅ طلبك تحت التنفيذ. يرجى الانتظار.")
         return jsonify({"status": "blocked"}), 200
 
-    if msg_type == "image":
-        media_id = data.get("image", {}).get("id")
-        caption = data.get("image", {}).get("caption", "")
-        print(f"📷 استقبال صورة - media_id: {media_id} - caption: {caption}", flush=True)
+    # معالجة الصور
+    if msg_type == "image" and image_url:
+        print(f"🌐 صورة مستلمة: {image_url}", flush=True)
 
-        if media_id:
-            image_url = download_image(media_id)
-            print(f"🌐 رابط الصورة بعد التحميل: {image_url}", flush=True)
+        message_content = [
+            {"type": "text", "text": f"دي صورة من العميل رقم: {sender} - الاسم: {name}"},
+            {"type": "image_url", "image_url": {"url": image_url}}
+        ]
+        if caption:
+            message_content.append({"type": "text", "text": f"تعليق داخل الصورة:\n{caption}"})
 
-            if image_url:
-                message_content = [
-                    {"type": "text", "text": f"دي صورة من العميل رقم: {sender} - الاسم: {name}"},
-                    {"type": "image_url", "image_url": {"url": image_url}}
-                ]
-                if caption:
-                    message_content.append({"type": "text", "text": f"تعليق داخل الصورة:\n{caption}"})
+        reply = ask_assistant(message_content, sender, name)
+        if reply:
+            send_message(sender, reply)
+        return jsonify({"status": "image processed"}), 200
 
-                ask_assistant(message_content, sender, name)
-                return jsonify({"status": "image processed"}), 200
-
-            else:
-                print("⚠ لم يتمكن من تحميل رابط الصورة.", flush=True)
-
+    # نصوص فقط
     if msg:
-        print(f"💬 استقبال رسالة نصية من العميل: {msg}", flush=True)
         if sender not in pending_messages:
             pending_messages[sender] = []
         pending_messages[sender].append(msg)
-
         if sender not in timers:
             timers[sender] = threading.Thread(target=process_pending_messages, args=(sender, name))
             timers[sender].start()
@@ -189,7 +167,7 @@ def webhook():
 
 @app.route("/", methods=["GET"])
 def home():
-    return "✅ السيرفر شغال تمام!"
+    return "✅ السيرفر شغال!"
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
