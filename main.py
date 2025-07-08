@@ -25,7 +25,7 @@ ASSISTANT_ID_PREMIUM = os.getenv("ASSISTANT_ID_PREMIUM")
 ASSISTANT_ID_CHEAPER = os.getenv("ASSISTANT_ID_CHEAPER") 
 
 # عدد الرسائل المسموح بها للنموذج الأغلى قبل التحويل للأرخص
-MAX_MESSAGES_FOR_PREMIUM_MODEL = 8 # كما طلبت: 10 رسائل
+MAX_MESSAGES_FOR_PREMIUM_MODEL = 10 # كما طلبت: 10 رسائل
 
 MONGO_URI = os.getenv("MONGO_URI")
 
