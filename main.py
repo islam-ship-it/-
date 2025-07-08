@@ -8,7 +8,9 @@ from openai import OpenAI
 from pymongo import MongoClient
 from datetime import datetime, timedelta
 
-# إعدادات البيئة
+# ==============================================================================
+# إعدادات البيئة (تأكد من ضبطها بشكل صحيح)
+# ==============================================================================
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
@@ -17,21 +19,49 @@ CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 ASSISTANT_ID = os.getenv("ASSISTANT_ID")
 MONGO_URI = os.getenv("MONGO_URI")
 
-client_db = MongoClient(MONGO_URI)
-db = client_db["whatsapp_bot"]
-sessions_collection = db["sessions"]
+# ==============================================================================
+# إعدادات قاعدة البيانات (MongoDB)
+# ==============================================================================
+try:
+    client_db = MongoClient(MONGO_URI)
+    db = client_db["whatsapp_bot"]
+    sessions_collection = db["sessions"]
+    print("✅ تم الاتصال بقاعدة البيانات بنجاح.", flush=True)
+except Exception as e:
+    print(f"❌ فشل الاتصال بقاعدة البيانات: {e}", flush=True)
+    # يمكنك هنا اختيار إيقاف التطبيق أو التعامل مع الخطأ بطريقة أخرى
 
+# ==============================================================================
+# إعداد تطبيق Flask وعميل OpenAI
+# ==============================================================================
 app = Flask(__name__)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+# ==============================================================================
+# متغيرات عالمية لإدارة الرسائل المعلقة والمؤقتات
+# ==============================================================================
 pending_messages = {}
 timers = {}
 
+# ==============================================================================
+# دوال إدارة الجلسات
+# ==============================================================================
 def get_session(user_id):
+    """
+    يسترجع بيانات جلسة المستخدم من قاعدة البيانات أو ينشئ جلسة جديدة.
+    """
     session = sessions_collection.find_one({"_id": user_id})
     if not session:
-        session = {"_id": user_id, "history": [], "thread_id": None, "message_count": 0, "name": "", "block_until": None}
+        session = {
+            "_id": user_id,
+            "history": [],
+            "thread_id": None,
+            "message_count": 0,
+            "name": "",
+            "block_until": None
+        }
     else:
+        # التأكد من وجود جميع المفاتيح الافتراضية في الجلسات القديمة
         session.setdefault("history", [])
         session.setdefault("thread_id", None)
         session.setdefault("message_count", 0)
@@ -40,161 +70,235 @@ def get_session(user_id):
     return session
 
 def save_session(user_id, session_data):
+    """
+    يحفظ أو يحدث بيانات جلسة المستخدم في قاعدة البيانات.
+    """
     session_data["_id"] = user_id
     sessions_collection.replace_one({"_id": user_id}, session_data, upsert=True)
     print(f"💾 تم حفظ بيانات الجلسة للعميل {user_id}.", flush=True)
 
 def block_client_24h(user_id):
+    """
+    يحظر العميل من الرد لمدة 24 ساعة.
+    """
     session = get_session(user_id)
     session["block_until"] = (datetime.utcnow() + timedelta(hours=24)).isoformat()
     save_session(user_id, session)
     print(f"🚫 العميل {user_id} تم حظره من الرد لمدة 24 ساعة.", flush=True)
 
+# ==============================================================================
+# دالة إرسال الرسائل عبر ZAPI
+# ==============================================================================
 def send_message(phone, message):
+    """
+    يرسل رسالة نصية إلى رقم هاتف محدد باستخدام ZAPI.
+    """
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
     headers = {"Content-Type": "application/json", "Client-Token": CLIENT_TOKEN}
     payload = {"phone": phone, "message": message}
     try:
         response = requests.post(url, headers=headers, json=payload)
         print(f"📤 تم إرسال رسالة للعميل {phone}، الحالة: {response.status_code}", flush=True)
+        response.raise_for_status() # يرفع استثناء للأكواد 4xx/5xx
+    except requests.exceptions.RequestException as e:
+        print(f"❌ خطأ أثناء إرسال الرسالة عبر ZAPI: {e}", flush=True)
     except Exception as e:
-        print(f"❌ خطأ أثناء إرسال الرسالة: {e}", flush=True)
+        print(f"❌ خطأ غير متوقع أثناء إرسال الرسالة: {e}", flush=True)
 
-def download_image(media_id):
-    url = f"https://graph.facebook.com/v19.0/{media_id}"
-    headers = {"Authorization": f"Bearer {ZAPI_TOKEN}"}
-    print(f"📥 محاولة تحميل الصورة من الرابط: {url}", flush=True)
-    try:
-        response = requests.get(url, headers=headers)
-        if response.status_code == 200:
-            image_url = response.json().get("url")
-            print(f"✅ رابط الصورة المستلم: {image_url}", flush=True)
-            return image_url
-        else:
-            print(f"❌ فشل تحميل الصورة، الكود: {response.status_code}, التفاصيل: {response.text}", flush=True)
-    except Exception as e:
-        print(f"❌ خطأ أثناء تحميل الصورة: {e}", flush=True)
-    return None
-
+# ==============================================================================
+# دالة التفاعل مع مساعد OpenAI
+# ==============================================================================
 def ask_assistant(content, sender_id, name=""):
+    """
+    يرسل المحتوى إلى مساعد OpenAI ويسترجع الرد.
+    """
     session = get_session(sender_id)
+
+    # تحديث اسم المستخدم إذا كان متاحاً ولم يتم حفظه من قبل
     if name and not session.get("name"):
         session["name"] = name
+    
+    # إنشاء Thread جديد إذا لم يكن موجوداً للجلسة
     if not session.get("thread_id"):
-        thread = client.beta.threads.create()
-        session["thread_id"] = thread.id
+        try:
+            thread = client.beta.threads.create()
+            session["thread_id"] = thread.id
+            print(f"🆕 تم إنشاء Thread جديد للمستخدم {sender_id}: {thread.id}", flush=True)
+        except Exception as e:
+            print(f"❌ فشل إنشاء Thread جديد: {e}", flush=True)
+            return "⚠ مشكلة مؤقتة في إنشاء المحادثة، حاول تاني."
 
+    # تحديث عداد الرسائل وحفظ المحتوى في التاريخ
     session["message_count"] += 1
     session["history"].append({"role": "user", "content": content})
-    session["history"] = session["history"][-10:]
+    session["history"] = session["history"][-10:] # الاحتفاظ بآخر 10 إدخالات فقط
     save_session(sender_id, session)
 
-    print(f"🚀 الداتا اللي داخلة للمساعد:\n{json.dumps(content, indent=2, ensure_ascii=False)}", flush=True)
+    # طباعة المحتوى الذي سيتم إرساله إلى OpenAI للتشخيص
+    print(f"\n🚀 الداتا داخلة للمساعد (OpenAI):\n{json.dumps(content, indent=2, ensure_ascii=False)}", flush=True)
 
-    payload = {"content": content} if isinstance(content, list) else {"content": [{"type": "text", "text": content}]}
+    try:
+        # إضافة الرسالة إلى Thread في OpenAI
+        client.beta.threads.messages.create(
+            thread_id=session["thread_id"],
+            role="user",
+            content=content
+        )
+        print(f"✅ تم إرسال الداتا للمساعد بنجاح.", flush=True)
 
-    client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", **payload)
-    run = client.beta.threads.runs.create(thread_id=session["thread_id"], assistant_id=ASSISTANT_ID)
+        # تشغيل المساعد لمعالجة الرسالة
+        run = client.beta.threads.runs.create(thread_id=session["thread_id"], assistant_id=ASSISTANT_ID)
+        print(f"🏃‍♂️ تم بدء Run للمساعد: {run.id}", flush=True)
 
-    while True:
-        run_status = client.beta.threads.runs.retrieve(thread_id=session["thread_id"], run_id=run.id)
-        if run_status.status == "completed":
-            break
-        time.sleep(2)
+        # انتظار اكتمال الـ Run
+        while True:
+            run_status = client.beta.threads.runs.retrieve(thread_id=session["thread_id"], run_id=run.id)
+            print(f"⏳ حالة الـ Run: {run_status.status}", flush=True)
+            if run_status.status == "completed":
+                break
+            elif run_status.status in ["failed", "cancelled", "expired"]:
+                print(f"❌ الـ Run فشل أو تم إلغاؤه/انتهت صلاحيته: {run_status.status}", flush=True)
+                return "⚠ حدث خطأ أثناء معالجة طلبك، حاول تاني."
+            time.sleep(2) # انتظار ثانيتين قبل التحقق مرة أخرى
 
-    messages = client.beta.threads.messages.list(thread_id=session["thread_id"])
-    for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
-        if msg.role == "assistant":
-            reply = msg.content[0].text.value.strip()
-            print(f"💬 رد المساعد:\n{reply}", flush=True)
+        # استرجاع رسائل المساعد
+        messages = client.beta.threads.messages.list(thread_id=session["thread_id"])
+        
+        # البحث عن أحدث رد من المساعد
+        for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
+            if msg.role == "assistant":
+                # التأكد من أن الرد يحتوي على نص قبل محاولة الوصول إلى .text.value
+                if msg.content and hasattr(msg.content[0], 'text') and hasattr(msg.content[0].text, 'value'):
+                    reply = msg.content[0].text.value.strip()
+                    print(f"💬 رد المساعد:\n{reply}", flush=True)
+                    
+                    # التحقق من علامة الحظر
+                    if "##BLOCK_CLIENT_24H##" in reply:
+                        block_client_24h(sender_id)
+                        # يمكنك تعديل الرسالة هنا لتكون أكثر وضوحاً للمستخدم المحظور
+                        return "✅ طلبك تحت التنفيذ، نرجو الانتظار." 
+                    return reply
+                else:
+                    print(f"⚠️ رد المساعد لا يحتوي على نص متوقع: {msg.content}", flush=True)
+                    return "⚠ مشكلة في استلام رد المساعد، حاول تاني."
 
-            if "##BLOCK_CLIENT_24H##" in reply:
-                block_client_24h(sender_id)
-                return "✅ تم استقبال طلبك، نرجو الانتظار حتى انتهاء التنفيذ."
+    except Exception as e:
+        print(f"❌ حصل استثناء أثناء الإرسال للمساعد أو استلام الرد: {e}", flush=True)
+        # طباعة تفاصيل الخطأ لمزيد من التشخيص
+        import traceback
+        traceback.print_exc()
+    return "⚠ مشكلة مؤقتة، حاول تاني."
 
-            return reply
-    return "⚠ مشكلة مؤقتة، حاول مرة أخرى."
-
+# ==============================================================================
+# دالة معالجة الرسائل النصية المعلقة (تجميع الرسائل)
+# ==============================================================================
 def process_pending_messages(sender, name):
+    """
+    تجمع الرسائل النصية الواردة من نفس العميل وترسلها للمساعد كرسالة واحدة.
+    """
     print(f"⏳ تجميع رسائل العميل {sender} لمدة 8 ثواني.", flush=True)
-    time.sleep(8)
-    combined = "\n".join(pending_messages[sender])
-    content = [{"type": "text", "text": combined}]
+    time.sleep(8) # الانتظار لتجميع الرسائل
+    
+    # دمج جميع الرسائل المعلقة
+    combined_text = "\n".join(pending_messages[sender])
+    content = [{"type": "text", "text": combined_text}]
+    
+    print(f"📦 محتوى الرسالة النصية المجمعة المرسل للمساعد:\n{json.dumps(content, indent=2, ensure_ascii=False)}", flush=True)
+
     reply = ask_assistant(content, sender, name)
     send_message(sender, reply)
+    
+    # مسح الرسائل المعلقة وإزالة المؤقت
     pending_messages[sender] = []
     timers.pop(sender, None)
     print(f"🎯 الرد تم على جميع رسائل {sender}.", flush=True)
 
+# ==============================================================================
+# Webhook لاستقبال الرسائل الواردة
+# ==============================================================================
 @app.route("/webhook", methods=["POST"])
 def webhook():
+    """
+    نقطة نهاية الـ webhook لاستقبال الرسائل من ZAPI.
+    """
     data = request.json
-    print(f"\n📥 البيانات المستلمة:\n{json.dumps(data, indent=2, ensure_ascii=False)}", flush=True)
+    # طباعة البيانات المستلمة كاملة للتشخيص
+    print(f"\n📥 البيانات المستلمة كاملة من الـ webhook:\n{json.dumps(data, indent=2, ensure_ascii=False)}", flush=True)
 
     sender = data.get("phone") or data.get("From")
     msg = data.get("text", {}).get("message") or data.get("body", "")
-    msg_type = data.get("type", "")
+    # msg_type لم يعد يستخدم لتحديد نوع الصورة، ولكن يمكن الاحتفاظ به لأغراض أخرى
+    msg_type = data.get("type", "") 
     name = data.get("pushname") or data.get("senderName") or data.get("profileName") or ""
+    
+    # استخراج imageUrl مباشرة من الـ data (هذا هو المفتاح لتحديد الصور)
+    image_data = data.get("image", {})
+    image_url = image_data.get("imageUrl") # سيكون None إذا لم تكن رسالة صورة
+    caption = image_data.get("caption", "")
 
     if not sender:
-        print("❌ رقم العميل غير موجود.", flush=True)
+        print("❌ رقم العميل غير موجود في البيانات المستلمة.", flush=True)
         return jsonify({"status": "no sender"}), 400
 
     session = get_session(sender)
+    # التحقق من حالة الحظر
     if session.get("block_until") and datetime.utcnow() < datetime.fromisoformat(session["block_until"]):
         print(f"🚫 العميل {sender} في فترة الحظر.", flush=True)
         send_message(sender, "✅ طلبك تحت التنفيذ، نرجو الانتظار.")
         return jsonify({"status": "blocked"}), 200
 
-    if msg_type == "image":
-        media_id = data.get("image", {}).get("id")
-        caption = data.get("image", {}).get("caption", "")
-        print(f"📷 استقبال صورة - media_id: {media_id} - caption: {caption}", flush=True)
+    # ==========================================================================
+    # معالجة رسائل الصور (الأولوية الأولى)
+    # نتحقق من وجود 'imageUrl' لتحديد ما إذا كانت الرسالة صورة
+    # ==========================================================================
+    if image_url:
+        print(f"🌐 صورة مستلمة (imageUrl: {image_url}, caption: {caption})", flush=True)
 
-        if media_id:
-            image_url = download_image(media_id)
-            print(f"🌐 رابط الصورة بعد التحميل: {image_url}", flush=True)
+        message_content = [
+            {"type": "text", "text": f"صورة من العميل {name} ({sender})."},
+            {"type": "image_url", "image_url": {"url": image_url}}
+        ]
+        if caption:
+            message_content.append({"type": "text", "text": f"تعليق على الصورة:\n{caption}"})
 
-            if image_url:
-                if not session.get("thread_id"):
-                    thread = client.beta.threads.create()
-                    session["thread_id"] = thread.id
-                    save_session(sender, session)
+        # طباعة المحتوى الذي سيتم إرساله إلى ask_assistant للتشخيص
+        print(f"📦 محتوى رسالة الصورة المرسل لـ ask_assistant:\n{json.dumps(message_content, indent=2, ensure_ascii=False)}", flush=True)
 
-                message_content = [
-                    {"type": "text", "text": f"دي صورة من العميل رقم: {sender} - الاسم: {name}"},
-                    {"type": "image_url", "image_url": {"url": image_url}}
-                ]
-
-                if caption:
-                    message_content.append({"type": "text", "text": f"تعليق داخل الصورة:\n{caption}"})
-
-                print(f"🚀 الداتا اللي داخلة للمساعد:\n{json.dumps(message_content, indent=2, ensure_ascii=False)}", flush=True)
-
-                reply = ask_assistant(message_content, sender, name)
-                send_message(sender, reply)
-                return jsonify({"status": "image processed"}), 200
-
-            else:
-                print("⚠ لم يتمكن من تحميل رابط الصورة.", flush=True)
-        else:
-            print("⚠ media_id غير موجود.", flush=True)
-
+        reply = ask_assistant(message_content, sender, name)
+        if reply: # إرسال الرد فقط إذا كان هناك رد من المساعد
+            send_message(sender, reply)
+        return jsonify({"status": "image processed"}), 200
+    
+    # ==========================================================================
+    # معالجة الرسائل النصية (إذا لم تكن رسالة صورة)
+    # ==========================================================================
     if msg:
         print(f"💬 استقبال رسالة نصية من العميل: {msg}", flush=True)
         if sender not in pending_messages:
             pending_messages[sender] = []
         pending_messages[sender].append(msg)
 
+        # بدء مؤقت لتجميع الرسائل إذا لم يكن هناك مؤقت بالفعل
         if sender not in timers:
             timers[sender] = threading.Thread(target=process_pending_messages, args=(sender, name))
             timers[sender].start()
 
     return jsonify({"status": "received"}), 200
 
+# ==============================================================================
+# نقطة نهاية الصفحة الرئيسية
+# ==============================================================================
 @app.route("/", methods=["GET"])
 def home():
+    """
+    صفحة رئيسية بسيطة للتحقق من أن السيرفر يعمل.
+    """
     return "✅ السيرفر شغال تمام!"
 
+# ==============================================================================
+# تشغيل التطبيق
+# ==============================================================================
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    # تشغيل Flask في وضع التطوير (للتجربة المحلية)
+    # في بيئة الإنتاج، استخدم Gunicorn أو ما شابه
+    app.run(host="0.0.0.0", port=5000, debug=True) # debug=True مفيد للتشخيص
