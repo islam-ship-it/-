@@ -69,11 +69,18 @@ def ask_assistant(content, sender_id, name=""):
         session["thread_id"] = thread.id
 
     session["message_count"] += 1
+    # Note: For image messages, 'content' is already a list of dicts.
+    # For text messages, 'content' is a list of dicts from process_pending_messages.
+    # We need to ensure 'history' stores the actual content, not just the text.
+    # This part might need careful handling if you want to store full multimodal history.
+    # For now, let's assume 'content' is what we want to add to history.
     session["history"].append({"role": "user", "content": content})
-    session["history"] = session["history"][-10:]
+    session["history"] = session["history"][-10:] # Keep last 10 entries
     save_session(sender_id, session)
 
-    print(f"\n🚀 الداتا داخلة للمساعد:\n{json.dumps(content, indent=2, ensure_ascii=False)}", flush=True)
+    # --- START DIAGNOSTIC PRINTS ---
+    print(f"\n🚀 الداتا داخلة للمساعد (داخل ask_assistant):\n{json.dumps(content, indent=2, ensure_ascii=False)}", flush=True)
+    # --- END DIAGNOSTIC PRINTS ---
 
     try:
         client.beta.threads.messages.create(
@@ -89,27 +96,40 @@ def ask_assistant(content, sender_id, name=""):
             run_status = client.beta.threads.runs.retrieve(thread_id=session["thread_id"], run_id=run.id)
             if run_status.status == "completed":
                 break
-            time.sleep(2)
+            # Add a small delay to avoid hammering the API
+            time.sleep(1) # Changed from 2 to 1 for faster polling, adjust as needed
 
         messages = client.beta.threads.messages.list(thread_id=session["thread_id"])
+        # Iterate through messages to find the latest assistant reply
         for msg in sorted(messages.data, key=lambda x: x.created_at, reverse=True):
             if msg.role == "assistant":
-                reply = msg.content[0].text.value.strip()
-                print(f"💬 رد المساعد:\n{reply}", flush=True)
-                if "##BLOCK_CLIENT_24H##" in reply:
-                    block_client_24h(sender_id)
-                return reply
+                # Check if content is a list and has text value
+                if msg.content and hasattr(msg.content[0], 'text') and hasattr(msg.content[0].text, 'value'):
+                    reply = msg.content[0].text.value.strip()
+                    print(f"💬 رد المساعد:\n{reply}", flush=True)
+                    if "##BLOCK_CLIENT_24H##" in reply:
+                        block_client_24h(sender_id)
+                    return reply
+                else:
+                    print(f"⚠️ رد المساعد لا يحتوي على نص متوقع: {msg.content}", flush=True)
+                    return "⚠ مشكلة في استلام رد المساعد، حاول تاني."
 
     except Exception as e:
-        print(f"❌ حصل استثناء أثناء الإرسال للمساعد: {e}", flush=True)
+        print(f"❌ حصل استثناء أثناء الإرسال للمساعد أو استلام الرد: {e}", flush=True)
 
     return "⚠ مشكلة مؤقتة، حاول تاني."
 
 def process_pending_messages(sender, name):
     print(f"⏳ تجميع رسائل العميل {sender} لمدة 8 ثواني.", flush=True)
     time.sleep(8)
-    combined = "\n".join(pending_messages[sender])
-    content = [{"type": "text", "text": combined}]
+    combined_text = "\n".join(pending_messages[sender])
+    # For text messages, content needs to be a list of dicts for ask_assistant
+    content = [{"type": "text", "text": combined_text}]
+    
+    # --- START DIAGNOSTIC PRINTS ---
+    print(f"📦 محتوى الرسالة النصية المجمعة المرسل للمساعد:\n{json.dumps(content, indent=2, ensure_ascii=False)}", flush=True)
+    # --- END DIAGNOSTIC PRINTS ---
+
     reply = ask_assistant(content, sender, name)
     send_message(sender, reply)
     pending_messages[sender] = []
@@ -139,7 +159,10 @@ def webhook():
     if msg_type == "image":
         image_url = data.get("image", {}).get("imageUrl")
         caption = data.get("image", {}).get("caption", "")
-        print(f"🌐 رابط الصورة المباشر المستلم: {image_url}", flush=True)
+        
+        # --- START DIAGNOSTIC PRINTS ---
+        print(f"🌐 رابط الصورة المباشر المستلم من الـ webhook: {image_url}", flush=True)
+        # --- END DIAGNOSTIC PRINTS ---
 
         if image_url:
             message_content = [
@@ -149,10 +172,17 @@ def webhook():
             if caption:
                 message_content.append({"type": "text", "text": f"تعليق داخل الصورة:\n{caption}"})
 
+            # --- START DIAGNOSTIC PRINTS ---
+            print(f"📦 محتوى رسالة الصورة المرسل للمساعد:\n{json.dumps(message_content, indent=2, ensure_ascii=False)}", flush=True)
+            # --- END DIAGNOSTIC PRINTS ---
+
             ask_assistant(message_content, sender, name)
             return jsonify({"status": "image processed"}), 200
         else:
-            print("⚠ لم يتم العثور على imageUrl داخل الرسالة.", flush=True)
+            print("⚠ لم يتم العثور على imageUrl داخل الرسالة الواردة من الـ webhook.", flush=True)
+            # Optionally, send a message back to the user that image could not be processed
+            # send_message(sender, "عذراً، لم أتمكن من معالجة الصورة. يرجى التأكد من أنها صورة صالحة.")
+            return jsonify({"status": "no image url found"}), 200
 
     if msg:
         print(f"💬 استقبال رسالة نصية من العميل: {msg}", flush=True)
