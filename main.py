@@ -3,7 +3,7 @@ import time
 import json
 import requests
 import threading
-import traceback # لاستخدام traceback.print_exc()
+import traceback
 from flask import Flask, request, jsonify
 from openai import OpenAI
 from pymongo import MongoClient
@@ -53,7 +53,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # ==============================================================================
 pending_messages = {}
 timers = {}
-thread_locks = {} # جديد: قاموس لتخزين الـ Locks لكل thread_id في OpenAI
+thread_locks = {} # قاموس لتخزين الـ Locks لكل thread_id في OpenAI
 
 # ==============================================================================
 # دوال إدارة الجلسات
@@ -69,15 +69,12 @@ def get_session(user_id):
             "history": [],
             "thread_id": None,
             "message_count": 0,
-            # "block_until": None # تم إزالة هذا المفتاح لأن خاصية الحظر تم إلغاؤها
         }
     else:
-        # التأكد من وجود جميع المفاتيح الافتراضية في الجلسات القديمة
         session.setdefault("history", [])
         session.setdefault("thread_id", None)
         session.setdefault("message_count", 0)
         session.setdefault("name", "")
-        # session.pop("block_until", None) # إزالة block_until من الجلسات القديمة إذا كانت موجودة
     return session
 
 def save_session(user_id, session_data):
@@ -87,8 +84,6 @@ def save_session(user_id, session_data):
     session_data["_id"] = user_id
     sessions_collection.replace_one({"_id": user_id}, session_data, upsert=True)
     print(f"💾 تم حفظ بيانات الجلسة للعميل {user_id}.", flush=True)
-
-# تم حذف دالة block_client_24h بالكامل لأن خاصية الحظر تم إلغاؤها
 
 # ==============================================================================
 # دالة إرسال الرسائل عبر ZAPI
@@ -108,6 +103,48 @@ def send_message(phone, message):
         print(f"❌ خطأ أثناء إرسال الرسالة عبر ZAPI: {e}", flush=True)
     except Exception as e:
         print(f"❌ خطأ غير متوقع أثناء إرسال الرسالة: {e}", flush=True)
+
+# ==============================================================================
+# دالة تحويل الصوت إلى نص (Speech-to-Text)
+# ==============================================================================
+def transcribe_audio(audio_url, file_format="ogg"):
+    """
+    يحمل ملف صوتي من URL ويحوله إلى نص باستخدام OpenAI Whisper API.
+    """
+    print(f"🎙️ محاولة تحميل وتحويل الصوت من: {audio_url}", flush=True)
+    try:
+        # تحميل ملف الصوت
+        audio_response = requests.get(audio_url, stream=True)
+        audio_response.raise_for_status() # يرفع استثناء للأكواد 4xx/5xx
+
+        # حفظ الملف مؤقتاً
+        temp_audio_file = f"temp_audio_{int(time.time())}.{file_format}"
+        with open(temp_audio_file, "wb") as f:
+            for chunk in audio_response.iter_content(chunk_size=8192):
+                f.write(chunk)
+        print(f"✅ تم تحميل الملف الصوتي: {temp_audio_file}", flush=True)
+
+        # تحويل الصوت إلى نص باستخدام OpenAI Whisper API
+        with open(temp_audio_file, "rb") as audio_file:
+            transcription = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file
+            )
+        transcribed_text = transcription.text
+        print(f"📝 تم تحويل الصوت إلى نص: {transcribed_text}", flush=True)
+        return transcribed_text
+
+    except requests.exceptions.RequestException as e:
+        print(f"❌ خطأ في تحميل الملف الصوتي: {e}", flush=True)
+    except Exception as e:
+        print(f"❌ خطأ أثناء تحويل الصوت إلى نص: {e}", flush=True)
+        traceback.print_exc()
+    finally:
+        # حذف الملف المؤقت بعد الانتهاء
+        if os.path.exists(temp_audio_file):
+            os.remove(temp_audio_file)
+            print(f"🗑️ تم حذف الملف الصوتي المؤقت: {temp_audio_file}", flush=True)
+    return None
 
 # ==============================================================================
 # دالة التفاعل مع مساعد OpenAI
@@ -204,7 +241,6 @@ def ask_assistant(content, sender_id, name=""):
                         save_session(sender_id, session) # حفظ الجلسة بعد إضافة رد المساعد
                         # ------------------------------------------
 
-                        # تم إزالة جزء الحظر بالكامل
                         return reply
                     else:
                         print(f"⚠️ رد المساعد لا يحتوي على نص متوقع: {msg_obj.content}", flush=True)
@@ -222,15 +258,9 @@ def ask_assistant(content, sender_id, name=""):
         session["history"] = session["history"][-10:]
         save_session(sender_id, session)
     finally:
-        # محاولة إزالة الـ Lock من القاموس بعد الانتهاء
-        # يجب أن يتم ذلك بحذر لضمان عدم حذف Lock نشط عن طريق الخطأ
-        # ولكن في هذا السياق، الـ Lock يتم تحريره تلقائياً بواسطة 'with'
-        # هذه الخطوة هنا هي فقط لتنظيف القاموس إذا لم يعد الـ thread_id مستخدماً
-        # يمكن تحسينها أكثر في بيئة إنتاجية كبيرة
-        if session["thread_id"] in thread_locks:
-            # يمكن إضافة منطق للتحقق مما إذا كان الـ Lock لا يزال قيد الاستخدام
-            # قبل حذفه من القاموس، ولكن لتبسيط الكود، سنتركه هكذا حالياً
-            pass # الـ Lock سيتم تحريره تلقائياً بواسطة 'with'
+        # الـ Lock يتم تحريره تلقائياً بواسطة 'with'
+        # لا نحتاج إلى إزالة الـ Lock من القاموس هنا بشكل صريح
+        pass
 
     return "⚠ مشكلة مؤقتة، حاول تاني."
 
@@ -272,8 +302,6 @@ def webhook():
 
     sender = data.get("phone") or data.get("From")
     msg = data.get("text", {}).get("message") or data.get("body", "")
-    # msg_type لم يعد يستخدم لتحديد نوع الصورة، ولكن يمكن الاحتفاظ به لأغراض أخرى
-    msg_type = data.get("type", "") 
     name = data.get("pushname") or data.get("senderName") or data.get("profileName") or ""
     
     # استخراج imageUrl مباشرة من الـ data (هذا هو المفتاح لتحديد الصور)
@@ -281,20 +309,42 @@ def webhook():
     image_url = image_data.get("imageUrl") # سيكون None إذا لم تكن رسالة صورة
     caption = image_data.get("caption", "")
 
+    # استخراج audioUrl مباشرة من الـ data (هذا هو المفتاح لتحديد الريكوردات)
+    audio_data = data.get("audio", {})
+    audio_url = audio_data.get("audioUrl") # سيكون None إذا لم تكن رسالة صوتية
+    audio_mime_type = audio_data.get("mimeType")
+
+
     if not sender:
         print("❌ رقم العميل غير موجود في البيانات المستلمة.", flush=True)
         return jsonify({"status": "no sender"}), 400
 
     session = get_session(sender)
-    # تم إزالة التحقق من حالة الحظر هنا أيضاً
-    # if session.get("block_until") and datetime.utcnow() < datetime.fromisoformat(session["block_until"]):
-    #     print(f"🚫 العميل {sender} في فترة الحظر.", flush=True)
-    #     send_message(sender, "✅ طلبك تحت التنفيذ، نرجو الانتظار.")
-    #     return jsonify({"status": "blocked"}), 200
+    
+    # ==========================================================================
+    # معالجة رسائل الريكوردات (الأولوية الأولى)
+    # ==========================================================================
+    if audio_url:
+        print(f"🎙️ ريكورد صوتي مستلم (audioUrl: {audio_url}, mimeType: {audio_mime_type})", flush=True)
+        
+        # تحويل الريكورد إلى نص
+        transcribed_text = transcribe_audio(audio_url, file_format="ogg") # ZAPI بيبعت ogg
+        
+        if transcribed_text:
+            message_content = [{"type": "text", "text": f"رسالة صوتية من العميل {name} ({sender}):\n{transcribed_text}"}]
+            print(f"📦 محتوى رسالة الريكورد المرسل لـ ask_assistant:\n{json.dumps(message_content, indent=2, ensure_ascii=False)}", flush=True)
+            
+            reply = ask_assistant(message_content, sender, name)
+            if reply:
+                send_message(sender, reply)
+            return jsonify({"status": "audio processed"}), 200
+        else:
+            print("❌ فشل تحويل الريكورد الصوتي إلى نص.", flush=True)
+            send_message(sender, "عذراً، لم أتمكن من فهم رسالتك الصوتية. هل يمكنك كتابتها من فضلك؟")
+            return jsonify({"status": "audio transcription failed"}), 200
 
     # ==========================================================================
-    # معالجة رسائل الصور (الأولوية الأولى)
-    # نتحقق من وجود 'imageUrl' لتحديد ما إذا كانت الرسالة صورة
+    # معالجة رسائل الصور (الأولوية الثانية)
     # ==========================================================================
     if image_url:
         print(f"🌐 صورة مستلمة (imageUrl: {image_url}, caption: {caption})", flush=True)
@@ -306,16 +356,15 @@ def webhook():
         if caption:
             message_content.append({"type": "text", "text": f"تعليق على الصورة:\n{caption}"})
 
-        # طباعة المحتوى الذي سيتم إرساله إلى ask_assistant للتشخيص
         print(f"📦 محتوى رسالة الصورة المرسل لـ ask_assistant:\n{json.dumps(message_content, indent=2, ensure_ascii=False)}", flush=True)
 
         reply = ask_assistant(message_content, sender, name)
-        if reply: # إرسال الرد فقط إذا كان هناك رد من المساعد
+        if reply:
             send_message(sender, reply)
         return jsonify({"status": "image processed"}), 200
     
     # ==========================================================================
-    # معالجة الرسائل النصية (إذا لم تكن رسالة صورة)
+    # معالجة الرسائل النصية (الأولوية الثالثة)
     # ==========================================================================
     if msg:
         print(f"💬 استقبال رسالة نصية من العميل: {msg}", flush=True)
@@ -323,7 +372,6 @@ def webhook():
             pending_messages[sender] = []
         pending_messages[sender].append(msg)
 
-        # بدء مؤقت لتجميع الرسائل إذا لم يكن هناك مؤقت بالفعل
         if sender not in timers:
             timers[sender] = threading.Thread(target=process_pending_messages, args=(sender, name))
             timers[sender].start()
@@ -344,6 +392,4 @@ def home():
 # تشغيل التطبيق
 # ==============================================================================
 if __name__ == "__main__":
-    # تشغيل Flask في وضع التطوير (للتجربة المحلية)
-    # في بيئة الإنتاج، استخدم Gunicorn أو ما شابه
-    app.run(host="0.0.0.0", port=5000, debug=True) # debug=True مفيد للتشخيص
+    app.run(host="0.0.0.0", port=5000, debug=True)
