@@ -16,7 +16,17 @@ ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
 CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
-ASSISTANT_ID = os.getenv("ASSISTANT_ID")
+
+# ASSISTANT_ID الأساسي (للنموذج الأغلى، مثلاً GPT-4o)
+ASSISTANT_ID_PREMIUM = os.getenv("ASSISTANT_ID_PREMIUM") 
+
+# ASSISTANT_ID للنموذج الأرخص (مثلاً GPT-4o Mini أو GPT-3.5-turbo)
+# هذا هو الـ ID الذي أرسلته: asst_ihuhju8esg2JPXXWcrAg2p2E
+ASSISTANT_ID_CHEAPER = os.getenv("ASSISTANT_ID_CHEAPER") 
+
+# عدد الرسائل المسموح بها للنموذج الأغلى قبل التحويل للأرخص
+MAX_MESSAGES_FOR_PREMIUM_MODEL = 8 # كما طلبت: 10 رسائل
+
 MONGO_URI = os.getenv("MONGO_URI")
 
 # ==============================================================================
@@ -58,7 +68,7 @@ def get_session(user_id):
             "thread_id": None,
             "message_count": 0,
             "name": "",
-            "block_until": None
+            # "block_until": None # تم إزالة هذا المفتاح لأن خاصية الحظر تم إلغاؤها
         }
     else:
         # التأكد من وجود جميع المفاتيح الافتراضية في الجلسات القديمة
@@ -66,7 +76,7 @@ def get_session(user_id):
         session.setdefault("thread_id", None)
         session.setdefault("message_count", 0)
         session.setdefault("name", "")
-        session.setdefault("block_until", None)
+        # session.setdefault("block_until", None) # تم إزالة هذا المفتاح
     return session
 
 def save_session(user_id, session_data):
@@ -77,14 +87,7 @@ def save_session(user_id, session_data):
     sessions_collection.replace_one({"_id": user_id}, session_data, upsert=True)
     print(f"💾 تم حفظ بيانات الجلسة للعميل {user_id}.", flush=True)
 
-def block_client_24h(user_id):
-    """
-    يحظر العميل من الرد لمدة 24 ساعة.
-    """
-    session = get_session(user_id)
-    session["block_until"] = (datetime.utcnow() + timedelta(hours=24)).isoformat()
-    save_session(user_id, session)
-    print(f"🚫 العميل {user_id} تم حظره من الرد لمدة 24 ساعة.", flush=True)
+# تم حذف دالة block_client_24h بالكامل لأن خاصية الحظر تم إلغاؤها
 
 # ==============================================================================
 # دالة إرسال الرسائل عبر ZAPI
@@ -114,6 +117,17 @@ def ask_assistant(content, sender_id, name=""):
     """
     session = get_session(sender_id)
 
+    # تحديد الـ Assistant ID بناءً على عدد الرسائل
+    # إذا كان عدد الرسائل أكبر من الحد المسموح به للنموذج الأغلى
+    # وتم توفير ASSISTANT_ID_CHEAPER
+    if session["message_count"] >= MAX_MESSAGES_FOR_PREMIUM_MODEL and ASSISTANT_ID_CHEAPER:
+        current_assistant_id = ASSISTANT_ID_CHEAPER
+        print(f"🔄 تحويل العميل {sender_id} إلى النموذج الأرخص (Assistant ID: {current_assistant_id})", flush=True)
+    else:
+        current_assistant_id = ASSISTANT_ID_PREMIUM # الافتراضي هو النموذج الأغلى
+        print(f"✅ العميل {sender_id} يستخدم النموذج الأساسي (Assistant ID: {current_assistant_id})", flush=True)
+
+
     # تحديث اسم المستخدم إذا كان متاحاً ولم يتم حفظه من قبل
     if name and not session.get("name"):
         session["name"] = name
@@ -129,7 +143,7 @@ def ask_assistant(content, sender_id, name=""):
             return "⚠ مشكلة مؤقتة في إنشاء المحادثة، حاول تاني."
 
     # إضافة رسالة المستخدم إلى الـ history
-    session["message_count"] += 1
+    # ملاحظة: session["message_count"] تم زيادته بالفعل في بداية الدالة
     session["history"].append({"role": "user", "content": content})
     # لا تحفظ هنا، سنحفظ بعد إضافة رد المساعد
 
@@ -144,9 +158,9 @@ def ask_assistant(content, sender_id, name=""):
         )
         print(f"✅ تم إرسال الداتا للمساعد بنجاح.", flush=True)
 
-        # تشغيل المساعد لمعالجة الرسالة
-        run = client.beta.threads.runs.create(thread_id=session["thread_id"], assistant_id=ASSISTANT_ID)
-        print(f"🏃‍♂️ تم بدء Run للمساعد: {run.id}", flush=True)
+        # تشغيل المساعد لمعالجة الرسالة باستخدام الـ ID المحدد
+        run = client.beta.threads.runs.create(thread_id=session["thread_id"], assistant_id=current_assistant_id)
+        print(f"🏃‍♂️ تم بدء Run للمساعد: {run.id} باستخدام {current_assistant_id}", flush=True)
 
         # انتظار اكتمال الـ Run
         while True:
@@ -180,9 +194,7 @@ def ask_assistant(content, sender_id, name=""):
                     save_session(sender_id, session) # حفظ الجلسة بعد إضافة رد المساعد
                     # ------------------------------------------
 
-                    if "##BLOCK_CLIENT_24H##" in reply:
-                        block_client_24h(sender_id)
-                        return "✅ طلبك تحت التنفيذ، نرجو الانتظار." 
+                    # تم إزالة جزء الحظر بالكامل
                     return reply
                 else:
                     print(f"⚠️ رد المساعد لا يحتوي على نص متوقع: {msg_obj.content}", flush=True)
@@ -254,11 +266,11 @@ def webhook():
         return jsonify({"status": "no sender"}), 400
 
     session = get_session(sender)
-    # التحقق من حالة الحظر
-    if session.get("block_until") and datetime.utcnow() < datetime.fromisoformat(session["block_until"]):
-        print(f"🚫 العميل {sender} في فترة الحظر.", flush=True)
-        send_message(sender, "✅ طلبك تحت التنفيذ، نرجو الانتظار.")
-        return jsonify({"status": "blocked"}), 200
+    # تم إزالة التحقق من حالة الحظر هنا أيضاً
+    # if session.get("block_until") and datetime.utcnow() < datetime.fromisoformat(session["block_until"]):
+    #     print(f"🚫 العميل {sender} في فترة الحظر.", flush=True)
+    #     send_message(sender, "✅ طلبك تحت التنفيذ، نرجو الانتظار.")
+    #     return jsonify({"status": "blocked"}), 200
 
     # ==========================================================================
     # معالجة رسائل الصور (الأولوية الأولى)
