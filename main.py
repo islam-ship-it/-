@@ -186,6 +186,10 @@ def ask_assistant(content, sender_id, name=""):
             print(f"🆕 تم إنشاء Thread جديد للمستخدم {sender_id}: {thread.id}", flush=True)
         except Exception as e:
             print(f"❌ فشل إنشاء Thread جديد: {e}", flush=True)
+            # حفظ الجلسة حتى لو فشل إنشاء Thread
+            session["history"].append({"role": "assistant", "content": "⚠ مشكلة مؤقتة في إنشاء المحادثة، حاول تاني."})
+            session["history"] = session["history"][-10:]
+            save_session(sender_id, session)
             return "⚠ مشكلة مؤقتة في إنشاء المحادثة، حاول تاني."
 
     # تحديد الـ Assistant ID: دائماً نستخدم النموذج الأغلى حالياً
@@ -238,6 +242,11 @@ def ask_assistant(content, sender_id, name=""):
                     break
                 elif run_status.status in ["failed", "cancelled", "expired"]:
                     print(f"❌ الـ Run فشل أو تم إلغاؤه/انتهت صلاحيته: {run_status.status}", flush=True)
+                    # --- التعديل هنا: طباعة تفاصيل الخطأ ---
+                    print(f"🚨 تفاصيل Run الفاشل: {json.dumps(run_status.to_dict(), indent=2, ensure_ascii=False)}", flush=True)
+                    if run_status.last_error:
+                        print(f"🚨 رسالة الخطأ من OpenAI: Code={run_status.last_error.code}, Message={run_status.last_error.message}", flush=True)
+                    # ---------------------------------------
                     # حفظ الجلسة حتى لو فشل الـ Run لتحديث حالة الـ history
                     session["history"].append({"role": "assistant", "content": "⚠ حدث خطأ أثناء معالجة طلبك."})
                     session["history"] = session["history"][-10:]
@@ -525,3 +534,4 @@ if __name__ == "__main__":
     print("⏰ تم بدء الجدولة بنجاح.", flush=True)
 
     app.run(host="0.0.0.0", port=5000, debug=True)
+
