@@ -331,70 +331,73 @@ def send_follow_up_message(user_id):
 # ==============================================================================
 # دالة Worker لمعالجة طابور الرسائل
 # ==============================================================================
+message_queue_processing_lock = threading.Lock() # Lock جديد للـ Worker
+
 def message_queue_worker():
     print("👷‍♂️ Worker بدأ تشغيل معالجة طابور الرسائل.", flush=True)
     while True:
-        try:
-            # البحث عن رسالة "pending" في الطابور (أقدم رسالة أولاً)
-            message_doc = message_queue_collection.find_one_and_update(
-                {"status": "pending"},
-                {"$set": {"status": "processing", "processing_start_time": datetime.utcnow()}},
-                sort=[("timestamp", 1)] # أقدم رسالة أولاً
-            )
-
-            if message_doc:
-                sender = message_doc["sender"]
-                name = message_doc["name"]
-                msg_type = message_doc["msg_type"]
-                
-                content_to_assistant = None
-                
-                print(f"⚙️ Worker يعالج رسالة من {sender} (النوع: {msg_type}).", flush=True)
-
-                if msg_type == "audio":
-                    audio_url = message_doc["audio_url"]
-                    audio_mime_type = message_doc["audio_mime_type"]
-                    transcribed_text = transcribe_audio(audio_url, file_format="ogg") # ZAPI بيبعت ogg
-                    if transcribed_text:
-                        content_to_assistant = [{"type": "text", "text": f"رسالة صوتية من العميل {name} ({sender}):\n{transcribed_text}"}]
-                    else:
-                        send_message(sender, "عذراً، لم أتمكن من فهم رسالتك الصوتية. هل يمكنك كتابتها من فضلك؟")
-                        message_queue_collection.delete_one({"_id": message_doc["_id"]}) # حذف الرسالة من الطابور
-                        continue # تخطي باقي المعالجة
-                elif msg_type == "image":
-                    image_url = message_doc["image_url"]
-                    caption = message_doc["caption"]
-                    content_to_assistant = [
-                        {"type": "text", "text": f"صورة من العميل {name} ({sender})."},
-                        {"type": "image_url", "image_url": {"url": image_url}}
-                    ]
-                    if caption:
-                        content_to_assistant.append({"type": "text", "text": f"تعليق على الصورة:\n{caption}"})
-                elif msg_type == "text":
-                    content_to_assistant = [{"type": "text", "text": message_doc["content"]}]
-                
-                if content_to_assistant:
-                    reply = ask_assistant(content_to_assistant, sender, name)
-                    if reply:
-                        send_message(sender, reply)
-                
-                # حذف الرسالة من الطابور بعد المعالجة بنجاح
-                message_queue_collection.delete_one({"_id": message_doc["_id"]})
-                print(f"✅ تم معالجة وحذف الرسالة من الطابور للعميل {sender}.", flush=True)
-            else:
-                # لا توجد رسائل في الطابور، انتظر قليلاً قبل التحقق مرة أخرى
-                time.sleep(0.5) # ممكن تخليها 0.5 أو 1 ثانية حسب سرعة المعالجة
-        except Exception as e:
-            print(f"❌ خطأ في Worker معالجة طابور الرسائل: {e}", flush=True)
-            traceback.print_exc()
-            # في حالة الخطأ، ممكن نرجع حالة الرسالة لـ "pending" أو "failed"
-            # عشان متتجاهلش، أو نضيف عداد محاولات
-            if message_doc:
-                message_queue_collection.update_one(
-                    {"_id": message_doc["_id"]},
-                    {"$set": {"status": "failed", "error_message": str(e)}}
+        with message_queue_processing_lock: # استخدام الـ Lock هنا
+            try:
+                # البحث عن رسالة "pending" في الطابور (أقدم رسالة أولاً)
+                message_doc = message_queue_collection.find_one_and_update(
+                    {"status": "pending"},
+                    {"$set": {"status": "processing", "processing_start_time": datetime.utcnow()}},
+                    sort=[("timestamp", 1)] # أقدم رسالة أولاً
                 )
-            time.sleep(5) # انتظر فترة أطول بعد الخطأ لتجنب تكرار الأخطاء بسرعة
+
+                if message_doc:
+                    sender = message_doc["sender"]
+                    name = message_doc["name"]
+                    msg_type = message_doc["msg_type"]
+                    
+                    content_to_assistant = None
+                    
+                    print(f"⚙️ Worker يعالج رسالة من {sender} (النوع: {msg_type}).", flush=True)
+
+                    if msg_type == "audio":
+                        audio_url = message_doc["audio_url"]
+                        audio_mime_type = message_doc["audio_mime_type"]
+                        transcribed_text = transcribe_audio(audio_url, file_format="ogg") # ZAPI بيبعت ogg
+                        if transcribed_text:
+                            content_to_assistant = [{"type": "text", "text": f"رسالة صوتية من العميل {name} ({sender}):\n{transcribed_text}"}]
+                        else:
+                            send_message(sender, "عذراً، لم أتمكن من فهم رسالتك الصوتية. هل يمكنك كتابتها من فضلك؟")
+                            message_queue_collection.delete_one({"_id": message_doc["_id"]}) # حذف الرسالة من الطابور
+                            continue # تخطي باقي المعالجة
+                    elif msg_type == "image":
+                        image_url = message_doc["image_url"]
+                        caption = message_doc["caption"]
+                        content_to_assistant = [
+                            {"type": "text", "text": f"صورة من العميل {name} ({sender})."},
+                            {"type": "image_url", "image_url": {"url": image_url}}
+                        ]
+                        if caption:
+                            content_to_assistant.append({"type": "text", "text": f"تعليق على الصورة:\n{caption}"})
+                    elif msg_type == "text":
+                        content_to_assistant = [{"type": "text", "text": message_doc["content"]}]
+                    
+                    if content_to_assistant:
+                        reply = ask_assistant(content_to_assistant, sender, name)
+                        if reply:
+                            send_message(sender, reply)
+                    
+                    # حذف الرسالة من الطابور بعد المعالجة بنجاح
+                    message_queue_collection.delete_one({"_id": message_doc["_id"]})
+                    print(f"✅ تم معالجة وحذف الرسالة من الطابور للعميل {sender}.", flush=True)
+                else:
+                    # لا توجد رسائل في الطابور، انتظر قليلاً قبل التحقق مرة أخرى
+                    time.sleep(0.5) # ممكن تخليها 0.5 أو 1 ثانية حسب سرعة المعالجة
+            except Exception as e:
+                print(f"❌ خطأ في Worker معالجة طابور الرسائل: {e}", flush=True)
+                traceback.print_exc()
+                # في حالة الخطأ، ممكن نرجع حالة الرسالة لـ "pending" أو "failed"
+                # عشان متتجاهلش، أو نضيف عداد محاولات
+                if message_doc:
+                    message_queue_collection.update_one(
+                        {"_id": message_doc["_id"]},
+                        {"$set": {"status": "failed", "error_message": str(e)}}
+                    )
+                time.sleep(5) # انتظر فترة أطول بعد الخطأ لتجنب تكرار الأخطاء بسرعة
 
 # ==============================================================================
 # دالة الجدولة التي تبحث عن العملاء المترددين
@@ -428,6 +431,102 @@ def check_for_inactive_users():
     for session in inactive_sessions:
         user_id = session["_id"]
         send_follow_up_message(user_id)
+
+# ==============================================================================
+# نقطة نهاية الـ Webhook (لاستقبال الرسائل الواردة)
+# ==============================================================================
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    print("📞 تم استلام طلب على الـ Webhook.", flush=True) # سطر الطباعة الجديد
+    try:
+        data = request.json
+        print(f"📥 البيانات المستلمة كاملة من الـ webhook:\n{json.dumps(data, indent=2, ensure_ascii=False)}", flush=True)
+
+        # التحقق من وجود مفتاح 'instanceId' و 'type' لتجنب معالجة الطلبات غير المرغوبة
+        if not data or "instanceId" not in data or "type" not in data:
+            print("⚠️ طلب غير صالح أو غير مكتمل.", flush=True)
+            return jsonify({"status": "error", "message": "Invalid request"}), 400
+
+        # التحقق من Client-Token
+        client_token_header = request.headers.get("Client-Token")
+        if client_token_header != CLIENT_TOKEN:
+            print("🚫 Client-Token غير صحيح.", flush=True)
+            return jsonify({"status": "error", "message": "Unauthorized"}), 401
+
+        msg_type = "text"
+        content = None
+        sender = data.get("phone")
+        name = data.get("chatName", "")
+
+        # معالجة الرسائل النصية
+        if "message" in data and data["message"].get("type") == "chat":
+            msg_type = "text"
+            content = data["message"].get("text")
+
+        # معالجة رسائل الصور
+        elif "message" in data and data["message"].get("type") == "image":
+            msg_type = "image"
+            image_url = data["message"].get("imageUrl")
+            caption = data["message"].get("caption", "")
+            if image_url:
+                # إضافة الرسالة إلى طابور المعالجة
+                message_queue_collection.insert_one({
+                    "sender": sender,
+                    "name": name,
+                    "msg_type": msg_type,
+                    "image_url": image_url,
+                    "caption": caption,
+                    "status": "pending",
+                    "timestamp": datetime.utcnow()
+                })
+                print(f"🖼️ تم إضافة رسالة الصورة من {sender} إلى الطابور.", flush=True)
+                return jsonify({"status": "success", "message": "Image message added to queue"}), 200
+            else:
+                print(f"⚠️ رسالة صورة بدون imageUrl من {sender}.", flush=True)
+                return jsonify({"status": "error", "message": "Image URL missing"}), 400
+
+        # معالجة رسائل الصوت (الريكوردات)
+        elif "message" in data and data["message"].get("type") == "ptt": # PTT = Push To Talk (Voice Message)
+            msg_type = "audio"
+            audio_url = data["message"].get("fileUrl") # أو mediaUrl حسب ZAPI
+            audio_mime_type = data["message"].get("mimetype", "audio/ogg") # الافتراضي ogg
+            if audio_url:
+                # إضافة الرسالة إلى طابور المعالجة
+                message_queue_collection.insert_one({
+                    "sender": sender,
+                    "name": name,
+                    "msg_type": msg_type,
+                    "audio_url": audio_url,
+                    "audio_mime_type": audio_mime_type,
+                    "status": "pending",
+                    "timestamp": datetime.utcnow()
+                })
+                print(f"🎙️ تم إضافة رسالة الصوت من {sender} إلى الطابور.", flush=True)
+                return jsonify({"status": "success", "message": "Audio message added to queue"}), 200
+            else:
+                print(f"⚠️ رسالة صوت بدون fileUrl من {sender}.", flush=True)
+                return jsonify({"status": "error", "message": "Audio URL missing"}), 400
+
+        # إذا كانت رسالة نصية، أضفها إلى الطابور
+        if content and sender:
+            message_queue_collection.insert_one({
+                "sender": sender,
+                "name": name,
+                "msg_type": msg_type,
+                "content": content,
+                "status": "pending",
+                "timestamp": datetime.utcnow()
+            })
+            print(f"📝 تم إضافة رسالة نصية من {sender} إلى الطابور.", flush=True)
+            return jsonify({"status": "success", "message": "Message added to queue"}), 200
+        else:
+            print("⚠️ رسالة غير مدعومة أو ناقصة.", flush=True)
+            return jsonify({"status": "error", "message": "Unsupported or incomplete message"}), 400
+
+    except Exception as e:
+        print(f"❌ خطأ عام في الـ webhook: {e}", flush=True)
+        traceback.print_exc()
+        return jsonify({"status": "error", "message": "Internal server error"}), 500
 
 # ==============================================================================
 # نقطة نهاية الصفحة الرئيسية
