@@ -8,6 +8,7 @@ from flask import Flask, request, jsonify
 from openai import OpenAI
 from pymongo import MongoClient
 from datetime import datetime, timedelta
+from apscheduler.schedulers.background import BackgroundScheduler
 
 # ==============================================================================
 # إعدادات البيئة (تأكد من ضبطها بشكل صحيح في ملف .env)
@@ -29,6 +30,10 @@ ASSISTANT_ID_CHEAPER = os.getenv("ASSISTANT_ID_CHEAPER")
 MAX_MESSAGES_FOR_PREMIUM_MODEL = int(os.getenv("MAX_MESSAGES_FOR_PREMIUM_MODEL", 10)) 
 
 MONGO_URI = os.getenv("MONGO_URI")
+
+# متغيرات بيئة جديدة للمتابعة
+FOLLOW_UP_INTERVAL_MINUTES = int(os.getenv("FOLLOW_UP_INTERVAL_MINUTES", 60)) # بعد كام دقيقة نعتبره متردد
+MAX_FOLLOW_UPS = int(os.getenv("MAX_FOLLOW_UPS", 1)) # كام رسالة متابعة كحد أقصى
 
 # ==============================================================================
 # إعدادات قاعدة البيانات (MongoDB)
@@ -69,12 +74,20 @@ def get_session(user_id):
             "history": [],
             "thread_id": None,
             "message_count": 0,
+            "name": "",
+            "last_message_time": datetime.utcnow().isoformat(), # جديد: آخر وقت رسالة
+            "follow_up_sent": 0, # جديد: عدد رسائل المتابعة المرسلة
+            "follow_up_status": "none" # جديد: حالة المتابعة
         }
     else:
+        # التأكد من وجود جميع المفاتيح الافتراضية في الجلسات القديمة
         session.setdefault("history", [])
         session.setdefault("thread_id", None)
         session.setdefault("message_count", 0)
         session.setdefault("name", "")
+        session.setdefault("last_message_time", datetime.utcnow().isoformat())
+        session.setdefault("follow_up_sent", 0)
+        session.setdefault("follow_up_status", "none")
     return session
 
 def save_session(user_id, session_data):
@@ -141,7 +154,7 @@ def transcribe_audio(audio_url, file_format="ogg"):
         traceback.print_exc()
     finally:
         # حذف الملف المؤقت بعد الانتهاء
-        if os.path.exists(temp_audio_file):
+        if 'temp_audio_file' in locals() and os.path.exists(temp_audio_file):
             os.remove(temp_audio_file)
             print(f"🗑️ تم حذف الملف الصوتي المؤقت: {temp_audio_file}", flush=True)
     return None
@@ -179,10 +192,18 @@ def ask_assistant(content, sender_id, name=""):
         current_assistant_id = ASSISTANT_ID_PREMIUM # الافتراضي هو النموذج الأغلى
         print(f"✅ العميل {sender_id} يستخدم النموذج الأساسي (Assistant ID: {current_assistant_id})", flush=True)
 
-    # إضافة رسالة المستخدم إلى الـ history
-    # ملاحظة: session["message_count"] تم زيادته بالفعل في بداية الدالة
-    session["message_count"] += 1 # زيادة العداد هنا قبل إرسال الرسالة
-    session["history"].append({"role": "user", "content": content})
+    # إضافة رسالة المستخدم إلى الـ history (فقط إذا كانت رسالة من العميل)
+    # رسائل المتابعة لن تزيد الـ message_count
+    is_internal_follow_up = False
+    if isinstance(content, list):
+        for item in content:
+            if item.get("type") == "text" and "رسالة متابعة داخلية" in item.get("text", ""):
+                is_internal_follow_up = True
+                break
+    
+    if not is_internal_follow_up:
+        session["message_count"] += 1 # زيادة العداد هنا قبل إرسال الرسالة
+        session["history"].append({"role": "user", "content": content})
     # لا تحفظ هنا، سنحفظ بعد إضافة رد المساعد
 
     print(f"\n🚀 الداتا داخلة للمساعد (OpenAI):\n{json.dumps(content, indent=2, ensure_ascii=False)}", flush=True)
@@ -236,33 +257,72 @@ def ask_assistant(content, sender_id, name=""):
                         print(f"💬 رد المساعد:\n{reply}", flush=True)
                         
                         # --- إضافة رد المساعد إلى الـ history هنا ---
-                        session["history"].append({"role": "assistant", "content": reply})
-                        session["history"] = session["history"][-10:] # الاحتفاظ بآخر 10 إدخالات فقط
-                        save_session(sender_id, session) # حفظ الجلسة بعد إضافة رد المساعد
+                        # لا نضيف رد المساعد للـ history إذا كانت رسالة متابعة داخلية
+                        if not is_internal_follow_up:
+                            session["history"].append({"role": "assistant", "content": reply})
+                            session["history"] = session["history"][-10:] # الاحتفاظ بآخر 10 إدخالات فقط
+                            save_session(sender_id, session) # حفظ الجلسة بعد إضافة رد المساعد
                         # ------------------------------------------
 
                         return reply
                     else:
                         print(f"⚠️ رد المساعد لا يحتوي على نص متوقع: {msg_obj.content}", flush=True)
                         # حفظ الجلسة حتى لو الرد غير متوقع
-                        session["history"].append({"role": "assistant", "content": "⚠ مشكلة في استلام رد المساعد."})
-                        session["history"] = session["history"][-10:]
-                        save_session(sender_id, session)
+                        if not is_internal_follow_up:
+                            session["history"].append({"role": "assistant", "content": "⚠ مشكلة في استلام رد المساعد."})
+                            session["history"] = session["history"][-10:]
+                            save_session(sender_id, session)
                         return "⚠ مشكلة في استلام رد المساعد، حاول تاني."
 
     except Exception as e:
         print(f"❌ حصل استثناء أثناء الإرسال للمساعد أو استلام الرد: {e}", flush=True)
         traceback.print_exc() # طباعة الـ traceback كامل للتشخيص
         # حفظ الجلسة حتى لو حصل استثناء
-        session["history"].append({"role": "assistant", "content": "⚠ حدث خطأ عام."})
-        session["history"] = session["history"][-10:]
-        save_session(sender_id, session)
+        if not is_internal_follow_up:
+            session["history"].append({"role": "assistant", "content": "⚠ حدث خطأ عام."})
+            session["history"] = session["history"][-10:]
+            save_session(sender_id, session)
     finally:
-        # الـ Lock يتم تحريره تلقائياً بواسطة 'with'
-        # لا نحتاج إلى إزالة الـ Lock من القاموس هنا بشكل صريح
-        pass
+        pass # الـ Lock يتم تحريره تلقائياً بواسطة 'with'
 
     return "⚠ مشكلة مؤقتة، حاول تاني."
+
+# ==============================================================================
+# دالة المتابعة (Follow-up Function)
+# ==============================================================================
+def send_follow_up_message(user_id):
+    """
+    تقوم بطلب من المساعد صياغة رسالة متابعة وإرسالها للعميل.
+    """
+    session = get_session(user_id)
+    name = session.get("name", "عميل") # الحصول على الاسم من الجلسة
+
+    print(f"🕵️‍♂️ جاري طلب رسالة متابعة للعميل {user_id} ({name}) من المساعد.", flush=True)
+    try:
+        # رسالة داخلية للمساعد لطلب صياغة رسالة متابعة
+        # هذه الرسالة لن تزيد الـ message_count الخاص بالعميل
+        internal_prompt = [
+            {"type": "text", "text": f"رسالة متابعة داخلية: العميل {name} لم يتفاعل منذ فترة. صغ رسالة متابعة ودودة ومشجعة تذكره بخدماتنا وتدعوه لإكمال المحادثة أو الشراء. اجعلها قصيرة ومباشرة. لا تطلب منه معلومات شخصية. لا تنهي المحادثة."}
+        ]
+        
+        # استدعاء ask_assistant مع الـ prompt الداخلي
+        # ask_assistant ستحدد الـ Assistant ID بناءً على message_count
+        follow_up_reply = ask_assistant(internal_prompt, user_id, name)
+
+        if follow_up_reply and "⚠" not in follow_up_reply: # تأكد أن الرد ليس رسالة خطأ
+            send_message(user_id, follow_up_reply)
+
+            # تحديث حالة المتابعة في الجلسة
+            session["follow_up_sent"] += 1
+            session["follow_up_status"] = f"sent_{session['follow_up_sent']}"
+            save_session(user_id, session)
+            print(f"✅ تم إرسال رسالة المتابعة رقم {session['follow_up_sent']} للعميل {user_id}.", flush=True)
+        else:
+            print(f"❌ المساعد لم يتمكن من صياغة رسالة متابعة للعميل {user_id}. الرد: {follow_up_reply}", flush=True)
+
+    except Exception as e:
+        print(f"❌ خطأ أثناء إرسال رسالة المتابعة للعميل {user_id}: {e}", flush=True)
+        traceback.print_exc()
 
 # ==============================================================================
 # دالة معالجة الرسائل النصية المعلقة (تجميع الرسائل)
@@ -320,6 +380,8 @@ def webhook():
         return jsonify({"status": "no sender"}), 400
 
     session = get_session(sender)
+    session["last_message_time"] = datetime.utcnow().isoformat() # تحديث وقت آخر رسالة
+    save_session(sender, session) # حفظ الجلسة بعد تحديث الوقت (مهم)
     
     # ==========================================================================
     # معالجة رسائل الريكوردات (الأولوية الأولى)
@@ -379,6 +441,31 @@ def webhook():
     return jsonify({"status": "received"}), 200
 
 # ==============================================================================
+# دالة الجدولة التي تبحث عن العملاء المترددين
+# ==============================================================================
+def check_for_inactive_users():
+    print("🔍 جاري البحث عن عملاء مترددين...", flush=True)
+    current_time = datetime.utcnow()
+    
+    # البحث عن الجلسات التي لم تتفاعل منذ فترة
+    # والتي لم يتم إرسال الحد الأقصى من رسائل المتابعة لها
+    inactive_sessions = sessions_collection.find({
+        "last_message_time": {
+            "$lt": (current_time - timedelta(minutes=FOLLOW_UP_INTERVAL_MINUTES)).isoformat()
+        },
+        "follow_up_sent": {
+            "$lt": MAX_FOLLOW_UPS
+        }
+    })
+
+    for session in inactive_sessions:
+        user_id = session["_id"]
+        # لا نحتاج name و thread_id هنا، send_follow_up_message ستحصل عليها من get_session
+
+        # إرسال رسالة المتابعة
+        send_follow_up_message(user_id)
+
+# ==============================================================================
 # نقطة نهاية الصفحة الرئيسية
 # ==============================================================================
 @app.route("/", methods=["GET"])
@@ -392,4 +479,11 @@ def home():
 # تشغيل التطبيق
 # ==============================================================================
 if __name__ == "__main__":
+    # إعداد الجدولة
+    scheduler = BackgroundScheduler()
+    # تشغيل check_for_inactive_users كل 5 دقائق
+    scheduler.add_job(check_for_inactive_users, 'interval', minutes=5) 
+    scheduler.start()
+    print("⏰ تم بدء الجدولة بنجاح.", flush=True)
+
     app.run(host="0.0.0.0", port=5000, debug=True)
