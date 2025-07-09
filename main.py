@@ -23,10 +23,10 @@ CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 ASSISTANT_ID_PREMIUM = os.getenv("ASSISTANT_ID_PREMIUM") 
 
 # Assistant ID للنموذج الأرخص (مثلاً GPT-4o Mini أو GPT-3.5-turbo) - تم التعليق عليه مؤقتاً
-# ASSISTANT_ID_CHEAPER = os.getenv("ASSISTANT_ID_CHEAPER") 
+ASSISTANT_ID_CHEAPER = os.getenv("ASSISTANT_ID_CHEAPER") 
 
 # عدد الرسائل المسموح بها للنموذج الأغلى قبل التحويل للأرخص - تم التعليق عليه مؤقتاً
-# MAX_MESSAGES_FOR_PREMIUM_MODEL = int(os.getenv("MAX_MESSAGES_FOR_PREMIUM_MODEL", 10)) 
+MAX_MESSAGES_FOR_PREMIUM_MODEL = int(os.getenv("MAX_MESSAGES_FOR_PREMIUM_MODEL", 10)) 
 
 MONGO_URI = os.getenv("MONGO_URI")
 
