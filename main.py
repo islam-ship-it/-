@@ -22,12 +22,10 @@ CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 # Assistant ID للنموذج الأغلى (GPT-4o) - يتم قراءته من .env
 ASSISTANT_ID_PREMIUM = os.getenv("ASSISTANT_ID_PREMIUM") 
 
-# Assistant ID للنموذج الأرخص (مثلاً GPT-4o Mini أو GPT-3.5-turbo) - يتم قراءته من .env
-# تم التعليق عليه مؤقتاً بناءً على طلبك
+# Assistant ID للنموذج الأرخص (مثلاً GPT-4o Mini أو GPT-3.5-turbo) - تم التعليق عليه مؤقتاً
 # ASSISTANT_ID_CHEAPER = os.getenv("ASSISTANT_ID_CHEAPER") 
 
-# عدد الرسائل المسموح بها للنموذج الأغلى قبل التحويل للأرخص - يتم قراءته من .env
-# تم التعليق عليه مؤقتاً بناءً على طلبك
+# عدد الرسائل المسموح بها للنموذج الأغلى قبل التحويل للأرخص - تم التعليق عليه مؤقتاً
 # MAX_MESSAGES_FOR_PREMIUM_MODEL = int(os.getenv("MAX_MESSAGES_FOR_PREMIUM_MODEL", 10)) 
 
 MONGO_URI = os.getenv("MONGO_URI")
@@ -43,6 +41,7 @@ try:
     client_db = MongoClient(MONGO_URI)
     db = client_db["whatsapp_bot"]
     sessions_collection = db["sessions"]
+    message_queue_collection = db["message_queue"] # جديد: كوليكشن لطابور الرسائل
     print("✅ تم الاتصال بقاعدة البيانات بنجاح.", flush=True)
 except Exception as e:
     print(f"❌ فشل الاتصال بقاعدة البيانات: {e}", flush=True)
@@ -55,12 +54,10 @@ app = Flask(__name__)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ==============================================================================
-# متغيرات عالمية لإدارة الرسائل المعلقة والمؤقتات والـ Locks
+# متغيرات عالمية لإدارة الـ Locks
 # ==============================================================================
-pending_messages = {}
-timers = {}
 thread_locks = {} # قاموس لتخزين الـ Locks لكل thread_id في OpenAI
-client_processing_locks = {} # جديد: Lock لكل عميل عشان نضمن process_pending_messages واحدة بس شغالة
+# client_processing_locks لم تعد ضرورية بنفس الشكل بعد استخدام طابور MongoDB
 
 # ==============================================================================
 # دوال إدارة الجلسات
@@ -140,7 +137,7 @@ def transcribe_audio(audio_url, file_format="ogg"):
         temp_audio_file = f"temp_audio_{int(time.time())}.{file_format}"
         with open(temp_audio_file, "wb") as f:
             for chunk in audio_response.iter_content(chunk_size=8192):
-                f.write(chunk)
+                f.write(f)
         print(f"✅ تم تحميل الملف الصوتي: {temp_audio_file}", flush=True)
 
         # تحويل الصوت إلى نص باستخدام OpenAI Whisper API
@@ -332,143 +329,72 @@ def send_follow_up_message(user_id):
         traceback.print_exc()
 
 # ==============================================================================
-# دالة معالجة الرسائل النصية المعلقة (تجميع الرسائل)
+# دالة Worker لمعالجة طابور الرسائل
 # ==============================================================================
-def process_pending_messages(sender, name):
-    """
-    تجمع الرسائل النصية الواردة من نفس العميل وترسلها للمساعد كرسالة واحدة.
-    """
-    # التأكد من وجود Lock لهذا العميل
-    if sender not in client_processing_locks:
-        client_processing_locks[sender] = threading.Lock()
+def message_queue_worker():
+    print("👷‍♂️ Worker بدأ تشغيل معالجة طابور الرسائل.", flush=True)
+    while True:
+        try:
+            # البحث عن رسالة "pending" في الطابور (أقدم رسالة أولاً)
+            message_doc = message_queue_collection.find_one_and_update(
+                {"status": "pending"},
+                {"$set": {"status": "processing", "processing_start_time": datetime.utcnow()}},
+                sort=[("timestamp", 1)] # أقدم رسالة أولاً
+            )
 
-    # استخدام الـ Lock لضمان عملية معالجة واحدة فقط في نفس الوقت لكل عميل
-    with client_processing_locks[sender]:
-        print(f"⏳ تجميع رسائل العميل {sender} لمدة 4 ثواني.", flush=True)
-        time.sleep(4) # الانتظار لتجميع الرسائل
-        
-        # دمج جميع الرسائل المعلقة
-        # التأكد إن فيه رسائل عشان لو الـ thread اشتغل مرتين بالغلط
-        if not pending_messages.get(sender):
-            print(f"⚠️ لا توجد رسائل معلقة للعميل {sender}، تخطي المعالجة.", flush=True)
-            timers.pop(sender, None) # إزالة المؤقت حتى لو مفيش رسائل
-            return
+            if message_doc:
+                sender = message_doc["sender"]
+                name = message_doc["name"]
+                msg_type = message_doc["msg_type"]
+                
+                content_to_assistant = None
+                
+                print(f"⚙️ Worker يعالج رسالة من {sender} (النوع: {msg_type}).", flush=True)
 
-        combined_text = "\n".join(pending_messages[sender])
-        content = [{"type": "text", "text": combined_text}]
-        
-        print(f"📦 محتوى الرسالة النصية المجمعة المرسل للمساعد:\n{json.dumps(content, indent=2, ensure_ascii=False)}", flush=True)
-
-        reply = ask_assistant(content, sender, name)
-        send_message(sender, reply)
-        
-        # مسح الرسائل المعلقة وإزالة المؤقت
-        pending_messages[sender] = []
-        timers.pop(sender, None)
-        print(f"🎯 الرد تم على جميع رسائل {sender}.", flush=True)
-
-# ==============================================================================
-# Webhook لاستقبال الرسائل الواردة
-# ==============================================================================
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    """
-    نقطة نهاية الـ webhook لاستقبال الرسائل من ZAPI.
-    """
-    data = request.json
-    # طباعة البيانات المستلمة كاملة للتشخيص
-    print(f"\n📥 البيانات المستلمة كاملة من الـ webhook:\n{json.dumps(data, indent=2, ensure_ascii=False)}", flush=True)
-
-    sender = data.get("phone") or data.get("From")
-    msg = data.get("text", {}).get("message") or data.get("body", "")
-    name = data.get("pushname") or data.get("senderName") or data.get("profileName") or ""
-    
-    # استخراج imageUrl مباشرة من الـ data (هذا هو المفتاح لتحديد الصور)
-    image_data = data.get("image", {})
-    image_url = image_data.get("imageUrl") # سيكون None إذا لم تكن رسالة صورة
-    caption = image_data.get("caption", "")
-
-    # استخراج audioUrl مباشرة من الـ data (هذا هو المفتاح لتحديد الريكوردات)
-    audio_data = data.get("audio", {})
-    audio_url = audio_data.get("audioUrl") # سيكون None إذا لم تكن رسالة صوتية
-    audio_mime_type = audio_data.get("mimeType")
-
-
-    if not sender:
-        print("❌ رقم العميل غير موجود في البيانات المستلمة.", flush=True)
-        return jsonify({"status": "no sender"}), 400
-
-    session = get_session(sender)
-    session["last_message_time"] = datetime.utcnow().isoformat() # تحديث وقت آخر رسالة
-    save_session(sender, session) # حفظ الجلسة بعد تحديث الوقت (مهم)
-    
-    # ==========================================================================
-    # معالجة رسائل الريكوردات (الأولوية الأولى)
-    # ==========================================================================
-    if audio_url:
-        print(f"🎙️ ريكورد صوتي مستلم (audioUrl: {audio_url}, mimeType: {audio_mime_type})", flush=True)
-        
-        # تحويل الريكورد إلى نص
-        transcribed_text = transcribe_audio(audio_url, file_format="ogg") # ZAPI بيبعت ogg
-        
-        if transcribed_text:
-            message_content = [{"type": "text", "text": f"رسالة صوتية من العميل {name} ({sender}):\n{transcribed_text}"}]
-            print(f"📦 محتوى رسالة الريكورد المرسل لـ ask_assistant:\n{json.dumps(message_content, indent=2, ensure_ascii=False)}", flush=True)
-            
-            reply = ask_assistant(message_content, sender, name)
-            if reply:
-                send_message(sender, reply)
-            return jsonify({"status": "audio processed"}), 200
-        else:
-            print("❌ فشل تحويل الريكورد الصوتي إلى نص.", flush=True)
-            send_message(sender, "عذراً، لم أتمكن من فهم رسالتك الصوتية. هل يمكنك كتابتها من فضلك؟")
-            return jsonify({"status": "audio transcription failed"}), 200
-
-    # ==========================================================================
-    # معالجة رسائل الصور (الأولوية الثانية)
-    # ==========================================================================
-    if image_url:
-        print(f"🌐 صورة مستلمة (imageUrl: {image_url}, caption: {caption})", flush=True)
-
-        message_content = [
-            {"type": "text", "text": f"صورة من العميل {name} ({sender})."},
-            {"type": "image_url", "image_url": {"url": image_url}}
-        ]
-        if caption:
-            message_content.append({"type": "text", "text": f"تعليق على الصورة:\n{caption}"})
-
-        print(f"📦 محتوى رسالة الصورة المرسل لـ ask_assistant:\n{json.dumps(message_content, indent=2, ensure_ascii=False)}", flush=True)
-
-        reply = ask_assistant(message_content, sender, name)
-        if reply:
-            send_message(sender, reply)
-        return jsonify({"status": "image processed"}), 200
-    
-    # ==========================================================================
-    # معالجة الرسائل النصية (الأولوية الثالثة)
-    # ==========================================================================
-    if msg:
-        print(f"💬 استقبال رسالة نصية من العميل: {msg}", flush=True)
-        
-        # جديد: لو الرسالة النصية تدل على تأكيد دفع
-        # يمكن تعديل الكلمات المفتاحية لتكون أكثر دقة
-        if "تم" in msg.lower() or "دفعت" in msg.lower() or "تحويل" in msg.lower():
-            session = get_session(sender)
-            session["payment_status"] = "confirmed"
-            save_session(sender, session)
-            print(f"💰 تم تأكيد الدفع للعميل {sender}. تم تحديث حالة الدفع.", flush=True)
-            # ممكن هنا تبعت رد تلقائي للعميل بتأكيد استلام الدفع
-            # send_message(sender, "شكراً لتأكيد الدفع! تم استلام طلبك وسنباشر التنفيذ.")
-            
-        if sender not in pending_messages:
-            pending_messages[sender] = []
-        pending_messages[sender].append(msg)
-
-        if sender not in timers:
-            timers[sender] = threading.Thread(target=process_pending_messages, args=(sender, name))
-            timers[sender].start()
-
-    return jsonify({"status": "received"}), 200
+                if msg_type == "audio":
+                    audio_url = message_doc["audio_url"]
+                    audio_mime_type = message_doc["audio_mime_type"]
+                    transcribed_text = transcribe_audio(audio_url, file_format="ogg") # ZAPI بيبعت ogg
+                    if transcribed_text:
+                        content_to_assistant = [{"type": "text", "text": f"رسالة صوتية من العميل {name} ({sender}):\n{transcribed_text}"}]
+                    else:
+                        send_message(sender, "عذراً، لم أتمكن من فهم رسالتك الصوتية. هل يمكنك كتابتها من فضلك؟")
+                        message_queue_collection.delete_one({"_id": message_doc["_id"]}) # حذف الرسالة من الطابور
+                        continue # تخطي باقي المعالجة
+                elif msg_type == "image":
+                    image_url = message_doc["image_url"]
+                    caption = message_doc["caption"]
+                    content_to_assistant = [
+                        {"type": "text", "text": f"صورة من العميل {name} ({sender})."},
+                        {"type": "image_url", "image_url": {"url": image_url}}
+                    ]
+                    if caption:
+                        content_to_assistant.append({"type": "text", "text": f"تعليق على الصورة:\n{caption}"})
+                elif msg_type == "text":
+                    content_to_assistant = [{"type": "text", "text": message_doc["content"]}]
+                
+                if content_to_assistant:
+                    reply = ask_assistant(content_to_assistant, sender, name)
+                    if reply:
+                        send_message(sender, reply)
+                
+                # حذف الرسالة من الطابور بعد المعالجة بنجاح
+                message_queue_collection.delete_one({"_id": message_doc["_id"]})
+                print(f"✅ تم معالجة وحذف الرسالة من الطابور للعميل {sender}.", flush=True)
+            else:
+                # لا توجد رسائل في الطابور، انتظر قليلاً قبل التحقق مرة أخرى
+                time.sleep(0.5) # ممكن تخليها 0.5 أو 1 ثانية حسب سرعة المعالجة
+        except Exception as e:
+            print(f"❌ خطأ في Worker معالجة طابور الرسائل: {e}", flush=True)
+            traceback.print_exc()
+            # في حالة الخطأ، ممكن نرجع حالة الرسالة لـ "pending" أو "failed"
+            # عشان متتجاهلش، أو نضيف عداد محاولات
+            if message_doc:
+                message_queue_collection.update_one(
+                    {"_id": message_doc["_id"]},
+                    {"$set": {"status": "failed", "error_message": str(e)}}
+                )
+            time.sleep(5) # انتظر فترة أطول بعد الخطأ لتجنب تكرار الأخطاء بسرعة
 
 # ==============================================================================
 # دالة الجدولة التي تبحث عن العملاء المترددين
@@ -494,7 +420,7 @@ def check_for_inactive_users():
             {"last_follow_up_time": None}, # لو لسه متبعتلوش أي رسالة متابعة
             {"last_follow_up_time": {
                 "$lt": (current_time - timedelta(minutes=FOLLOW_UP_INTERVAL_MINUTES)).isoformat()
-            }} # لو آخر رسالة متابعة كانت أقدم من فترة المتابعة
+            }}
         ],
         "payment_status": {"$ne": "confirmed"} # جديد: استبعاد العملاء اللي دفعوا
     })
@@ -517,11 +443,16 @@ def home():
 # تشغيل التطبيق
 # ==============================================================================
 if __name__ == "__main__":
-    # إعداد الجدولة
+    # إعداد الجدولة (لرسائل المتابعة)
     scheduler = BackgroundScheduler()
     # تشغيل check_for_inactive_users كل 5 دقائق
     scheduler.add_job(check_for_inactive_users, 'interval', minutes=5) 
     scheduler.start()
     print("⏰ تم بدء الجدولة بنجاح.", flush=True)
+
+    # تشغيل Worker لمعالجة طابور الرسائل في Thread منفصل
+    worker_thread = threading.Thread(target=message_queue_worker, daemon=True)
+    worker_thread.start()
+    print("👷‍♂️ تم بدء Worker معالجة طابور الرسائل.", flush=True)
 
     app.run(host="0.0.0.0", port=5000, debug=True)
