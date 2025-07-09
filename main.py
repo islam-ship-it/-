@@ -344,8 +344,8 @@ def process_pending_messages(sender, name):
 
     # استخدام الـ Lock لضمان عملية معالجة واحدة فقط في نفس الوقت لكل عميل
     with client_processing_locks[sender]:
-        print(f"⏳ تجميع رسائل العميل {sender} لمدة 8 ثواني.", flush=True)
-        time.sleep(8) # الانتظار لتجميع الرسائل
+        print(f"⏳ تجميع رسائل العميل {sender} لمدة 4 ثواني.", flush=True)
+        time.sleep(4) # الانتظار لتجميع الرسائل
         
         # دمج جميع الرسائل المعلقة
         # التأكد إن فيه رسائل عشان لو الـ thread اشتغل مرتين بالغلط
