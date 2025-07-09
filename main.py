@@ -157,7 +157,7 @@ def transcribe_audio(audio_url, file_format="ogg"):
         traceback.print_exc()
     finally:
         # حذف الملف المؤقت بعد الانتهاء
-        if 'temp_audio_file' in locals() and os.path.exists(temp_audio_file):
+        if "temp_audio_file" in locals() and os.path.exists(temp_audio_file):
             os.remove(temp_audio_file)
             print(f"🗑️ تم حذف الملف الصوتي المؤقت: {temp_audio_file}", flush=True)
     return None
@@ -439,7 +439,16 @@ def check_for_inactive_users():
 def webhook():
     print("📞 تم استلام طلب على الـ Webhook.", flush=True) # سطر الطباعة الجديد
     try:
+        # محاولة قراءة البيانات كـ JSON أولاً
         data = request.json
+        if data is None: # إذا لم تكن البيانات JSON، حاول قراءتها كـ form data
+            data = request.form.to_dict() # تحويل ImmutableMultiDict إلى dict
+            print("⚠️ البيانات ليست JSON، تم قراءتها كـ form data.", flush=True)
+
+        if not data:
+            print("⚠️ طلب فارغ أو غير صالح.", flush=True)
+            return jsonify({"status": "error", "message": "Empty or invalid request"}), 400
+
         print(f"📥 البيانات المستلمة كاملة من الـ webhook:\n{json.dumps(data, indent=2, ensure_ascii=False)}", flush=True)
 
         # التحقق من وجود مفتاح 'instanceId' و 'type' لتجنب معالجة الطلبات غير المرغوبة
