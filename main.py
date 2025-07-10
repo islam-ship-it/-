@@ -571,7 +571,7 @@ if __name__ == "__main__":
     # إعداد الجدولة
     scheduler = BackgroundScheduler()
     # تشغيل check_for_inactive_users كل 5 دقائق
-    scheduler.add_job(check_for_inactive_users, 'interval', minutes=5) 
+    #scheduler.add_job(check_for_inactive_users, 'interval', minutes=5) 
     scheduler.start()
     print("⏰ تم بدء الجدولة بنجاح.", flush=True)
 
