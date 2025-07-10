@@ -240,34 +240,62 @@ def ask_assistant(content, sender_id, name=""):
             print(f"✅ تم إرسال الداتا للمساعد بنجاح.", flush=True)
 
             # تشغيل المساعد لمعالجة الرسالة باستخدام الـ ID المحدد
-            run = client.beta.threads.runs.create(thread_id=session["thread_id"], assistant_id=current_assistant_id)
-            print(f"🏃‍♂️ تم بدء Run للمساعد: {run.id} باستخدام {current_assistant_id}", flush=True)
+            # إضافة منطق إعادة المحاولة هنا
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    run = client.beta.threads.runs.create(thread_id=session["thread_id"], assistant_id=current_assistant_id)
+                    print(f"🏃‍♂️ تم بدء Run للمساعد: {run.id} باستخدام {current_assistant_id} (محاولة {attempt + 1}/{max_retries})", flush=True)
 
-            # انتظار اكتمال الـ Run
-            while True:
-                run_status = client.beta.threads.runs.retrieve(thread_id=session["thread_id"], run_id=run.id)
-                print(f"⏳ حالة الـ Run: {run_status.status}", flush=True)
-                
-                # ==========================================================================
-                # معالجة حالات الـ Run المختلفة (تم إزالة معالجة requires_action التي كانت تسبب المشكلة)
-                # ==========================================================================
-                if run_status.status == "completed":
-                    break
-                elif run_status.status in ["failed", "cancelled", "expired"]:
-                    print(f"❌ الـ Run فشل أو تم إلغاؤه/انتهت صلاحيته: {run_status.status}", flush=True)
-                    # --- التعديل هنا: طباعة تفاصيل الخطأ ---
-                    print(f"🚨 تفاصيل Run الفاشل: {json.dumps(run_status.to_dict(), indent=2, ensure_ascii=False)}", flush=True)
-                    if run_status.last_error:
-                        print(f"🚨 رسالة الخطأ من OpenAI: Code={run_status.last_error.code}, Message={run_status.last_error.message}", flush=True)
-                    # ---------------------------------------
-                    # حفظ الجلسة حتى لو فشل الـ Run لتحديث حالة الـ history
-                    session["history"].append({"role": "assistant", "content": "⚠ حدث خطأ أثناء معالجة طلبك."})
-                    session["history"] = session["history"][-10:]
-                    save_session(sender_id, session)
-                    return "⚠ حدث خطأ أثناء معالجة طلبك، حاول تاني."
-                time.sleep(2) # انتظار ثانيتين قبل التحقق مرة أخرى
+                    # انتظار اكتمال الـ Run
+                    while True:
+                        run_status = client.beta.threads.runs.retrieve(thread_id=session["thread_id"], run_id=run.id)
+                        print(f"⏳ حالة الـ Run: {run_status.status}", flush=True)
+                        
+                        if run_status.status == "completed":
+                            break # الخروج من حلقة الانتظار الداخلية
+                        elif run_status.status in ["failed", "cancelled", "expired"]:
+                            print(f"❌ الـ Run فشل أو تم إلغاؤه/انتهت صلاحيته: {run_status.status}", flush=True)
+                            print(f"🚨 تفاصيل Run الفاشل: {json.dumps(run_status.to_dict(), indent=2, ensure_ascii=False)}", flush=True)
+                            if run_status.last_error:
+                                print(f"🚨 رسالة الخطأ من OpenAI: Code={run_status.last_error.code}, Message={run_status.last_error.message}", flush=True)
+                                if run_status.last_error.code == "server_error" and attempt < max_retries - 1:
+                                    print(f"🔄 خطأ في الخادم، إعادة المحاولة بعد 5 ثواني...", flush=True)
+                                    time.sleep(5) # انتظار قبل إعادة المحاولة
+                                    raise Exception("Server error, retrying...") # إثارة استثناء للخروج من الحلقة الداخلية والبدء في محاولة جديدة
+                            
+                            # إذا لم يكن server_error أو تجاوزنا عدد المحاولات
+                            session["history"].append({"role": "assistant", "content": "⚠ حدث خطأ أثناء معالجة طلبك."})
+                            session["history"] = session["history"][-10:]
+                            save_session(sender_id, session)
+                            return "⚠ حدث خطأ أثناء معالجة طلبك، حاول تاني."
+                        time.sleep(2) # انتظار ثانيتين قبل التحقق مرة أخرى
+                    
+                    # إذا وصل هنا، فالـ Run اكتمل بنجاح، يمكن الخروج من حلقة إعادة المحاولة
+                    break # الخروج من حلقة إعادة المحاولة
 
-            # استرجاع رسائل المساعد
+                except Exception as e:
+                    # هذا الاستثناء يتم إثارته فقط في حالة server_error لإعادة المحاولة
+                    if "Server error, retrying..." in str(e):
+                        continue # الانتقال للمحاولة التالية
+                    else:
+                        print(f"❌ حصل استثناء أثناء الإرسال للمساعد أو استلام الرد: {e}", flush=True)
+                        traceback.print_exc() # طباعة الـ traceback كامل للتشخيص
+                        # حفظ الجلسة حتى لو حصل استثناء
+                        if not is_internal_follow_up:
+                            session["history"].append({"role": "assistant", "content": "⚠ حدث خطأ عام."})
+                            session["history"] = session["history"][-10:]
+                            save_session(sender_id, session)
+                        return "⚠ مشكلة مؤقتة، حاول تاني."
+            else:
+                # إذا تم استنفاد جميع المحاولات ولم ينجح الـ Run
+                print(f"❌ فشل الـ Run بعد {max_retries} محاولات.", flush=True)
+                session["history"].append({"role": "assistant", "content": "⚠ فشل في معالجة طلبك بعد عدة محاولات."})
+                session["history"] = session["history"][-10:]
+                save_session(sender_id, session)
+                return "⚠ فشل في معالجة طلبك بعد عدة محاولات، حاول لاحقاً."
+
+            # استرجاع رسائل المساعد (يتم الوصول إليها فقط إذا اكتمل الـ Run بنجاح)
             messages = client.beta.threads.messages.list(thread_id=session["thread_id"])
             
             # البحث عن أحدث رد من المساعد
@@ -548,3 +576,4 @@ if __name__ == "__main__":
     print("⏰ تم بدء الجدولة بنجاح.", flush=True)
 
     app.run(host="0.0.0.0", port=5000, debug=True)
+
