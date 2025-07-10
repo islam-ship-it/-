@@ -129,7 +129,7 @@ def send_message(phone, message):
 # ==============================================================================
 def transcribe_audio(audio_url, file_format="ogg"):
     """
-    يحمل ملف صوتي من URL ويحوله إلى نص باستخدام OpenAI Whisper API.
+    يحمل ملف صوتي من URL ويحوله إلى نص ويحوله إلى نص باستخدام OpenAI Whisper API.
     """
     print(f"🎙️ محاولة تحميل وتحويل الصوت من: {audio_url}", flush=True)
     try:
@@ -200,6 +200,7 @@ def ask_assistant(content, sender_id, name=""):
     # إضافة رسالة المستخدم إلى الـ history (فقط إذا كانت رسالة من العميل)
     # رسائل المتابعة لن تزيد الـ message_count
     is_internal_follow_up = False
+    # التأكد من أن content هو قائمة قبل التكرار عليها
     if isinstance(content, list):
         for item in content:
             if item.get("type") == "text" and "رسالة متابعة داخلية" in item.get("text", ""):
@@ -208,7 +209,11 @@ def ask_assistant(content, sender_id, name=""):
     
     if not is_internal_follow_up:
         session["message_count"] += 1 # زيادة العداد هنا قبل إرسال الرسالة
-        session["history"].append({"role": "user", "content": content})
+        # التأكد من أن content هو قائمة قبل إضافته إلى history
+        if isinstance(content, list):
+            session["history"].append({"role": "user", "content": content})
+        else: # إذا كان content نصًا عاديًا، قم بتحويله إلى قائمة كائن نصي
+            session["history"].append({"role": "user", "content": [{"type": "text", "text": content}]})
     # لا تحفظ هنا، سنحفظ بعد إضافة رد المساعد
 
     print(f"\n🚀 الداتا داخلة للمساعد (OpenAI):\n{json.dumps(content, indent=2, ensure_ascii=False)}", flush=True)
@@ -224,6 +229,10 @@ def ask_assistant(content, sender_id, name=""):
     try:
         with thread_locks[session["thread_id"]]:
             # إضافة الرسالة إلى Thread في OpenAI
+            # التأكد من أن content هو قائمة قبل إرساله إلى OpenAI
+            if not isinstance(content, list):
+                content = [{"type": "text", "text": content}]
+
             client.beta.threads.messages.create(
                 thread_id=session["thread_id"],
                 role="user",
@@ -327,7 +336,8 @@ def send_follow_up_message(user_id):
     try:
         # استدعاء ask_assistant مع الـ prompt الداخلي
         # ask_assistant ستحدد الـ Assistant ID بناءً على message_count
-        follow_up_reply = ask_assistant([{"type": "text", "text": prompt_text}], user_id, name) # تم تصحيح هنا
+        # تم تعديل هنا لضمان أن prompt_text يتم تمريره كقائمة من كائنات المحتوى
+        follow_up_reply = ask_assistant([{"type": "text", "text": prompt_text}], user_id, name)
 
         if follow_up_reply and "⚠" not in follow_up_reply: # تأكد أن الرد ليس رسالة خطأ
             send_message(user_id, follow_up_reply)
@@ -539,5 +549,4 @@ if __name__ == "__main__":
     print("⏰ تم بدء الجدولة بنجاح.", flush=True)
 
     app.run(host="0.0.0.0", port=5000, debug=True)
-
 
