@@ -254,6 +254,14 @@ async def start_command(update, context):
 async def handle_telegram_message(update, context):
     chat_id = update.effective_chat.id
     user_name = update.effective_user.first_name
+    logger.info(f"📥 [Telegram] رسالة جديدة من: {chat_id} - الاسم: {user_name}")
+    logger.info(f"🔍 محتوى الرسالة: {update.message}")
+    try:
+        await context.bot.send_chat_action(chat_id=chat_id, action=telegram.constants.ChatAction.TYPING)
+    except telegram.error.BadRequest as e:
+        logger.error(f"❌ [Telegram] BadRequest أثناء إرسال chat action: {e}")
+    except RuntimeError as e:
+        logger.error(f"❌ [Telegram] RuntimeError أثناء إرسال chat action: {e}")
     
     session = get_session(chat_id)
     session["last_message_time"] = datetime.utcnow().isoformat()
@@ -261,7 +269,6 @@ async def handle_telegram_message(update, context):
     session["follow_up_status"] = "responded"
     save_session(chat_id, session)
 
-    await context.bot.send_chat_action(chat_id=chat_id, action=telegram.constants.ChatAction.TYPING)
     
     reply = ""
     content_for_assistant = ""
