@@ -6,3 +6,4 @@ requests
 python-dotenv
 gunicorn
 python-telegram-bot==21.1.1
+uvicorn
