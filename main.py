@@ -17,6 +17,10 @@ from dotenv import load_dotenv
 import telegram
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
+# --- (كل إعدادات البيئة وقاعدة البيانات تبقى كما هي) ---
+# ... (سأختصرها هنا ولكنها موجودة في الكود الكامل أدناه) ...
+
+# الكود الكامل يبدأ هنا
 # ==============================================================================
 # تحميل متغيرات البيئة
 # ==============================================================================
@@ -40,8 +44,7 @@ MAX_FOLLOW_UPS = int(os.getenv("MAX_FOLLOW_UPS", 3))
 # التحقق من المتغيرات الأساسية
 # ==============================================================================
 if not all([OPENAI_API_KEY, ASSISTANT_ID_PREMIUM, TELEGRAM_BOT_TOKEN, MONGO_URI]):
-    print("❌ خطأ فادح: واحد أو أكثر من متغيرات البيئة الأساسية غير موجود. يرجى مراجعة الإعدادات.")
-    # exit()
+    print("❌ خطأ فادح: واحد أو أكثر من متغيرات البيئة الأساسية غير موجود.")
 
 # ==============================================================================
 # إعدادات قاعدة البيانات (MongoDB)
@@ -97,6 +100,7 @@ def save_session(user_id, session_data):
 # دوال إرسال الرسائل
 # ==============================================================================
 def send_whatsapp_message(phone, message):
+    # ... (الكود يبقى كما هو)
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
     headers = {"Content-Type": "application/json", "Client-Token": CLIENT_TOKEN}
     payload = {"phone": phone, "message": message}
@@ -107,9 +111,10 @@ def send_whatsapp_message(phone, message):
     except requests.exceptions.RequestException as e:
         print(f"❌ [WhatsApp] خطأ أثناء إرسال الرسالة عبر ZAPI: {e}", flush=True)
 
-async def send_telegram_message(context, chat_id, message):
+# دالة إرسال تيليجرام أصبحت أبسط
+async def send_telegram_message(bot, chat_id, message):
     try:
-        await context.bot.send_message(chat_id=chat_id, text=message)
+        await bot.send_message(chat_id=chat_id, text=message)
         print(f"📤 [Telegram] تم إرسال رسالة للعميل {chat_id}.", flush=True)
     except Exception as e:
         print(f"❌ [Telegram] خطأ أثناء إرسال الرسالة: {e}", flush=True)
@@ -118,6 +123,7 @@ async def send_telegram_message(context, chat_id, message):
 # دوال مشتركة (تحويل الصوت، التفاعل مع المساعد)
 # ==============================================================================
 def transcribe_audio(audio_url, file_format="ogg"):
+    # ... (الكود يبقى كما هو)
     print(f"🎙️ محاولة تحميل وتحويل الصوت من: {audio_url}", flush=True)
     try:
         audio_response = requests.get(audio_url, stream=True)
@@ -135,6 +141,7 @@ def transcribe_audio(audio_url, file_format="ogg"):
         return None
 
 def ask_assistant(content, sender_id, name=""):
+    # ... (الكود يبقى كما هو)
     session = get_session(sender_id)
     if name and not session.get("name"):
         session["name"] = name
@@ -183,6 +190,7 @@ def ask_assistant(content, sender_id, name=""):
 # منطق WhatsApp (Flask Webhook)
 # ==============================================================================
 def process_whatsapp_messages(sender, name):
+    # ... (الكود يبقى كما هو)
     sender_str = str(sender)
     with client_processing_locks.setdefault(sender_str, threading.Lock()):
         time.sleep(8)
@@ -203,6 +211,7 @@ def process_whatsapp_messages(sender, name):
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
+    # ... (الكود يبقى كما هو)
     data = request.json
     sender = data.get("phone")
     if not sender: return jsonify({"status": "no sender"}), 400
@@ -240,28 +249,33 @@ def webhook():
     return jsonify({"status": "received"}), 200
 
 # ==============================================================================
-# منطق Telegram (Webhook)
+# منطق Telegram (Webhook) - الإصدار الجديد والمستقر
 # ==============================================================================
 
-# 1. إعداد تطبيق تيليجرام بشكل عام (في المستوى الرئيسي)
-application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+# دالة المعالجة الرئيسية لتليجرام
+async def handle_telegram_update(update_data):
+    """
+    تعالج تحديث تيليجرام واحداً في كل مرة، مع إدارة حلقة الأحداث الخاصة بها.
+    """
+    bot = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
+    update = telegram.Update.de_json(update_data, bot)
 
-# 2. تعريف معالجات رسائل تيليجرام (Handlers)
-async def start_command(update, context):
-    user = update.effective_user
-    await update.message.reply_text(f"مرحباً {user.first_name}! أنا هنا لمساعدتك.")
+    # *** إصلاح خطأ AttributeError ***
+    # التحقق من أن التحديث هو رسالة جديدة قبل المتابعة
+    if not update.message:
+        print("ℹ️ [Telegram] تم استلام تحديث ليس رسالة (مثل تعديل رسالة)، سيتم تجاهله.")
+        return
 
-async def handle_telegram_message(update, context):
     chat_id = update.effective_chat.id
     user_name = update.effective_user.first_name
     
+    print(f"🕵️‍♂️ [Telegram] بدأت معالجة رسالة من {user_name} ({chat_id}).")
+    
     session = get_session(chat_id)
     session["last_message_time"] = datetime.utcnow().isoformat()
-    session["follow_up_sent"] = 0
-    session["follow_up_status"] = "responded"
     save_session(chat_id, session)
 
-    await context.bot.send_chat_action(chat_id=chat_id, action=telegram.constants.ChatAction.TYPING)
+    await bot.send_chat_action(chat_id=chat_id, action=telegram.constants.ChatAction.TYPING)
     
     reply = ""
     content_for_assistant = ""
@@ -283,59 +297,60 @@ async def handle_telegram_message(update, context):
         content_for_assistant = content_list
 
     if content_for_assistant and not reply:
+        print("🧠 [Telegram] جاري طلب رد من المساعد...")
         reply = ask_assistant(content_for_assistant, chat_id, user_name)
+        print(f"💬 [Telegram] الرد المستلم من المساعد: '{reply}'")
 
     if reply:
-        await send_telegram_message(context, chat_id, reply)
+        await send_telegram_message(bot, chat_id, reply)
+    else:
+        print("⚠️ [Telegram] لا يوجد رد لإرساله.")
 
-# 3. ربط الـ Handlers بالتطبيق (في المستوى الرئيسي)
-application.add_handler(CommandHandler("start", start_command))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_telegram_message))
-application.add_handler(MessageHandler(filters.VOICE, handle_telegram_message))
-application.add_handler(MessageHandler(filters.PHOTO, handle_telegram_message))
-
-# 4. إضافة مسار Webhook جديد لتليجرام
+# مسار الـ Webhook الجديد
 @app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
-async def telegram_webhook_handler():
+def telegram_webhook_handler():
+    """
+    يستقبل الطلب من تيليجرام ويقوم بتشغيل المعالج في حلقة أحداث جديدة.
+    """
     update_data = request.get_json()
     print(f"📥 [Telegram Webhook] بيانات مستلمة.", flush=True)
-    await application.process_update(
-        telegram.Update.de_json(update_data, application.bot)
-    )
+    
+    # *** إصلاح خطأ Event loop is closed ***
+    # نقوم بتشغيل دالة المعالجة غير المتزامنة في حلقة أحداث جديدة لكل طلب
+    try:
+        asyncio.run(handle_telegram_update(update_data))
+    except Exception as e:
+        print(f"❌ خطأ فادح في معالج تيليجرام: {e}", flush=True)
+        traceback.print_exc()
+
     return jsonify({"status": "ok"})
 
-# 5. تعديل المسار الرئيسي
+# دالة إعداد الـ Webhook (تعمل مرة واحدة فقط)
+async def setup_telegram_webhook():
+    render_hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME')
+    if render_hostname:
+        print("🔧 جاري إعداد Webhook تيليجرام...", flush=True)
+        bot = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
+        webhook_url = f"https://{render_hostname}/{TELEGRAM_BOT_TOKEN}"
+        await bot.set_webhook(url=webhook_url, allowed_updates=["message"] )
+        print(f"✅ [Telegram] تم إعداد الـ Webhook بنجاح على: {webhook_url}", flush=True)
+    else:
+        print("⚠️ لم يتم العثور على RENDER_EXTERNAL_HOSTNAME. تخطي إعداد الـ Webhook.", flush=True)
+
+# نقوم بتشغيل دالة الإعداد عند بدء تشغيل السيرفر
+try:
+    print("⏳ محاولة إعداد Webhook تيليجرام...", flush=True)
+    asyncio.run(setup_telegram_webhook())
+except Exception as e:
+    print(f"❌ فشل إعداد تيليجرام أثناء بدء التشغيل: {e}", flush=True)
+
+# ==============================================================================
+# المسار الرئيسي ونظام الجدولة
+# ==============================================================================
 @app.route("/", methods=["GET"])
 def home():
     return "✅ السيرفر يعمل (واتساب و تيليجرام)."
 
-# 6. إعداد الـ Webhook وتهيئة التطبيق في المستوى الرئيسي
-async def setup_telegram():
-    """دالة مساعدة لتهيئة تطبيق تيليجرام وإعداد الـ Webhook."""
-    render_hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME')
-    if render_hostname:
-        print("🔧 جاري تهيئة تطبيق تيليجرام وإعداد الـ Webhook...", flush=True)
-        await application.initialize() # <-- *** السطر الجديد والمهم ***
-        webhook_url = f"https://{render_hostname}/{TELEGRAM_BOT_TOKEN}"
-        await application.bot.set_webhook(url=webhook_url, allowed_updates=telegram.Update.ALL_TYPES )
-        print(f"✅ [Telegram] تم تهيئة التطبيق وإعداد الـ Webhook بنجاح.", flush=True)
-    else:
-        print("⚠️ لم يتم العثور على RENDER_EXTERNAL_HOSTNAME. تخطي إعداد الـ Webhook.", flush=True)
-
-# نقوم بتشغيل دالة الإعداد عند بدء التشغيل
-try:
-    loop = asyncio.get_event_loop()
-    if loop.is_running():
-        loop.create_task(setup_telegram())
-    else:
-        asyncio.run(setup_telegram())
-except Exception as e:
-    print(f"❌ فشل إعداد تيليجرام أثناء بدء التشغيل: {e}", flush=True)
-
-
-# ==============================================================================
-# نظام المتابعة التلقائية (Scheduler)
-# ==============================================================================
 def check_for_inactive_users():
     pass 
 
@@ -348,7 +363,7 @@ print("⏰ تم بدء الجدولة بنجاح.", flush=True)
 # تشغيل التطبيق
 # ==============================================================================
 if __name__ == "__main__":
-    # هذا الجزء الآن يستخدم فقط للاختبار المحلي المباشر بدون Gunicorn
+    # هذا الجزء يستخدم فقط للاختبار المحلي المباشر بدون Gunicorn
     print("🚀 جاري بدء تشغيل السيرفر للاختبار المحلي (لا تستخدم هذا في الإنتاج)...")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=True)
