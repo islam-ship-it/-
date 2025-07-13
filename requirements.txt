@@ -4,5 +4,5 @@ pymongo
 apscheduler
 requests
 python-dotenv
-python-telegram-bot==21.0.1
 gunicorn
+python-telegram-bot==21.1.1
