@@ -8,6 +8,7 @@ import random
 import asyncio
 import logging
 from flask import Flask, request, jsonify
+from asgiref.wsgi import WsgiToAsgi  # <-- (1) تم إضافة هذا السطر
 from openai import OpenAI
 from pymongo import MongoClient
 from datetime import datetime, timedelta
@@ -25,7 +26,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler()  # للطباعة في الكونسول (Render logs)
+        logging.StreamHandler()
     ]
 )
 logger = logging.getLogger(__name__)
@@ -53,7 +54,7 @@ MAX_FOLLOW_UPS = int(os.getenv("MAX_FOLLOW_UPS", 3))
 # التحقق من المتغيرات الأساسية
 # ==============================================================================
 if not all([OPENAI_API_KEY, ASSISTANT_ID_PREMIUM, TELEGRAM_BOT_TOKEN, MONGO_URI]):
-    logger.critical("❌ خطأ فادح: واحد أو أكثر من متغيرات البيئة الأساسية غير موجود. يرجى مراجعة الإعدادات.")
+    logger.critical("❌ خطأ فادح: واحد أو أكثر من متغيرات البيئة الأساسية غير موجود.")
     exit()
 
 # ==============================================================================
@@ -71,7 +72,8 @@ except Exception as e:
 # ==============================================================================
 # إعداد تطبيق Flask وعميل OpenAI
 # ==============================================================================
-app = Flask(__name__)
+flask_app = Flask(__name__)          # <-- (2) تم إنشاء تطبيق Flask الأصلي
+app = WsgiToAsgi(flask_app)          # <-- (3) تم تغليفه ليصبح متوافقًا مع ASGI
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ==============================================================================
@@ -133,6 +135,7 @@ async def send_telegram_message(context, chat_id, message):
 def transcribe_audio(audio_url, file_format="ogg"):
     logger.info(f"🎙️ محاولة تحميل وتحويل الصوت من: {audio_url}")
     try:
+        # ملاحظة: هذا الأسلوب قد لا يكون مثالياً على Render. الأفضل هو التحميل للذاكرة.
         audio_response = requests.get(audio_url, stream=True)
         audio_response.raise_for_status()
         temp_audio_file = f"temp_audio_{int(time.time())}.{file_format}"
@@ -160,7 +163,6 @@ def ask_assistant(content, sender_id, name=""):
             logger.error(f"❌ فشل إنشاء Thread جديد للمستخدم {sender_id}: {e}")
             return "⚠ مشكلة مؤقتة في إنشاء المحادثة، حاول مرة أخرى."
 
-    # تصحيح: التأكد من أن المحتوى النصي فقط يتم تغليفه في قائمة
     if isinstance(content, str):
         content = [{"type": "text", "text": content}]
 
@@ -216,7 +218,7 @@ def process_whatsapp_messages(sender, name):
         pending_messages[sender_str] = []
         timers.pop(sender_str, None)
 
-@app.route("/webhook", methods=["POST"])
+@flask_app.route("/webhook", methods=["POST"])  # <-- (4) تم التغيير إلى flask_app
 def webhook():
     data = request.json
     sender = data.get("phone")
@@ -258,7 +260,7 @@ def webhook():
 # ==============================================================================
 # منطق Telegram (Webhook)
 # ==============================================================================
-application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
 async def start_command(update, context):
     user = update.effective_user
@@ -305,21 +307,21 @@ async def handle_telegram_message(update, context):
     if reply:
         await send_telegram_message(context, chat_id, reply)
 
-application.add_handler(CommandHandler("start", start_command))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_telegram_message))
-application.add_handler(MessageHandler(filters.VOICE, handle_telegram_message))
-application.add_handler(MessageHandler(filters.PHOTO, handle_telegram_message))
+telegram_app.add_handler(CommandHandler("start", start_command))
+telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_telegram_message))
+telegram_app.add_handler(MessageHandler(filters.VOICE, handle_telegram_message))
+telegram_app.add_handler(MessageHandler(filters.PHOTO, handle_telegram_message))
 
-@app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
+@flask_app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])  # <-- (4) تم التغيير إلى flask_app
 async def telegram_webhook_handler():
     update_data = request.get_json()
     logger.info("📥 [Telegram Webhook] بيانات مستلمة.")
-    await application.process_update(
-        telegram.Update.de_json(update_data, application.bot)
+    await telegram_app.process_update(
+        telegram.Update.de_json(update_data, telegram_app.bot)
     )
     return jsonify({"status": "ok"})
 
-@app.route("/", methods=["GET"])
+@flask_app.route("/", methods=["GET"])  # <-- (4) تم التغيير إلى flask_app
 def home():
     return "✅ السيرفر يعمل (واتساب و تيليجرام)."
 
@@ -327,9 +329,9 @@ async def setup_telegram():
     render_hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME')
     if render_hostname:
         logger.info("🔧 جاري تهيئة تطبيق تيليجرام وإعداد الـ Webhook...")
-        await application.initialize()
+        await telegram_app.initialize()
         webhook_url = f"https://{render_hostname}/{TELEGRAM_BOT_TOKEN}"
-        await application.bot.set_webhook(url=webhook_url, allowed_updates=telegram.Update.ALL_TYPES )
+        await telegram_app.bot.set_webhook(url=webhook_url, allowed_updates=telegram.Update.ALL_TYPES )
         logger.info("✅ [Telegram] تم تهيئة التطبيق وإعداد الـ Webhook بنجاح.")
     else:
         logger.warning("⚠️ لم يتم العثور على RENDER_EXTERNAL_HOSTNAME. تخطي إعداد الـ Webhook.")
@@ -348,11 +350,9 @@ except Exception as e:
 # نظام المتابعة التلقائية (Scheduler)
 # ==============================================================================
 def check_for_inactive_users():
-    # هذا المكان مخصص لكتابة منطق المتابعة في المستقبل
     pass 
 
 scheduler = BackgroundScheduler()
-# scheduler.add_job(check_for_inactive_users, 'interval', minutes=5)
 scheduler.start()
 logger.info("⏰ تم بدء الجدولة بنجاح.")
 
@@ -362,4 +362,7 @@ logger.info("⏰ تم بدء الجدولة بنجاح.")
 if __name__ == "__main__":
     logger.info("🚀 جاري بدء تشغيل السيرفر للاختبار المحلي (لا تستخدم هذا في الإنتاج)...")
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    # لتشغيل هذا محلياً، ستحتاج إلى خادم ASGI مثل uvicorn
+    # import uvicorn
+    # uvicorn.run(app, host="0.0.0.0", port=port)
+    flask_app.run(host="0.0.0.0", port=port, debug=True) # هذا سيعمل فقط للكود المتزامن (واتساب)
