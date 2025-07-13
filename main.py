@@ -18,30 +18,21 @@ import telegram
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 # ==============================================================================
-# تحميل متغيرات البيئة (مفيد للاختبار المحلي، Render سيتجاهله)
+# تحميل متغيرات البيئة
 # ==============================================================================
 load_dotenv()
 
 # ==============================================================================
 # إعدادات البيئة
 # ==============================================================================
-# OpenAI
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ASSISTANT_ID_PREMIUM = os.getenv("ASSISTANT_ID_PREMIUM")
-
-# WhatsApp (ZAPI)
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
 CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
-
-# Telegram
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-
-# MongoDB
 MONGO_URI = os.getenv("MONGO_URI")
-
-# Follow-up
 FOLLOW_UP_INTERVAL_MINUTES = int(os.getenv("FOLLOW_UP_INTERVAL_MINUTES", 1440))
 MAX_FOLLOW_UPS = int(os.getenv("MAX_FOLLOW_UPS", 3))
 
@@ -75,7 +66,7 @@ client_processing_locks = {}
 # دوال إدارة الجلسات (مشتركة)
 # ==============================================================================
 def get_session(user_id):
-    user_id_str = str(user_id) # التأكد من أن المعرف دائماً نصي
+    user_id_str = str(user_id)
     session = sessions_collection.find_one({"_id": user_id_str})
     if not session:
         session = {
@@ -293,7 +284,6 @@ def run_telegram_bot():
     """إعداد وتشغيل بوت تيليجرام مع حلقة أحداث خاصة به."""
     print("🚀 جاري بدء تشغيل بوت تيليجرام...", flush=True)
     
-    # إنشاء وتشغيل حلقة أحداث جديدة لهذا الخيط
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
@@ -306,8 +296,8 @@ def run_telegram_bot():
 
     try:
         print("✅ بوت تيليجرام يعمل الآن ضمن حلقة الأحداث الخاصة به.", flush=True)
-        # تشغيل البوت بشكل غير متزامن
-        loop.run_until_complete(application.run_polling())
+        # تشغيل البوت مع تعطيل معالجة الإشارات لأنه يعمل في خيط فرعي
+        loop.run_until_complete(application.run_polling(stop_signals=None))
     finally:
         loop.close()
 
@@ -315,7 +305,6 @@ def run_telegram_bot():
 # نظام المتابعة التلقائية (Scheduler)
 # ==============================================================================
 def check_for_inactive_users():
-    # يمكنك تفعيل هذا الجزء لاحقاً إذا احتجت إليه
     pass 
 
 # ==============================================================================
@@ -336,4 +325,6 @@ if __name__ == "__main__":
     telegram_thread.start()
 
     print("🚀 جاري بدء تشغيل سيرفر واتساب (Flask)...", flush=True)
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
+    # Render يوفر متغير PORT تلقائياً
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=False)
