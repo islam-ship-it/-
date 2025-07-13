@@ -55,7 +55,7 @@ app = Flask(__name__)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ==============================================================================
-# متغيرات عالمية
+# متغيرات عالمية (تبقى كما هي)
 # ==============================================================================
 pending_messages = {}
 timers = {}
@@ -63,7 +63,7 @@ thread_locks = {}
 client_processing_locks = {}
 
 # ==============================================================================
-# دوال إدارة الجلسات (مشتركة)
+# دوال إدارة الجلسات (مشتركة - تبقى كما هي)
 # ==============================================================================
 def get_session(user_id):
     user_id_str = str(user_id)
@@ -87,7 +87,7 @@ def save_session(user_id, session_data):
     print(f"💾 تم حفظ بيانات الجلسة للمستخدم {user_id_str}.", flush=True)
 
 # ==============================================================================
-# دوال إرسال الرسائل
+# دوال إرسال الرسائل (تبقى كما هي)
 # ==============================================================================
 def send_whatsapp_message(phone, message):
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
@@ -108,7 +108,7 @@ async def send_telegram_message(context, chat_id, message):
         print(f"❌ [Telegram] خطأ أثناء إرسال الرسالة: {e}", flush=True)
 
 # ==============================================================================
-# دوال مشتركة (تحويل الصوت، التفاعل مع المساعد)
+# دوال مشتركة (تحويل الصوت، التفاعل مع المساعد - تبقى كما هي)
 # ==============================================================================
 def transcribe_audio(audio_url, file_format="ogg"):
     print(f"🎙️ محاولة تحميل وتحويل الصوت من: {audio_url}", flush=True)
@@ -173,7 +173,7 @@ def ask_assistant(content, sender_id, name=""):
             return "⚠ مشكلة مؤقتة، حاول مرة أخرى."
 
 # ==============================================================================
-# منطق WhatsApp (Flask Webhook)
+# منطق WhatsApp (Flask Webhook - يبقى كما هو)
 # ==============================================================================
 def process_whatsapp_messages(sender, name):
     sender_str = str(sender)
@@ -232,13 +232,14 @@ def webhook():
             
     return jsonify({"status": "received"}), 200
 
-@app.route("/", methods=["GET"])
-def home():
-    return "✅ سيرفر الواتساب يعمل."
+# ==============================================================================
+# --- التعديلات تبدأ هنا ---
+# ==============================================================================
 
-# ==============================================================================
-# منطق Telegram (python-telegram-bot)
-# ==============================================================================
+# 1. إعداد تطبيق تيليجرام بشكل عام ليتم استخدامه لاحقاً
+application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+# 2. تعريف معالجات رسائل تيليجرام (Handlers - تبقى كما هي)
 async def start_command(update, context):
     user = update.effective_user
     await update.message.reply_text(f"مرحباً {user.first_name}! أنا هنا لمساعدتك.")
@@ -280,51 +281,78 @@ async def handle_telegram_message(update, context):
     if reply:
         await send_telegram_message(context, chat_id, reply)
 
-def run_telegram_bot():
-    """إعداد وتشغيل بوت تيليجرام مع حلقة أحداث خاصة به."""
-    print("🚀 جاري بدء تشغيل بوت تيليجرام...", flush=True)
-    
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+# 3. ربط الـ Handlers بالتطبيق
+application.add_handler(CommandHandler("start", start_command))
+application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_telegram_message))
+application.add_handler(MessageHandler(filters.VOICE, handle_telegram_message))
+application.add_handler(MessageHandler(filters.PHOTO, handle_telegram_message))
 
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_telegram_message))
-    application.add_handler(MessageHandler(filters.VOICE, handle_telegram_message))
-    application.add_handler(MessageHandler(filters.PHOTO, handle_telegram_message))
+# 4. إضافة مسار Webhook جديد لتليجرام
+@app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
+async def telegram_webhook_handler():
+    """
+    يستقبل التحديثات من تيليجرام ويمررها للمعالج.
+    """
+    update_data = request.get_json()
+    print(f"📥 [Telegram Webhook] بيانات مستلمة.", flush=True)
+    await application.process_update(
+        telegram.Update.de_json(update_data, application.bot)
+    )
+    return jsonify({"status": "ok"})
 
-    try:
-        print("✅ بوت تيليجرام يعمل الآن ضمن حلقة الأحداث الخاصة به.", flush=True)
-        # تشغيل البوت مع تعطيل معالجة الإشارات لأنه يعمل في خيط فرعي
-        loop.run_until_complete(application.run_polling(stop_signals=None))
-    finally:
-        loop.close()
+# 5. تعديل المسار الرئيسي ليعكس وجود المنصتين
+@app.route("/", methods=["GET"])
+def home():
+    return "✅ السيرفر يعمل (واتساب و تيليجرام)."
 
 # ==============================================================================
-# نظام المتابعة التلقائية (Scheduler)
+# نظام المتابعة التلقائية (Scheduler - يبقى كما هو ومعطل)
 # ==============================================================================
 def check_for_inactive_users():
     pass 
 
 # ==============================================================================
-# تشغيل التطبيق
+# تشغيل التطبيق (الجزء المعدل)
 # ==============================================================================
 if __name__ == "__main__":
     if not all([OPENAI_API_KEY, ASSISTANT_ID_PREMIUM, TELEGRAM_BOT_TOKEN, MONGO_URI]):
         print("❌ خطأ: واحد أو أكثر من متغيرات البيئة الأساسية غير موجود. يرجى مراجعة الإعدادات.")
         exit()
 
+    # إعداد الـ Webhook عند بدء التشغيل (فقط إذا كان يعمل على Render)
+    render_hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME')
+    if render_hostname:
+        print("🔧 جاري إعداد Webhook تيليجرام...", flush=True)
+        webhook_url = f"https://{render_hostname}/{TELEGRAM_BOT_TOKEN}"
+        
+        # نستخدم asyncio لتشغيل هذه المهمة غير المتزامنة
+        loop = asyncio.new_event_loop( )
+        asyncio.set_event_loop(loop)
+        try:
+            # نقوم بتشغيل معالجات التطبيق في الخلفية
+            application.initialize()
+            # نضبط الـ Webhook
+            loop.run_until_complete(application.bot.set_webhook(url=webhook_url, allowed_updates=telegram.Update.ALL_TYPES))
+            print(f"✅ [Telegram] تم تعيين الـ Webhook بنجاح.", flush=True)
+        except Exception as e:
+            print(f"❌ فشل إعداد الـ Webhook: {e}", flush=True)
+        # لا نغلق الحلقة هنا، ولكن هذا الإعداد يعمل مرة واحدة فقط
+    else:
+        print("⚠️ لم يتم العثور على RENDER_EXTERNAL_HOSTNAME. تخطي إعداد الـ Webhook (مناسب للاختبار المحلي).")
+
+    # حذف الخيط الخاص بتليجرام
+    # telegram_thread = threading.Thread(target=run_telegram_bot, name="TelegramBotThread")
+    # telegram_thread.daemon = True
+    # telegram_thread.start() # ==> تم الحذف
+
     scheduler = BackgroundScheduler()
     # scheduler.add_job(check_for_inactive_users, 'interval', minutes=5)
     scheduler.start()
     print("⏰ تم بدء الجدولة بنجاح.", flush=True)
 
-    telegram_thread = threading.Thread(target=run_telegram_bot, name="TelegramBotThread")
-    telegram_thread.daemon = True
-    telegram_thread.start()
-
-    print("🚀 جاري بدء تشغيل سيرفر واتساب (Flask)...", flush=True)
-    # Render يوفر متغير PORT تلقائياً
+    print("🚀 جاري بدء تشغيل سيرفر Flask (واتساب و تيليجرام)...", flush=True)
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    
+    # لا نستخدم app.run() عند النشر على Render مع Gunicorn
+    # هذا السطر للاختبار المحلي فقط إذا لم تستخدم Gunicorn
+    # app.run(host="0.0.0.0", port=port, debug=False)
