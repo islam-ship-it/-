@@ -266,15 +266,23 @@ async def start_command(update, context):
     await update.message.reply_text(f"مرحباً {user.first_name}! أنا هنا لمساعدتك.")
 
 async def handle_telegram_message(update, context):
+    # --- تحسين الطباعة لتسجيل كل التحديثات ---
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if chat and user:
+        logger.info(f"📥 [Telegram Update] تحديث جديد من: {chat.id} - الاسم: {user.first_name}")
+    else:
+        logger.info("📥 [Telegram Update] تحديث جديد وصل (بدون معلومات دردشة/مستخدم).")
+
     # --- التحقق الأساسي لضمان وجود رسالة جديدة ---
     if not update.message:
-        logger.info("التحديث لا يحتوي على رسالة جديدة، سيتم تجاهله.")
+        logger.info("✅ التجاهل: التحديث لا يحتوي على رسالة جديدة.")
         return
-    # --- نهاية التحقق ---
 
-    chat_id = update.effective_chat.id
-    user_name = update.effective_user.first_name
-    logger.info(f"📥 [Telegram] رسالة جديدة من: {chat_id} - الاسم: {user_name}")
+    # --- الآن الكود آمن للمتابعة مع update.message ---
+    chat_id = update.message.chat_id
+    user_name = update.message.from_user.first_name
     
     try:
         await context.bot.send_chat_action(chat_id=chat_id, action=telegram.constants.ChatAction.TYPING)
@@ -367,7 +375,5 @@ logger.info("⏰ تم بدء الجدولة بنجاح.")
 if __name__ == "__main__":
     logger.info("🚀 جاري بدء تشغيل السيرفر للاختبار المحلي (لا تستخدم هذا في الإنتاج)...")
     port = int(os.environ.get("PORT", 5000))
-    # لتشغيل هذا محلياً، ستحتاج إلى خادم ASGI مثل uvicorn
-    # import uvicorn
-    # uvicorn.run(app, host="0.0.0.0", port=port)
     flask_app.run(host="0.0.0.0", port=port, debug=True)
+
