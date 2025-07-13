@@ -122,13 +122,6 @@ def send_whatsapp_message(phone, message):
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ [WhatsApp] خطأ أثناء إرسال الرسالة عبر ZAPI: {e}")
 
-async def send_telegram_message(context, chat_id, message):
-    try:
-        await context.bot.send_message(chat_id=chat_id, text=message)
-        logger.info(f"📤 [Telegram] تم إرسال رسالة للعميل {chat_id}.")
-    except Exception as e:
-        logger.error(f"❌ [Telegram] خطأ أثناء إرسال الرسالة: {e}")
-
 # ==============================================================================
 # دوال مشتركة (تحويل الصوت، التفاعل مع المساعد)
 # ==============================================================================
@@ -257,7 +250,7 @@ def webhook():
     return jsonify({"status": "received"}), 200
 
 # ==============================================================================
-# منطق Telegram (Webhook)
+# منطق Telegram (Webhook) - معدل لدعم Business
 # ==============================================================================
 telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
@@ -265,24 +258,17 @@ async def start_command(update, context):
     user = update.effective_user
     await update.message.reply_text(f"مرحباً {user.first_name}! أنا هنا لمساعدتك.")
 
-async def handle_telegram_message(update, context):
-    # --- تحسين الطباعة لتسجيل كل التحديثات ---
-    chat = update.effective_chat
-    user = update.effective_user
+async def handle_any_message(update, context):
+    # نحدد ما إذا كانت رسالة عادية أم رسالة أعمال
+    message = update.message or update.business_message
 
-    if chat and user:
-        logger.info(f"📥 [Telegram Update] تحديث جديد من: {chat.id} - الاسم: {user.first_name}")
-    else:
-        logger.info("📥 [Telegram Update] تحديث جديد وصل (بدون معلومات دردشة/مستخدم).")
-
-    # --- التحقق الأساسي لضمان وجود رسالة جديدة ---
-    if not update.message:
-        logger.info("✅ التجاهل: التحديث لا يحتوي على رسالة جديدة.")
+    if not message:
+        logger.info("التحديث لا يحتوي على رسالة يمكن معالجتها، سيتم تجاهله.")
         return
 
-    # --- الآن الكود آمن للمتابعة مع update.message ---
-    chat_id = update.message.chat_id
-    user_name = update.message.from_user.first_name
+    chat_id = message.chat_id
+    user_name = message.from_user.first_name
+    logger.info(f"📥 [Telegram] رسالة جديدة من: {chat_id} - الاسم: {user_name}")
     
     try:
         await context.bot.send_chat_action(chat_id=chat_id, action=telegram.constants.ChatAction.TYPING)
@@ -298,18 +284,18 @@ async def handle_telegram_message(update, context):
     reply = ""
     content_for_assistant = ""
 
-    if update.message.text:
-        content_for_assistant = update.message.text
-    elif update.message.voice:
-        voice_file = await update.message.voice.get_file()
+    if message.text:
+        content_for_assistant = message.text
+    elif message.voice:
+        voice_file = await message.voice.get_file()
         transcribed_text = transcribe_audio(voice_file.file_path)
         if transcribed_text:
             content_for_assistant = f"رسالة صوتية من العميل: {transcribed_text}"
         else:
             reply = "عذراً، لم أتمكن من فهم رسالتك الصوتية."
-    elif update.message.photo:
-        photo_file = await update.message.photo[-1].get_file()
-        caption = update.message.caption or ""
+    elif message.photo:
+        photo_file = await message.photo[-1].get_file()
+        caption = message.caption or ""
         content_list = [{"type": "image_url", "image_url": {"url": photo_file.file_path}}]
         if caption: content_list.append({"type": "text", "text": f"تعليق على الصورة: {caption}"})
         content_for_assistant = content_list
@@ -318,12 +304,16 @@ async def handle_telegram_message(update, context):
         reply = ask_assistant(content_for_assistant, chat_id, user_name)
 
     if reply:
-        await send_telegram_message(context, chat_id, reply)
+        await context.bot.send_message(chat_id=chat_id, text=reply)
 
+# --- ربط الـ Handlers ---
 telegram_app.add_handler(CommandHandler("start", start_command))
-telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_telegram_message))
-telegram_app.add_handler(MessageHandler(filters.VOICE, handle_telegram_message))
-telegram_app.add_handler(MessageHandler(filters.PHOTO, handle_telegram_message))
+# معالج للرسائل العادية (عندما تراسل البوت مباشرة)
+telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_any_message))
+telegram_app.add_handler(MessageHandler(filters.VOICE, handle_any_message))
+telegram_app.add_handler(MessageHandler(filters.PHOTO, handle_any_message))
+# معالج لرسائل الأعمال (عندما يراسل العملاء حسابك الشخصي)
+telegram_app.add_handler(MessageHandler(filters.BUSINESS_MESSAGE, handle_any_message))
 
 @flask_app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
 async def telegram_webhook_handler():
@@ -376,4 +366,3 @@ if __name__ == "__main__":
     logger.info("🚀 جاري بدء تشغيل السيرفر للاختبار المحلي (لا تستخدم هذا في الإنتاج)...")
     port = int(os.environ.get("PORT", 5000))
     flask_app.run(host="0.0.0.0", port=port, debug=True)
-
