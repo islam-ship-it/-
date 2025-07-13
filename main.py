@@ -147,7 +147,7 @@ def ask_assistant(message_content, sender_id, user_name):
     elif "صوت" in combined_input or "ريكورد" in combined_input:
         reply = "لقد استلمت رسالتك الصوتية. كيف يمكنني مساعدتك بخصوصها؟"
     else:
-        reply = "أهلًا بحضرتك مجددًا 😊\nهل في حاجة معينة تحب تفسر عنها أو تريد تكمّل الطلب؟ \n" اقرأ أساعد حضرتك في أي وقت."
+        reply = "أهلًا بحضرتك مجددًا 😊\nهل في حاجة معينة تحب تفسر عنها أو تريد تكمّل الطلب؟ \nاقرأ أساعد حضرتك في أي وقت."
 
     print(f"💬 الرد المستلم من المساعد: \'{reply}\'", flush=True)
     return reply
@@ -322,11 +322,11 @@ async def telegram_webhook_handler():
 
     update = telegram.Update.de_json(request.json, bot)
     
-    # Check if it\"s a business message or edited business message
+    # Check if it's a business message or edited business message
     if update.business_message:
         print(f"🕵️‍♂️ [تلغرام] بدأت رسالة عمل من {update.business_message.chat.id}.", flush=True)
         # Process business message
-        # For now, we\"ll treat it as a regular text message
+        # For now, we'll treat it as a regular text message
         message_text = update.business_message.text
         chat_id = update.business_message.chat.id
         user_name = update.business_message.chat.first_name or "عميل عمل"
@@ -346,7 +346,7 @@ async def telegram_webhook_handler():
     elif update.edited_business_message:
         print(f"🕵️‍♂️ [تلغرام] بدأت رسالة عمل معدلة من {update.edited_business_message.chat.id}.", flush=True)
         # Process edited business message
-        # For now, we\"ll treat it as a regular text message
+        # For now, we'll treat it as a regular text message
         message_text = update.edited_business_message.text
         chat_id = update.edited_business_message.chat.id
         user_name = update.edited_business_message.chat.first_name or "عميل عمل"
@@ -366,7 +366,7 @@ async def telegram_webhook_handler():
     elif update.message:
         # Handle regular messages (text, voice, photo)
         if update.message.text:
-            await handle_text_message(update, None) # Pass None for context as it\"s not needed here
+            await handle_text_message(update, None) # Pass None for context as it's not needed here
         elif update.message.voice:
             await handle_voice_message(update, None)
         elif update.message.photo:
