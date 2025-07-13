@@ -1,7 +1,8 @@
 flask
-requests
 openai
-python-dotenv
 pymongo
 apscheduler
+requests
+python-dotenv
 python-telegram-bot
+gunicorn
