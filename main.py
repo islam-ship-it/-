@@ -41,7 +41,6 @@ MAX_FOLLOW_UPS = int(os.getenv("MAX_FOLLOW_UPS", 3))
 # ==============================================================================
 if not all([OPENAI_API_KEY, ASSISTANT_ID_PREMIUM, TELEGRAM_BOT_TOKEN, MONGO_URI]):
     print("❌ خطأ فادح: واحد أو أكثر من متغيرات البيئة الأساسية غير موجود. يرجى مراجعة الإعدادات.")
-    # قد ترغب في إيقاف التطبيق هنا إذا كانت هذه المتغيرات حيوية
     # exit()
 
 # ==============================================================================
@@ -310,25 +309,28 @@ async def telegram_webhook_handler():
 def home():
     return "✅ السيرفر يعمل (واتساب و تيليجرام)."
 
-# 6. إعداد الـ Webhook في المستوى الرئيسي للملف (ليعمل مع Gunicorn)
-render_hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME')
-if render_hostname:
-    print("🔧 جاري إعداد Webhook تيليجرام عند بدء التشغيل...", flush=True)
-    
-    try:
-        # نستخدم asyncio لتشغيل هذه المهمة غير المتزامنة
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            loop.create_task(application.bot.set_webhook(url=f"https://{render_hostname}/{TELEGRAM_BOT_TOKEN}", allowed_updates=telegram.Update.ALL_TYPES ))
-        else:
-            # هذا هو المسار الذي سيسلكه Gunicorn عادةً
-            loop.run_until_complete(application.bot.set_webhook(url=f"https://{render_hostname}/{TELEGRAM_BOT_TOKEN}", allowed_updates=telegram.Update.ALL_TYPES ))
-        
-        print(f"✅ [Telegram] تم إرسال طلب إعداد الـ Webhook بنجاح.", flush=True)
-    except Exception as e:
-        print(f"❌ فشل إعداد الـ Webhook أثناء بدء التشغيل: {e}", flush=True)
-else:
-    print("⚠️ لم يتم العثور على RENDER_EXTERNAL_HOSTNAME. تخطي إعداد الـ Webhook (مناسب للاختبار المحلي).", flush=True)
+# 6. إعداد الـ Webhook وتهيئة التطبيق في المستوى الرئيسي
+async def setup_telegram():
+    """دالة مساعدة لتهيئة تطبيق تيليجرام وإعداد الـ Webhook."""
+    render_hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME')
+    if render_hostname:
+        print("🔧 جاري تهيئة تطبيق تيليجرام وإعداد الـ Webhook...", flush=True)
+        await application.initialize() # <-- *** السطر الجديد والمهم ***
+        webhook_url = f"https://{render_hostname}/{TELEGRAM_BOT_TOKEN}"
+        await application.bot.set_webhook(url=webhook_url, allowed_updates=telegram.Update.ALL_TYPES )
+        print(f"✅ [Telegram] تم تهيئة التطبيق وإعداد الـ Webhook بنجاح.", flush=True)
+    else:
+        print("⚠️ لم يتم العثور على RENDER_EXTERNAL_HOSTNAME. تخطي إعداد الـ Webhook.", flush=True)
+
+# نقوم بتشغيل دالة الإعداد عند بدء التشغيل
+try:
+    loop = asyncio.get_event_loop()
+    if loop.is_running():
+        loop.create_task(setup_telegram())
+    else:
+        asyncio.run(setup_telegram())
+except Exception as e:
+    print(f"❌ فشل إعداد تيليجرام أثناء بدء التشغيل: {e}", flush=True)
 
 
 # ==============================================================================
