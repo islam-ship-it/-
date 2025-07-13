@@ -6,6 +6,7 @@ import threading
 import traceback
 import random
 import asyncio
+import logging
 from flask import Flask, request, jsonify
 from openai import OpenAI
 from pymongo import MongoClient
@@ -16,6 +17,18 @@ from dotenv import load_dotenv
 # Telegram imports
 import telegram
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
+
+# ==============================================================================
+# إعداد نظام التسجيل (Logging)
+# ==============================================================================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler()  # للطباعة في الكونسول (Render logs)
+    ]
+)
+logger = logging.getLogger(__name__)
 
 # ==============================================================================
 # تحميل متغيرات البيئة
@@ -40,8 +53,8 @@ MAX_FOLLOW_UPS = int(os.getenv("MAX_FOLLOW_UPS", 3))
 # التحقق من المتغيرات الأساسية
 # ==============================================================================
 if not all([OPENAI_API_KEY, ASSISTANT_ID_PREMIUM, TELEGRAM_BOT_TOKEN, MONGO_URI]):
-    print("❌ خطأ فادح: واحد أو أكثر من متغيرات البيئة الأساسية غير موجود. يرجى مراجعة الإعدادات.")
-    # exit()
+    logger.critical("❌ خطأ فادح: واحد أو أكثر من متغيرات البيئة الأساسية غير موجود. يرجى مراجعة الإعدادات.")
+    exit()
 
 # ==============================================================================
 # إعدادات قاعدة البيانات (MongoDB)
@@ -50,9 +63,9 @@ try:
     client_db = MongoClient(MONGO_URI)
     db = client_db["multi_platform_bot"]
     sessions_collection = db["sessions"]
-    print("✅ تم الاتصال بقاعدة البيانات بنجاح.", flush=True)
+    logger.info("✅ تم الاتصال بقاعدة البيانات بنجاح.")
 except Exception as e:
-    print(f"❌ فشل الاتصال بقاعدة البيانات: {e}", flush=True)
+    logger.critical(f"❌ فشل الاتصال بقاعدة البيانات: {e}")
     exit()
 
 # ==============================================================================
@@ -91,7 +104,7 @@ def save_session(user_id, session_data):
     user_id_str = str(user_id)
     session_data["_id"] = user_id_str
     sessions_collection.replace_one({"_id": user_id_str}, session_data, upsert=True)
-    print(f"💾 تم حفظ بيانات الجلسة للمستخدم {user_id_str}.", flush=True)
+    logger.info(f"💾 تم حفظ بيانات الجلسة للمستخدم {user_id_str}.")
 
 # ==============================================================================
 # دوال إرسال الرسائل
@@ -102,23 +115,23 @@ def send_whatsapp_message(phone, message):
     payload = {"phone": phone, "message": message}
     try:
         response = requests.post(url, headers=headers, json=payload)
-        print(f"📤 [WhatsApp] تم إرسال رسالة للعميل {phone}، الحالة: {response.status_code}", flush=True)
+        logger.info(f"📤 [WhatsApp] تم إرسال رسالة للعميل {phone}، الحالة: {response.status_code}")
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
-        print(f"❌ [WhatsApp] خطأ أثناء إرسال الرسالة عبر ZAPI: {e}", flush=True)
+        logger.error(f"❌ [WhatsApp] خطأ أثناء إرسال الرسالة عبر ZAPI: {e}")
 
 async def send_telegram_message(context, chat_id, message):
     try:
         await context.bot.send_message(chat_id=chat_id, text=message)
-        print(f"📤 [Telegram] تم إرسال رسالة للعميل {chat_id}.", flush=True)
+        logger.info(f"📤 [Telegram] تم إرسال رسالة للعميل {chat_id}.")
     except Exception as e:
-        print(f"❌ [Telegram] خطأ أثناء إرسال الرسالة: {e}", flush=True)
+        logger.error(f"❌ [Telegram] خطأ أثناء إرسال الرسالة: {e}")
 
 # ==============================================================================
 # دوال مشتركة (تحويل الصوت، التفاعل مع المساعد)
 # ==============================================================================
 def transcribe_audio(audio_url, file_format="ogg"):
-    print(f"🎙️ محاولة تحميل وتحويل الصوت من: {audio_url}", flush=True)
+    logger.info(f"🎙️ محاولة تحميل وتحويل الصوت من: {audio_url}")
     try:
         audio_response = requests.get(audio_url, stream=True)
         audio_response.raise_for_status()
@@ -131,7 +144,7 @@ def transcribe_audio(audio_url, file_format="ogg"):
         os.remove(temp_audio_file)
         return transcription.text
     except Exception as e:
-        print(f"❌ خطأ أثناء تحويل الصوت إلى نص: {e}", flush=True)
+        logger.error(f"❌ خطأ أثناء تحويل الصوت إلى نص: {e}")
         return None
 
 def ask_assistant(content, sender_id, name=""):
@@ -144,10 +157,11 @@ def ask_assistant(content, sender_id, name=""):
             thread = client.beta.threads.create()
             session["thread_id"] = thread.id
         except Exception as e:
-            print(f"❌ فشل إنشاء Thread جديد: {e}", flush=True)
+            logger.error(f"❌ فشل إنشاء Thread جديد للمستخدم {sender_id}: {e}")
             return "⚠ مشكلة مؤقتة في إنشاء المحادثة، حاول مرة أخرى."
 
-    if not isinstance(content, list):
+    # تصحيح: التأكد من أن المحتوى النصي فقط يتم تغليفه في قائمة
+    if isinstance(content, str):
         content = [{"type": "text", "text": content}]
 
     thread_id_str = str(session["thread_id"])
@@ -173,10 +187,10 @@ def ask_assistant(content, sender_id, name=""):
                 save_session(sender_id, session)
                 return reply
             else:
-                print(f"❌ الـ Run فشل أو توقف: {run.status}", flush=True)
+                logger.error(f"❌ الـ Run فشل أو توقف للمستخدم {sender_id}: {run.status}")
                 return "⚠ حدث خطأ أثناء معالجة طلبك، حاول مرة أخرى."
         except Exception as e:
-            print(f"❌ استثناء أثناء التفاعل مع المساعد: {e}", flush=True)
+            logger.error(f"❌ استثناء أثناء التفاعل مع المساعد للمستخدم {sender_id}: {e}")
             return "⚠ مشكلة مؤقتة، حاول مرة أخرى."
 
 # ==============================================================================
@@ -191,6 +205,7 @@ def process_whatsapp_messages(sender, name):
             return
 
         combined_text = "\n".join(pending_messages[sender_str])
+        logger.info(f"🔄 [WhatsApp] معالجة الرسائل المجمعة للمستخدم {sender_str}: {combined_text}")
         reply = ask_assistant(combined_text, sender_str, name)
 
         typing_delay = max(1, min(len(reply) / 5.0, 8))
@@ -207,6 +222,7 @@ def webhook():
     sender = data.get("phone")
     if not sender: return jsonify({"status": "no sender"}), 400
 
+    logger.info(f"📥 [WhatsApp] رسالة جديدة من: {sender}")
     session = get_session(sender)
     session["last_message_time"] = datetime.utcnow().isoformat()
     session["follow_up_sent"] = 0
@@ -242,11 +258,8 @@ def webhook():
 # ==============================================================================
 # منطق Telegram (Webhook)
 # ==============================================================================
-
-# 1. إعداد تطبيق تيليجرام بشكل عام (في المستوى الرئيسي)
 application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-# 2. تعريف معالجات رسائل تيليجرام (Handlers)
 async def start_command(update, context):
     user = update.effective_user
     await update.message.reply_text(f"مرحباً {user.first_name}! أنا هنا لمساعدتك.")
@@ -255,20 +268,17 @@ async def handle_telegram_message(update, context):
     chat_id = update.effective_chat.id
     user_name = update.effective_user.first_name
     logger.info(f"📥 [Telegram] رسالة جديدة من: {chat_id} - الاسم: {user_name}")
-    logger.info(f"🔍 محتوى الرسالة: {update.message}")
+    
     try:
         await context.bot.send_chat_action(chat_id=chat_id, action=telegram.constants.ChatAction.TYPING)
-    except telegram.error.BadRequest as e:
-        logger.error(f"❌ [Telegram] BadRequest أثناء إرسال chat action: {e}")
-    except RuntimeError as e:
-        logger.error(f"❌ [Telegram] RuntimeError أثناء إرسال chat action: {e}")
+    except Exception as e:
+        logger.error(f"❌ [Telegram] فشل إرسال chat action للمستخدم {chat_id}: {e}")
     
     session = get_session(chat_id)
     session["last_message_time"] = datetime.utcnow().isoformat()
     session["follow_up_sent"] = 0
     session["follow_up_status"] = "responded"
     save_session(chat_id, session)
-
     
     reply = ""
     content_for_assistant = ""
@@ -295,39 +305,34 @@ async def handle_telegram_message(update, context):
     if reply:
         await send_telegram_message(context, chat_id, reply)
 
-# 3. ربط الـ Handlers بالتطبيق (في المستوى الرئيسي)
 application.add_handler(CommandHandler("start", start_command))
 application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_telegram_message))
 application.add_handler(MessageHandler(filters.VOICE, handle_telegram_message))
 application.add_handler(MessageHandler(filters.PHOTO, handle_telegram_message))
 
-# 4. إضافة مسار Webhook جديد لتليجرام
 @app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
 async def telegram_webhook_handler():
     update_data = request.get_json()
-    print(f"📥 [Telegram Webhook] بيانات مستلمة.", flush=True)
+    logger.info("📥 [Telegram Webhook] بيانات مستلمة.")
     await application.process_update(
         telegram.Update.de_json(update_data, application.bot)
     )
     return jsonify({"status": "ok"})
 
-# 5. تعديل المسار الرئيسي
 @app.route("/", methods=["GET"])
 def home():
     return "✅ السيرفر يعمل (واتساب و تيليجرام)."
 
-# 6. إعداد الـ Webhook وتهيئة التطبيق في المستوى الرئيسي
 async def setup_telegram():
-    """دالة مساعدة لتهيئة تطبيق تيليجرام وإعداد الـ Webhook."""
     render_hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME')
     if render_hostname:
-        print("🔧 جاري تهيئة تطبيق تيليجرام وإعداد الـ Webhook...", flush=True)
-        await application.initialize() # <-- *** السطر الجديد والمهم ***
+        logger.info("🔧 جاري تهيئة تطبيق تيليجرام وإعداد الـ Webhook...")
+        await application.initialize()
         webhook_url = f"https://{render_hostname}/{TELEGRAM_BOT_TOKEN}"
         await application.bot.set_webhook(url=webhook_url, allowed_updates=telegram.Update.ALL_TYPES )
-        print(f"✅ [Telegram] تم تهيئة التطبيق وإعداد الـ Webhook بنجاح.", flush=True)
+        logger.info("✅ [Telegram] تم تهيئة التطبيق وإعداد الـ Webhook بنجاح.")
     else:
-        print("⚠️ لم يتم العثور على RENDER_EXTERNAL_HOSTNAME. تخطي إعداد الـ Webhook.", flush=True)
+        logger.warning("⚠️ لم يتم العثور على RENDER_EXTERNAL_HOSTNAME. تخطي إعداد الـ Webhook.")
 
 # نقوم بتشغيل دالة الإعداد عند بدء التشغيل
 try:
@@ -337,25 +342,24 @@ try:
     else:
         asyncio.run(setup_telegram())
 except Exception as e:
-    print(f"❌ فشل إعداد تيليجرام أثناء بدء التشغيل: {e}", flush=True)
-
+    logger.critical(f"❌ فشل إعداد تيليجرام أثناء بدء التشغيل: {e}")
 
 # ==============================================================================
 # نظام المتابعة التلقائية (Scheduler)
 # ==============================================================================
 def check_for_inactive_users():
+    # هذا المكان مخصص لكتابة منطق المتابعة في المستقبل
     pass 
 
 scheduler = BackgroundScheduler()
 # scheduler.add_job(check_for_inactive_users, 'interval', minutes=5)
 scheduler.start()
-print("⏰ تم بدء الجدولة بنجاح.", flush=True)
+logger.info("⏰ تم بدء الجدولة بنجاح.")
 
 # ==============================================================================
 # تشغيل التطبيق
 # ==============================================================================
 if __name__ == "__main__":
-    # هذا الجزء الآن يستخدم فقط للاختبار المحلي المباشر بدون Gunicorn
-    print("🚀 جاري بدء تشغيل السيرفر للاختبار المحلي (لا تستخدم هذا في الإنتاج)...")
+    logger.info("🚀 جاري بدء تشغيل السيرفر للاختبار المحلي (لا تستخدم هذا في الإنتاج)...")
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=True)
