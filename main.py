@@ -8,7 +8,7 @@ import random
 import asyncio
 import logging
 from flask import Flask, request, jsonify
-from asgiref.wsgi import WsgiToAsgi  # <-- (1) تم إضافة هذا السطر
+from asgiref.wsgi import WsgiToAsgi
 from openai import OpenAI
 from pymongo import MongoClient
 from datetime import datetime, timedelta
@@ -72,8 +72,8 @@ except Exception as e:
 # ==============================================================================
 # إعداد تطبيق Flask وعميل OpenAI
 # ==============================================================================
-flask_app = Flask(__name__)          # <-- (2) تم إنشاء تطبيق Flask الأصلي
-app = WsgiToAsgi(flask_app)          # <-- (3) تم تغليفه ليصبح متوافقًا مع ASGI
+flask_app = Flask(__name__)
+app = WsgiToAsgi(flask_app)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ==============================================================================
@@ -135,7 +135,6 @@ async def send_telegram_message(context, chat_id, message):
 def transcribe_audio(audio_url, file_format="ogg"):
     logger.info(f"🎙️ محاولة تحميل وتحويل الصوت من: {audio_url}")
     try:
-        # ملاحظة: هذا الأسلوب قد لا يكون مثالياً على Render. الأفضل هو التحميل للذاكرة.
         audio_response = requests.get(audio_url, stream=True)
         audio_response.raise_for_status()
         temp_audio_file = f"temp_audio_{int(time.time())}.{file_format}"
@@ -218,7 +217,7 @@ def process_whatsapp_messages(sender, name):
         pending_messages[sender_str] = []
         timers.pop(sender_str, None)
 
-@flask_app.route("/webhook", methods=["POST"])  # <-- (4) تم التغيير إلى flask_app
+@flask_app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
     sender = data.get("phone")
@@ -267,6 +266,12 @@ async def start_command(update, context):
     await update.message.reply_text(f"مرحباً {user.first_name}! أنا هنا لمساعدتك.")
 
 async def handle_telegram_message(update, context):
+    # --- التحقق الأساسي لضمان وجود رسالة جديدة ---
+    if not update.message:
+        logger.info("التحديث لا يحتوي على رسالة جديدة، سيتم تجاهله.")
+        return
+    # --- نهاية التحقق ---
+
     chat_id = update.effective_chat.id
     user_name = update.effective_user.first_name
     logger.info(f"📥 [Telegram] رسالة جديدة من: {chat_id} - الاسم: {user_name}")
@@ -312,7 +317,7 @@ telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_
 telegram_app.add_handler(MessageHandler(filters.VOICE, handle_telegram_message))
 telegram_app.add_handler(MessageHandler(filters.PHOTO, handle_telegram_message))
 
-@flask_app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])  # <-- (4) تم التغيير إلى flask_app
+@flask_app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
 async def telegram_webhook_handler():
     update_data = request.get_json()
     logger.info("📥 [Telegram Webhook] بيانات مستلمة.")
@@ -321,7 +326,7 @@ async def telegram_webhook_handler():
     )
     return jsonify({"status": "ok"})
 
-@flask_app.route("/", methods=["GET"])  # <-- (4) تم التغيير إلى flask_app
+@flask_app.route("/", methods=["GET"])
 def home():
     return "✅ السيرفر يعمل (واتساب و تيليجرام)."
 
@@ -365,4 +370,4 @@ if __name__ == "__main__":
     # لتشغيل هذا محلياً، ستحتاج إلى خادم ASGI مثل uvicorn
     # import uvicorn
     # uvicorn.run(app, host="0.0.0.0", port=port)
-    flask_app.run(host="0.0.0.0", port=port, debug=True) # هذا سيعمل فقط للكود المتزامن (واتساب)
+    flask_app.run(host="0.0.0.0", port=port, debug=True)
