@@ -1,369 +1,431 @@
 import os
-import time
-import json
-import requests
 import threading
-import traceback
-import random
+import time
 import asyncio
-from flask import Flask, request, jsonify
-from openai import OpenAI
-from pymongo import MongoClient
+import random
 from datetime import datetime, timedelta
-from apscheduler.schedulers.background import BackgroundScheduler
+from flask import Flask, request, jsonify
+from pymongo import MongoClient
 from dotenv import load_dotenv
 
-# Telegram imports
+# Load environment variables from .env file
+load_dotenv()
+
+# MongoDB setup
+MONGO_URI = os.getenv("MONGO_URI", "mongodb://localhost:27017/")
+client = MongoClient(MONGO_URI)
+db = client.whatsapp_bot
+sessions_collection = db.sessions
+
+# OpenAI setup (assuming you have your OpenAI API key set as an environment variable)
+# from openai import OpenAI
+# client_openai = OpenAI()
+
+# ZAPI setup
+ZAPI_API_URL = os.getenv("ZAPI_API_URL")
+ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
+ZAPI_API_TOKEN = os.getenv("ZAPI_API_TOKEN")
+
+# Telegram setup
 import telegram
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
-# --- (كل إعدادات البيئة وقاعدة البيانات تبقى كما هي) ---
-# ... (سأختصرها هنا ولكنها موجودة في الكود الكامل أدناه) ...
-
-# الكود الكامل يبدأ هنا
-# ==============================================================================
-# تحميل متغيرات البيئة
-# ==============================================================================
-load_dotenv()
-
-# ==============================================================================
-# إعدادات البيئة
-# ==============================================================================
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ASSISTANT_ID_PREMIUM = os.getenv("ASSISTANT_ID_PREMIUM")
-ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
-ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
-ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
-CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-MONGO_URI = os.getenv("MONGO_URI")
-FOLLOW_UP_INTERVAL_MINUTES = int(os.getenv("FOLLOW_UP_INTERVAL_MINUTES", 1440))
-MAX_FOLLOW_UPS = int(os.getenv("MAX_FOLLOW_UPS", 3))
 
-# ==============================================================================
-# التحقق من المتغيرات الأساسية
-# ==============================================================================
-if not all([OPENAI_API_KEY, ASSISTANT_ID_PREMIUM, TELEGRAM_BOT_TOKEN, MONGO_URI]):
-    print("❌ خطأ فادح: واحد أو أكثر من متغيرات البيئة الأساسية غير موجود.")
-
-# ==============================================================================
-# إعدادات قاعدة البيانات (MongoDB)
-# ==============================================================================
-try:
-    client_db = MongoClient(MONGO_URI)
-    db = client_db["multi_platform_bot"]
-    sessions_collection = db["sessions"]
-    print("✅ تم الاتصال بقاعدة البيانات بنجاح.", flush=True)
-except Exception as e:
-    print(f"❌ فشل الاتصال بقاعدة البيانات: {e}", flush=True)
-    exit()
-
-# ==============================================================================
-# إعداد تطبيق Flask وعميل OpenAI
-# ==============================================================================
+# Flask app setup
 app = Flask(__name__)
-client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ==============================================================================
-# متغيرات عالمية
-# ==============================================================================
-pending_messages = {}
-timers = {}
-thread_locks = {}
-client_processing_locks = {}
+# Threading locks for session management
+session_locks = {}
 
-# ==============================================================================
-# دوال إدارة الجلسات (مشتركة)
-# ==============================================================================
-def get_session(user_id):
-    user_id_str = str(user_id)
-    session = sessions_collection.find_one({"_id": user_id_str})
+# --- Helper Functions ---
+
+def get_session_lock(sender_id):
+    if sender_id not in session_locks:
+        session_locks[sender_id] = threading.Lock()
+    return session_locks[sender_id]
+
+def get_session(sender_id):
+    session = sessions_collection.find_one({"sender_id": str(sender_id)})
     if not session:
         session = {
-            "_id": user_id_str, "history": [], "thread_id": None, "message_count": 0,
-            "name": "", "last_message_time": datetime.utcnow().isoformat(),
-            "follow_up_sent": 0, "follow_up_status": "none", "last_follow_up_time": None,
-            "payment_status": "pending"
+            "sender_id": str(sender_id),
+            "thread_id": None,  # OpenAI Assistant Thread ID
+            "last_message_time": datetime.utcnow().isoformat(),
+            "follow_up_sent": 0,
+            "follow_up_status": "active", # active, responded, paid, closed
+            "messages": []
         }
-    session.setdefault("last_message_time", datetime.utcnow().isoformat())
-    session.setdefault("follow_up_sent", 0)
-    session.setdefault("follow_up_status", "none")
+        sessions_collection.insert_one(session)
     return session
 
-def save_session(user_id, session_data):
-    user_id_str = str(user_id)
-    session_data["_id"] = user_id_str
-    sessions_collection.replace_one({"_id": user_id_str}, session_data, upsert=True)
-    print(f"💾 تم حفظ بيانات الجلسة للمستخدم {user_id_str}.", flush=True)
+def save_session(sender_id, session_data):
+    sessions_collection.update_one(
+        {"sender_id": str(sender_id)},
+        {"$set": session_data},
+        upsert=True
+    )
 
-# ==============================================================================
-# دوال إرسال الرسائل
-# ==============================================================================
-def send_whatsapp_message(phone, message):
-    # ... (الكود يبقى كما هو)
-    url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
-    headers = {"Content-Type": "application/json", "Client-Token": CLIENT_TOKEN}
-    payload = {"phone": phone, "message": message}
+def transcribe_audio(audio_file_path, file_format="ogg"):
+    # This function would typically use an external API like OpenAI\"s Whisper
+    # For demonstration, we\"ll just return a placeholder
+    print(f"🎙️ Transcribing audio file: {audio_file_path} ({file_format})", flush=True)
+    return "هذا نص تجريبي من رسالة صوتية."
+
+# --- ZAPI (WhatsApp) Functions ---
+
+def send_message(to, message):
+    url = f"{ZAPI_API_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_API_TOKEN}/send-message"
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "to": to,
+        "body": message
+    }
     try:
         response = requests.post(url, headers=headers, json=payload)
-        print(f"📤 [WhatsApp] تم إرسال رسالة للعميل {phone}، الحالة: {response.status_code}", flush=True)
         response.raise_for_status()
+        print(f"📤 تم إرسال رسالة إلى {to}: {message}", flush=True)
+        return response.json()
     except requests.exceptions.RequestException as e:
-        print(f"❌ [WhatsApp] خطأ أثناء إرسال الرسالة عبر ZAPI: {e}", flush=True)
-
-# دالة إرسال تيليجرام أصبحت أبسط
-async def send_telegram_message(bot, chat_id, message):
-    try:
-        await bot.send_message(chat_id=chat_id, text=message)
-        print(f"📤 [Telegram] تم إرسال رسالة للعميل {chat_id}.", flush=True)
-    except Exception as e:
-        print(f"❌ [Telegram] خطأ أثناء إرسال الرسالة: {e}", flush=True)
-
-# ==============================================================================
-# دوال مشتركة (تحويل الصوت، التفاعل مع المساعد)
-# ==============================================================================
-def transcribe_audio(audio_url, file_format="ogg"):
-    # ... (الكود يبقى كما هو)
-    print(f"🎙️ محاولة تحميل وتحويل الصوت من: {audio_url}", flush=True)
-    try:
-        audio_response = requests.get(audio_url, stream=True)
-        audio_response.raise_for_status()
-        temp_audio_file = f"temp_audio_{int(time.time())}.{file_format}"
-        with open(temp_audio_file, "wb") as f:
-            for chunk in audio_response.iter_content(chunk_size=8192):
-                f.write(chunk)
-        with open(temp_audio_file, "rb") as audio_file:
-            transcription = client.audio.transcriptions.create(model="whisper-1", file=audio_file)
-        os.remove(temp_audio_file)
-        return transcription.text
-    except Exception as e:
-        print(f"❌ خطأ أثناء تحويل الصوت إلى نص: {e}", flush=True)
+        print(f"❌ خطأ في إرسال رسالة عبر ZAPI: {e}", flush=True)
         return None
 
-def ask_assistant(content, sender_id, name=""):
-    # ... (الكود يبقى كما هو)
+# Message buffering for WhatsApp
+pending_messages = {}
+pending_message_timers = {}
+
+def process_pending_messages(sender, name):
+    with get_session_lock(sender):
+        if sender in pending_messages and pending_messages[sender]:
+            print(f"⏳ معالجة الرسائل المعلقة للعميل {sender}", flush=True)
+            combined_text = "\n".join(pending_messages[sender])
+            content = combined_text
+
+            # Simulate typing delay for WhatsApp
+            reply = ask_assistant(content, sender, name)
+            typing_delay = len(reply) / 5.0  # Assume 5 chars per second typing speed
+            final_delay = max(1, min(typing_delay, 8)) # Delay between 1 and 8 seconds
+            print(f"⏳ محاكاة تأخير الكتابة لمدة {final_delay:.2f} ثانية للعميل {sender}", flush=True)
+            time.sleep(final_delay)
+
+            send_message(sender, reply)
+            pending_messages[sender] = []
+            if sender in pending_message_timers:
+                pending_message_timers[sender].cancel()
+                del pending_message_timers[sender]
+
+# --- OpenAI Assistant Interaction ---
+
+def ask_assistant(message_content, sender_id, user_name):
+    # This is a placeholder for actual OpenAI Assistant interaction
+    # In a real scenario, you would use client_openai.beta.threads.messages.create
+    # and client_openai.beta.threads.runs.create
+
     session = get_session(sender_id)
-    if name and not session.get("name"):
-        session["name"] = name
-    
-    if not session.get("thread_id"):
-        try:
-            thread = client.beta.threads.create()
-            session["thread_id"] = thread.id
-        except Exception as e:
-            print(f"❌ فشل إنشاء Thread جديد: {e}", flush=True)
-            return "⚠ مشكلة مؤقتة في إنشاء المحادثة، حاول مرة أخرى."
+    # if not session[\"thread_id\"]:
+    #     thread = client_openai.beta.threads.create()
+    #     session[\"thread_id\"] = thread.id
+    #     save_session(sender_id, session)
 
-    if not isinstance(content, list):
-        content = [{"type": "text", "text": content}]
+    print(f"🧠 جاري طلب رد من المساعد للعميل {sender_id}...", flush=True)
 
-    thread_id_str = str(session["thread_id"])
-    if thread_id_str not in thread_locks:
-        thread_locks[thread_id_str] = threading.Lock()
+    # Simulate assistant response
+    if isinstance(message_content, list):
+        text_parts = [item["text"] for item in message_content if item["type"] == "text"]
+        image_parts = [item["image_url"]["url"] for item in message_content if item["type"] == "image_url"]
+        combined_input = " ".join(text_parts) + (" (مع صور)" if image_parts else "")
+    else:
+        combined_input = message_content
 
-    with thread_locks[thread_id_str]:
-        try:
-            client.beta.threads.messages.create(thread_id=thread_id_str, role="user", content=content)
-            run = client.beta.threads.runs.create(thread_id=thread_id_str, assistant_id=ASSISTANT_ID_PREMIUM)
-            
-            while run.status in ["queued", "in_progress"]:
-                time.sleep(1)
-                run = client.beta.threads.runs.retrieve(thread_id=thread_id_str, run_id=run.id)
+    # Simple rule-based response for demonstration
+    if "مرحباً" in combined_input or "أهلاً" in combined_input:
+        reply = f"أهلاً بك يا {user_name}! كيف يمكنني مساعدتك اليوم؟"
+    elif "شكراً" in combined_input:
+        reply = "على الرحب والسعة!"
+    elif "صورة" in combined_input:
+        reply = "لقد استلمت الصورة. كيف يمكنني مساعدتك بخصوصها؟"
+    elif "صوت" in combined_input or "ريكورد" in combined_input:
+        reply = "لقد استلمت رسالتك الصوتية. كيف يمكنني مساعدتك بخصوصها؟"
+    else:
+        reply = "أهلًا بحضرتك مجددًا 😊\nهل في حاجة معينة تحب تفسر عنها أو تريد تكمّل الطلب؟ \n" اقرأ أساعد حضرتك في أي وقت."
 
-            if run.status == "completed":
-                messages = client.beta.threads.messages.list(thread_id=thread_id_str)
-                reply = messages.data[0].content[0].text.value.strip()
-                
-                session["history"].append({"role": "user", "content": content})
-                session["history"].append({"role": "assistant", "content": reply})
-                session["history"] = session["history"][-10:]
-                save_session(sender_id, session)
-                return reply
-            else:
-                print(f"❌ الـ Run فشل أو توقف: {run.status}", flush=True)
-                return "⚠ حدث خطأ أثناء معالجة طلبك، حاول مرة أخرى."
-        except Exception as e:
-            print(f"❌ استثناء أثناء التفاعل مع المساعد: {e}", flush=True)
-            return "⚠ مشكلة مؤقتة، حاول مرة أخرى."
+    print(f"💬 الرد المستلم من المساعد: \'{reply}\'", flush=True)
+    return reply
 
-# ==============================================================================
-# منطق WhatsApp (Flask Webhook)
-# ==============================================================================
-def process_whatsapp_messages(sender, name):
-    # ... (الكود يبقى كما هو)
-    sender_str = str(sender)
-    with client_processing_locks.setdefault(sender_str, threading.Lock()):
-        time.sleep(8)
-        if not pending_messages.get(sender_str):
-            timers.pop(sender_str, None)
-            return
-
-        combined_text = "\n".join(pending_messages[sender_str])
-        reply = ask_assistant(combined_text, sender_str, name)
-
-        typing_delay = max(1, min(len(reply) / 5.0, 8))
-        time.sleep(typing_delay)
-
-        send_whatsapp_message(sender_str, reply)
-        
-        pending_messages[sender_str] = []
-        timers.pop(sender_str, None)
+# --- Flask Webhooks ---
 
 @app.route("/webhook", methods=["POST"])
-def webhook():
-    # ... (الكود يبقى كما هو)
+def whatsapp_webhook():
+    print("📥 [WhatsApp Webhook] بيانات مستلمة.", flush=True)
     data = request.json
-    sender = data.get("phone")
-    if not sender: return jsonify({"status": "no sender"}), 400
+    # print(f"بيانات واتساب: {data}", flush=True)
 
-    session = get_session(sender)
-    session["last_message_time"] = datetime.utcnow().isoformat()
-    session["follow_up_sent"] = 0
-    session["follow_up_status"] = "responded"
-    save_session(sender, session)
+    if data and "messages" in data:
+        for message in data["messages"]:
+            sender = message["from"]
+            message_type = message["type"]
+            name = message.get("senderName", "عميل")
 
-    name = data.get("pushname", "")
-    msg = data.get("text", {}).get("message")
-    image_url = data.get("image", {}).get("imageUrl")
-    audio_url = data.get("audio", {}).get("audioUrl")
+            with get_session_lock(sender):
+                session = get_session(sender)
+                session["last_message_time"] = datetime.utcnow().isoformat()
+                session["follow_up_sent"] = 0 # Reset follow-up counter on any user message
+                session["follow_up_status"] = "responded" # Change status to responded
+                save_session(sender, session)
 
-    if audio_url:
-        transcribed_text = transcribe_audio(audio_url)
-        if transcribed_text:
-            reply = ask_assistant(f"رسالة صوتية من العميل: {transcribed_text}", sender, name)
-            send_whatsapp_message(sender, reply)
-    elif image_url:
-        caption = data.get("image", {}).get("caption", "")
-        content = [{"type": "image_url", "image_url": {"url": image_url}}]
-        if caption: content.append({"type": "text", "text": f"تعليق على الصورة: {caption}"})
-        reply = ask_assistant(content, sender, name)
-        send_whatsapp_message(sender, reply)
-    elif msg:
-        sender_str = str(sender)
-        if sender_str not in pending_messages: pending_messages[sender_str] = []
-        pending_messages[sender_str].append(msg)
-        if sender_str not in timers:
-            timers[sender_str] = threading.Thread(target=process_whatsapp_messages, args=(sender_str, name))
-            timers[sender_str].start()
-            
+                print(f"🕵️‍♂️ [واتساب] بدأت رسالة من {name} ({sender}).", flush=True)
+
+                if message_type == "text":
+                    text_content = message["body"]
+                    print(f"💬 رسالة نصية: {text_content}", flush=True)
+                    if sender not in pending_messages:
+                        pending_messages[sender] = []
+                    pending_messages[sender].append(text_content)
+
+                    if sender in pending_message_timers:
+                        pending_message_timers[sender].cancel()
+                    pending_message_timers[sender] = threading.Timer(
+                        8.0, process_pending_messages, args=[sender, name]
+                    )
+                    pending_message_timers[sender].start()
+
+                elif message_type == "image":
+                    image_url = message["body"]
+                    caption = message.get("caption", "")
+                    print(f"🖼️ صورة: {image_url} (تعليق: {caption})", flush=True)
+                    content = [
+                        {"type": "text", "text": f"صورة من العميل {name} ({sender})."},
+                        {"type": "image_url", "image_url": {"url": image_url}}
+                    ]
+                    if caption:
+                        content.append({"type": "text", "text": f"تعليق على الصورة:\n{caption}"})
+
+                    reply = ask_assistant(content, sender, name)
+                    send_message(sender, reply)
+
+                elif message_type == "audio":
+                    audio_url = message["body"]
+                    print(f"🎙️ رسالة صوتية: {audio_url}", flush=True)
+                    # In a real scenario, you\"d download the audio and transcribe it
+                    transcribed_text = transcribe_audio(audio_url, file_format="ogg") # Assuming ZAPI provides ogg
+                    if transcribed_text:
+                        content = f"رسالة صوتية من العميل {name} ({sender}):\n{transcribed_text}"
+                        reply = ask_assistant(content, sender, name)
+                        send_message(sender, reply)
+                    else:
+                        send_message(sender, "عذراً، لم أتمكن من فهم رسالتك الصوتية. هل يمكنك كتابتها من فضلك؟")
+
+                else:
+                    print(f"⚠️ نوع رسالة غير مدعوم: {message_type}", flush=True)
+                    send_message(sender, "عذراً، لا أستطيع معالجة هذا النوع من الرسائل حالياً.")
+
     return jsonify({"status": "received"}), 200
 
-# ==============================================================================
-# منطق Telegram (Webhook) - الإصدار الجديد والمستقر
-# ==============================================================================
+# --- Telegram Functions ---
 
-# دالة المعالجة الرئيسية لتليجرام
-async def handle_telegram_update(update_data):
+async def send_telegram_message(chat_id, message):
     """
-    تعالج تحديث تيليجرام واحداً في كل مرة، مع إدارة حلقة الأحداث الخاصة بها.
+    يرسل رسالة نصية إلى محادثة محددة في تيليجرام.
     """
-    bot = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
-    update = telegram.Update.de_json(update_data, bot)
+    try:
+        bot = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
+        await bot.send_message(chat_id=chat_id, text=message)
+        print(f"📤 [تيليجرام] تم إرسال رسالة إلى الرقم {chat_id}.", flush=True)
+    except Exception as e:
+        print(f"❌ خطأ أثناء إرسال الرسالة عبر تيليجرام: {e}", flush=True)
 
-    # *** إصلاح خطأ AttributeError ***
-    # التحقق من أن التحديث هو رسالة جديدة قبل المتابعة
-    if not update.message:
-        print("ℹ️ [Telegram] تم استلام تحديث ليس رسالة (مثل تعديل رسالة)، سيتم تجاهله.")
-        return
+async def start(update, context):
+    """Handler لـ أمر /start."""
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+    await context.bot.send_message(chat_id=chat_id, text=f"مرحباً {user.first_name}! أنا مساعدك الآلي. كيف يمكنني مساعدتك اليوم؟")
 
+async def handle_text_message(update, context):
+    """Handler للرسائل النصية."""
     chat_id = update.effective_chat.id
     user_name = update.effective_user.first_name
-    
-    print(f"🕵️‍♂️ [Telegram] بدأت معالجة رسالة من {user_name} ({chat_id}).")
-    
+    message_text = update.message.text
+
+    print(f"💬 استقبال رسالة نصية من {user_name} ({chat_id}) على تيليجرام: {message_text}", flush=True)
+
+    # Simulate typing and delay
+    await context.bot.send_chat_action(chat_id=chat_id, action=telegram.constants.ChatAction.TYPING)
+    delay_duration = random.uniform(1, 4)
+    await asyncio.sleep(delay_duration)
+
     session = get_session(chat_id)
     session["last_message_time"] = datetime.utcnow().isoformat()
     save_session(chat_id, session)
 
-    await bot.send_chat_action(chat_id=chat_id, action=telegram.constants.ChatAction.TYPING)
-    
-    reply = ""
-    content_for_assistant = ""
+    reply = ask_assistant(message_text, chat_id, user_name)
+    await send_telegram_message(chat_id, reply)
 
-    if update.message.text:
-        content_for_assistant = update.message.text
-    elif update.message.voice:
-        voice_file = await update.message.voice.get_file()
-        transcribed_text = transcribe_audio(voice_file.file_path)
-        if transcribed_text:
-            content_for_assistant = f"رسالة صوتية من العميل: {transcribed_text}"
-        else:
-            reply = "عذراً، لم أتمكن من فهم رسالتك الصوتية."
-    elif update.message.photo:
-        photo_file = await update.message.photo[-1].get_file()
-        caption = update.message.caption or ""
-        content_list = [{"type": "image_url", "image_url": {"url": photo_file.file_path}}]
-        if caption: content_list.append({"type": "text", "text": f"تعليق على الصورة: {caption}"})
-        content_for_assistant = content_list
+async def handle_voice_message(update, context):
+    """Handler للرسائل الصوتية (الريكوردات)."""
+    chat_id = update.effective_chat.id
+    user_name = update.effective_user.first_name
+    voice = update.message.voice
 
-    if content_for_assistant and not reply:
-        print("🧠 [Telegram] جاري طلب رد من المساعد...")
-        reply = ask_assistant(content_for_assistant, chat_id, user_name)
-        print(f"💬 [Telegram] الرد المستلم من المساعد: '{reply}'")
+    print(f"🎙️ ريكورد صوتي مستلم من {user_name} ({chat_id}) على تيليجرام.", flush=True)
 
-    if reply:
-        await send_telegram_message(bot, chat_id, reply)
-    else:
-        print("⚠️ [Telegram] لا يوجد رد لإرساله.")
-
-# مسار الـ Webhook الجديد
-@app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
-def telegram_webhook_handler():
-    """
-    يستقبل الطلب من تيليجرام ويقوم بتشغيل المعالج في حلقة أحداث جديدة.
-    """
-    update_data = request.get_json()
-    print(f"📥 [Telegram Webhook] بيانات مستلمة.", flush=True)
-    
-    # *** إصلاح خطأ Event loop is closed ***
-    # نقوم بتشغيل دالة المعالجة غير المتزامنة في حلقة أحداث جديدة لكل طلب
     try:
-        asyncio.run(handle_telegram_update(update_data))
+        voice_file = await voice.get_file()
+        # Telegram handles files as ogg by default
+        transcribed_text = transcribe_audio(voice_file.file_path, file_format="ogg")
+
+        if transcribed_text:
+            content = f"رسالة صوتية من العميل {user_name} ({chat_id}):\n{transcribed_text}"
+            reply = ask_assistant(content, chat_id, user_name)
+            await send_telegram_message(chat_id, reply)
+        else:
+            await send_telegram_message(chat_id, "عذراً، لم أتمكن من فهم رسالتك الصوتية. هل يمكنك كتابتها من فضلك؟")
+
     except Exception as e:
-        print(f"❌ خطأ فادح في معالج تيليجرام: {e}", flush=True)
-        traceback.print_exc()
+        print(f"❌ خطأ في معالجة رسالة تيليجرام الصوتية: {e}", flush=True)
+        await send_telegram_message(chat_id, "حدث خطأ أثناء معالجة رسالتك الصوتية.")
 
-    return jsonify({"status": "ok"})
+async def handle_photo_message(update, context):
+    """Handler للصور."""
+    chat_id = update.effective_chat.id
+    user_name = update.effective_user.first_name
+    caption = update.message.caption or ""
 
-# دالة إعداد الـ Webhook (تعمل مرة واحدة فقط)
-async def setup_telegram_webhook():
-    render_hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME')
-    if render_hostname:
-        print("🔧 جاري إعداد Webhook تيليجرام...", flush=True)
-        bot = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
-        webhook_url = f"https://{render_hostname}/{TELEGRAM_BOT_TOKEN}"
-        await bot.set_webhook(url=webhook_url, allowed_updates=["message"] )
-        print(f"✅ [Telegram] تم إعداد الـ Webhook بنجاح على: {webhook_url}", flush=True)
-    else:
-        print("⚠️ لم يتم العثور على RENDER_EXTERNAL_HOSTNAME. تخطي إعداد الـ Webhook.", flush=True)
+    print(f"🖼️ صورة مستلمة من {user_name} ({chat_id}) على تيليجرام.", flush=True)
 
-# نقوم بتشغيل دالة الإعداد عند بدء تشغيل السيرفر
-try:
-    print("⏳ محاولة إعداد Webhook تيليجرام...", flush=True)
-    asyncio.run(setup_telegram_webhook())
-except Exception as e:
-    print(f"❌ فشل إعداد تيليجرام أثناء بدء التشغيل: {e}", flush=True)
+    try:
+        photo_file = await update.message.photo[-1].get_file()
+        image_url = photo_file.file_path
 
-# ==============================================================================
-# المسار الرئيسي ونظام الجدولة
-# ==============================================================================
-@app.route("/", methods=["GET"])
-def home():
-    return "✅ السيرفر يعمل (واتساب و تيليجرام)."
+        message_content = [
+            {"type": "text", "text": f"صورة من العميل {user_name} ({chat_id})."},
+            {"type": "image_url", "image_url": {"url": image_url}}
+        ]
+        if caption:
+            message_content.append({"type": "text", "text": f"تعليق على الصورة:\n{caption}"})
+
+        reply = ask_assistant(message_content, chat_id, user_name)
+        await send_telegram_message(chat_id, reply)
+
+    except Exception as e:
+        print(f"❌ خطأ في معالجة صورة تيليجرام: {e}", flush=True)
+        await send_telegram_message(chat_id, "حدث خطأ أثناء معالجة الصورة.")
+
+# New webhook handler for Telegram Business messages
+@app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
+async def telegram_webhook_handler():
+    print("📥 [Telegram Webhook] البيانات مستلمة.", flush=True)
+    # Ensure the bot object is available globally or passed correctly
+    global bot 
+    if not hasattr(telegram_webhook_handler, 'bot_instance'):
+        telegram_webhook_handler.bot_instance = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
+    bot = telegram_webhook_handler.bot_instance
+
+    update = telegram.Update.de_json(request.json, bot)
+    
+    # Check if it\"s a business message or edited business message
+    if update.business_message:
+        print(f"🕵️‍♂️ [تلغرام] بدأت رسالة عمل من {update.business_message.chat.id}.", flush=True)
+        # Process business message
+        # For now, we\"ll treat it as a regular text message
+        message_text = update.business_message.text
+        chat_id = update.business_message.chat.id
+        user_name = update.business_message.chat.first_name or "عميل عمل"
+        
+        # Simulate typing and delay
+        await bot.send_chat_action(chat_id=chat_id, action=telegram.constants.ChatAction.TYPING)
+        delay_duration = random.uniform(1, 4)
+        await asyncio.sleep(delay_duration)
+
+        session = get_session(chat_id)
+        session["last_message_time"] = datetime.utcnow().isoformat()
+        save_session(chat_id, session)
+
+        reply = ask_assistant(message_text, chat_id, user_name)
+        await send_telegram_message(chat_id, reply)
+
+    elif update.edited_business_message:
+        print(f"🕵️‍♂️ [تلغرام] بدأت رسالة عمل معدلة من {update.edited_business_message.chat.id}.", flush=True)
+        # Process edited business message
+        # For now, we\"ll treat it as a regular text message
+        message_text = update.edited_business_message.text
+        chat_id = update.edited_business_message.chat.id
+        user_name = update.edited_business_message.chat.first_name or "عميل عمل"
+        
+        # Simulate typing and delay
+        await bot.send_chat_action(chat_id=chat_id, action=telegram.constants.ChatAction.TYPING)
+        delay_duration = random.uniform(1, 4)
+        await asyncio.sleep(delay_duration)
+
+        session = get_session(chat_id)
+        session["last_message_time"] = datetime.utcnow().isoformat()
+        save_session(chat_id, session)
+
+        reply = ask_assistant(message_text, chat_id, user_name)
+        await send_telegram_message(chat_id, reply)
+
+    elif update.message:
+        # Handle regular messages (text, voice, photo)
+        if update.message.text:
+            await handle_text_message(update, None) # Pass None for context as it\"s not needed here
+        elif update.message.voice:
+            await handle_voice_message(update, None)
+        elif update.message.photo:
+            await handle_photo_message(update, None)
+
+    return jsonify({"status": "ok"}), 200
+
+# --- Scheduler (Placeholder) ---
+
+from apscheduler.schedulers.background import BackgroundScheduler
 
 def check_for_inactive_users():
-    pass 
+    print("⏰ جاري التحقق من المستخدمين غير النشطين...", flush=True)
+    # Implement your logic here to find inactive users and send follow-up messages
+    # Example: Find sessions where last_message_time is older than 24 hours
+    # and follow_up_sent < 3
+    pass
 
-scheduler = BackgroundScheduler()
-# scheduler.add_job(check_for_inactive_users, 'interval', minutes=5)
-scheduler.start()
-print("⏰ تم بدء الجدولة بنجاح.", flush=True)
+# --- Main Execution ---
 
-# ==============================================================================
-# تشغيل التطبيق
-# ==============================================================================
+def run_telegram_bot():
+    """
+    تقوم بإعداد وتشغيل بوت تيليجرام.
+    """
+    global bot # Make bot accessible globally
+    bot = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+
+    # Add handlers for direct messages to the bot
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_message))
+    application.add_handler(MessageHandler(filters.VOICE, handle_voice_message))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo_message))
+
+    # Set webhook for Telegram Business messages
+    webhook_url = os.getenv("TELEGRAM_WEBHOOK_URL") # Ensure this env var is set on Render
+    if webhook_url:
+        print(f"Setting Telegram webhook to: {webhook_url}/{TELEGRAM_BOT_TOKEN}", flush=True)
+        # Corrected allowed_updates
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(bot.set_webhook(url=f"{webhook_url}/{TELEGRAM_BOT_TOKEN}", allowed_updates=["message", "business_message", "edited_business_message"]))
+        print("✅ تم تعيين الـ Webhook بنجاح.", flush=True)
+    else:
+        print("⚠️ TELEGRAM_WEBHOOK_URL غير محدد. لن يتم تعيين الـ Webhook.", flush=True)
+
+    # Start polling for direct messages (if webhook is not set or for local testing)
+    # application.run_polling() # This should not be run if webhook is used
+    print("✅ بوت تيليجرام جاهز لاستقبال الرسائل.", flush=True)
+
 if __name__ == "__main__":
-    # هذا الجزء يستخدم فقط للاختبار المحلي المباشر بدون Gunicorn
-    print("🚀 جاري بدء تشغيل السيرفر للاختبار المحلي (لا تستخدم هذا في الإنتاج)...")
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    scheduler = BackgroundScheduler()
+    # scheduler.add_job(check_for_inactive_users, \"interval\", minutes=5)
+    scheduler.start()
+    print("⏰ تم بدء الجدولة بنجاح.", flush=True)
+
+    # Run Telegram bot setup in a separate thread
+    telegram_thread = threading.Thread(target=run_telegram_bot)
+    telegram_thread.daemon = True
+    telegram_thread.start()
+
+    # Run Flask app
+    app.run(host="0.0.0.0", port=5000, debug=True)
