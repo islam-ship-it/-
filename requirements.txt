@@ -7,4 +7,4 @@ python-dotenv
 gunicorn
 uvicorn
 asgiref
-python-telegram-bot==21.2
+python-telegram-bot
