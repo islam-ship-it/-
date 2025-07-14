@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # ==============================================================================
-# إعدادات البيئة
+# إعدادات البيئة (تأكد من أنها صحيحة)
 # ==============================================================================
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ASSISTANT_ID_PREMIUM = os.getenv("ASSISTANT_ID_PREMIUM")
@@ -243,7 +243,7 @@ def webhook():
     elif image_url:
         caption = data.get("image", {}).get("caption", "")
         content = [{"type": "image_url", "image_url": {"url": image_url}}]
-        if caption: content.append({"type": "text", "text": f"تعليق على الصورة: {caption}"})
+        if caption: content_list.append({"type": "text", "text": f"تعليق على الصورة: {caption}"})
         reply = ask_assistant(content, sender, name)
         send_whatsapp_message(sender, reply)
     elif msg:
@@ -257,7 +257,7 @@ def webhook():
     return jsonify({"status": "received"}), 200
 
 # ==============================================================================
-# منطق Telegram (Webhook)
+# منطق Telegram (Webhook) مع طباعة مفصلة
 # ==============================================================================
 telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
@@ -266,23 +266,31 @@ async def start_command(update, context):
     await update.message.reply_text(f"مرحباً {user.first_name}! أنا هنا لمساعدتك.")
 
 async def handle_telegram_message(update, context):
-    # --- تحسين الطباعة لتسجيل كل التحديثات ---
+    # --- نظام طباعة مفصل ---
     chat = update.effective_chat
     user = update.effective_user
+    message_to_process = update.message or update.business_message
 
+    # طباعة معلومات أساسية عن التحديث
     if chat and user:
         logger.info(f"📥 [Telegram Update] تحديث جديد من: {chat.id} - الاسم: {user.first_name}")
     else:
         logger.info("📥 [Telegram Update] تحديث جديد وصل (بدون معلومات دردشة/مستخدم).")
 
-    # --- التحقق الأساسي لضمان وجود رسالة جديدة ---
-    if not update.message:
-        logger.info("✅ التجاهل: التحديث لا يحتوي على رسالة جديدة.")
+    # طباعة نوع التحديث بالتفصيل
+    if update.edited_message:
+        logger.info("ℹ️ نوع التحديث: تعديل رسالة (edited_message).")
+    elif update.channel_post:
+        logger.info("ℹ️ نوع التحديث: منشور قناة (channel_post).")
+    elif update.callback_query:
+        logger.info("ℹ️ نوع التحديث: استعلام رد نداء (callback_query).")
+    elif not message_to_process:
+        logger.info("✅ التجاهل: التحديث لا يحتوي على رسالة جديدة يمكن معالجتها (message or business_message is None).")
         return
 
-    # --- الآن الكود آمن للمتابعة مع update.message ---
-    chat_id = update.message.chat_id
-    user_name = update.message.from_user.first_name
+    # --- الآن الكود آمن للمتابعة مع message_to_process ---
+    chat_id = message_to_process.chat.id
+    user_name = message_to_process.from_user.first_name
     
     try:
         await context.bot.send_chat_action(chat_id=chat_id, action=telegram.constants.ChatAction.TYPING)
@@ -298,21 +306,29 @@ async def handle_telegram_message(update, context):
     reply = ""
     content_for_assistant = ""
 
-    if update.message.text:
-        content_for_assistant = update.message.text
-    elif update.message.voice:
-        voice_file = await update.message.voice.get_file()
+    # طباعة نوع الرسالة بالتحديد
+    if message_to_process.text:
+        logger.info(f"💬 نوع الرسالة: نص. المحتوى: '{message_to_process.text}'")
+        content_for_assistant = message_to_process.text
+    elif message_to_process.voice:
+        logger.info("🎤 نوع الرسالة: رسالة صوتية (voice).")
+        voice_file = await message_to_process.voice.get_file()
         transcribed_text = transcribe_audio(voice_file.file_path)
         if transcribed_text:
             content_for_assistant = f"رسالة صوتية من العميل: {transcribed_text}"
         else:
             reply = "عذراً، لم أتمكن من فهم رسالتك الصوتية."
-    elif update.message.photo:
-        photo_file = await update.message.photo[-1].get_file()
-        caption = update.message.caption or ""
+    elif message_to_process.photo:
+        logger.info("🖼️ نوع الرسالة: صورة (photo).")
+        photo_file = await message_to_process.photo[-1].get_file()
+        caption = message_to_process.caption or ""
         content_list = [{"type": "image_url", "image_url": {"url": photo_file.file_path}}]
         if caption: content_list.append({"type": "text", "text": f"تعليق على الصورة: {caption}"})
         content_for_assistant = content_list
+    else:
+        # هذا الجزء يلتقط أي نوع رسالة آخر لا نعالجه
+        logger.info(f"❓ نوع الرسالة: غير مدعوم حاليًا (مثال: ملصق، ملف، ...إلخ). سيتم تجاهل المحتوى.")
+
 
     if content_for_assistant and not reply:
         reply = ask_assistant(content_for_assistant, chat_id, user_name)
@@ -320,10 +336,13 @@ async def handle_telegram_message(update, context):
     if reply:
         await send_telegram_message(context, chat_id, reply)
 
+# --- ربط الـ Handlers ---
+# نستخدم معالجًا واحدًا عامًا لضمان التقاط كل أنواع الرسائل للطباعة
+all_messages_handler = MessageHandler(filters.ALL, handle_telegram_message)
+
 telegram_app.add_handler(CommandHandler("start", start_command))
-telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_telegram_message))
-telegram_app.add_handler(MessageHandler(filters.VOICE, handle_telegram_message))
-telegram_app.add_handler(MessageHandler(filters.PHOTO, handle_telegram_message))
+telegram_app.add_handler(all_messages_handler)
+
 
 @flask_app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
 async def telegram_webhook_handler():
@@ -344,7 +363,7 @@ async def setup_telegram():
         logger.info("🔧 جاري تهيئة تطبيق تيليجرام وإعداد الـ Webhook...")
         await telegram_app.initialize()
         webhook_url = f"https://{render_hostname}/{TELEGRAM_BOT_TOKEN}"
-        await telegram_app.bot.set_webhook(url=webhook_url, allowed_updates=telegram.Update.ALL_TYPES )
+        await telegram_app.bot.set_webhook(url=webhook_url, allowed_updates=telegram.Update.ALL_TYPES  )
         logger.info("✅ [Telegram] تم تهيئة التطبيق وإعداد الـ Webhook بنجاح.")
     else:
         logger.warning("⚠️ لم يتم العثور على RENDER_EXTERNAL_HOSTNAME. تخطي إعداد الـ Webhook.")
