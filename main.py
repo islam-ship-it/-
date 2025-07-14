@@ -266,6 +266,7 @@ async def start_command(update, context):
     await update.message.reply_text(f"مرحباً {user.first_name}! أنا هنا لمساعدتك.")
 
 async def handle_telegram_message(update, context):
+    logger.info(f"📦 التحديث الكامل: {update.to_dict()}")
     # --- نظام طباعة مفصل ---
     chat = update.effective_chat
     user = update.effective_user
