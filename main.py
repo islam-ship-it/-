@@ -72,7 +72,7 @@ except Exception as e:
 # ==============================================================================
 # إعداد تطبيق Flask وعميل OpenAI
 # ==============================================================================
-flask_app = Flask(_name_)
+flask_app = Flask(__name__)
 app = WsgiToAsgi(flask_app)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -133,7 +133,7 @@ async def send_telegram_message(context, chat_id, message):
 # دوال مشتركة (تحويل الصوت، التفاعل مع المساعد)
 # ==============================================================================
 def transcribe_audio(audio_url, file_format="ogg"):
-    logger.info(f"🎙 محاولة تحميل وتحويل الصوت من: {audio_url}")
+    logger.info(f"🎙️ محاولة تحميل وتحويل الصوت من: {audio_url}")
     try:
         audio_response = requests.get(audio_url, stream=True)
         audio_response.raise_for_status()
@@ -279,11 +279,11 @@ async def handle_telegram_message(update, context):
 
     # طباعة نوع التحديث بالتفصيل
     if update.edited_message:
-        logger.info("ℹ نوع التحديث: تعديل رسالة (edited_message).")
+        logger.info("ℹ️ نوع التحديث: تعديل رسالة (edited_message).")
     elif update.channel_post:
-        logger.info("ℹ نوع التحديث: منشور قناة (channel_post).")
+        logger.info("ℹ️ نوع التحديث: منشور قناة (channel_post).")
     elif update.callback_query:
-        logger.info("ℹ نوع التحديث: استعلام رد نداء (callback_query).")
+        logger.info("ℹ️ نوع التحديث: استعلام رد نداء (callback_query).")
     elif not message_to_process:
         logger.info("✅ التجاهل: التحديث لا يحتوي على رسالة جديدة يمكن معالجتها (message or business_message is None).")
         return
@@ -319,7 +319,7 @@ async def handle_telegram_message(update, context):
         else:
             reply = "عذراً، لم أتمكن من فهم رسالتك الصوتية."
     elif message_to_process.photo:
-        logger.info("🖼 نوع الرسالة: صورة (photo).")
+        logger.info("🖼️ نوع الرسالة: صورة (photo).")
         photo_file = await message_to_process.photo[-1].get_file()
         caption = message_to_process.caption or ""
         content_list = [{"type": "image_url", "image_url": {"url": photo_file.file_path}}]
@@ -366,7 +366,7 @@ async def setup_telegram():
         await telegram_app.bot.set_webhook(url=webhook_url, allowed_updates=telegram.Update.ALL_TYPES  )
         logger.info("✅ [Telegram] تم تهيئة التطبيق وإعداد الـ Webhook بنجاح.")
     else:
-        logger.warning("⚠ لم يتم العثور على RENDER_EXTERNAL_HOSTNAME. تخطي إعداد الـ Webhook.")
+        logger.warning("⚠️ لم يتم العثور على RENDER_EXTERNAL_HOSTNAME. تخطي إعداد الـ Webhook.")
 
 # نقوم بتشغيل دالة الإعداد عند بدء التشغيل
 try:
