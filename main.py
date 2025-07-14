@@ -111,23 +111,37 @@ def save_session(user_id, session_data):
 # ==============================================================================
 # دوال إرسال الرسائل
 # ==============================================================================
-def send_whatsapp_message(phone, message):
-    url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
-    headers = {"Content-Type": "application/json", "Client-Token": CLIENT_TOKEN}
-    payload = {"phone": phone, "message": message}
-    try:
-        response = requests.post(url, headers=headers, json=payload)
-        logger.info(f"📤 [WhatsApp] تم إرسال رسالة للعميل {phone}، الحالة: {response.status_code}")
-        response.raise_for_status()
-    except requests.exceptions.RequestException as e:
-        logger.error(f"❌ [WhatsApp] خطأ أثناء إرسال الرسالة عبر ZAPI: {e}")
+# الكود المعدل لدعم الرد داخل محادثة الأعمال (Business Chat) باستخدام business_connection_id
 
-async def send_telegram_message(context, chat_id, message):
+async def send_telegram_message(context, chat_id, message, business_connection_id=None):
     try:
-        await context.bot.send_message(chat_id=chat_id, text=message)
-        logger.info(f"📤 [Telegram] تم إرسال رسالة للعميل {chat_id}.")
+        payload = {
+            "chat_id": chat_id,
+            "text": message
+        }
+        if business_connection_id:
+            payload["business_connection_id"] = business_connection_id
+
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        response = requests.post(url, json=payload)
+
+        if response.status_code == 200:
+            logger.info(f"\U0001f4e4 [Telegram] تم إرسال رسالة للعميل {chat_id}.")
+        else:
+            logger.error(f"❌ [Telegram] فشل إرسال الرسالة، الحالة: {response.status_code}, الرد: {response.text}")
+
     except Exception as e:
         logger.error(f"❌ [Telegram] خطأ أثناء إرسال الرسالة: {e}")
+
+
+# تعديل داخل handle_telegram_message
+# استخرج business_connection_id من update
+business_connection_id = None
+if update.business_message and hasattr(update.business_message, 'business_connection_id'):
+    business_connection_id = update.business_message.business_connection_id
+
+# عند استدعاء send_telegram_message في نهاية handle_telegram_message
+await send_telegram_message(context, chat_id, reply, business_connection_id)
 
 # ==============================================================================
 # دوال مشتركة (تحويل الصوت، التفاعل مع المساعد)
