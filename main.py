@@ -19,7 +19,9 @@ from dotenv import load_dotenv
 import telegram
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
+# ==============================================================================
 # إعداد نظام التسجيل (Logging)
+# ==============================================================================
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -27,11 +29,16 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
-logger = logging.getLogger(_name_)
+logger = logging.getLogger(__name__)
 
+# ==============================================================================
 # تحميل متغيرات البيئة
+# ==============================================================================
 load_dotenv()
 
+# ==============================================================================
+# إعدادات البيئة (تأكد من أنها صحيحة)
+# ==============================================================================
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ASSISTANT_ID_PREMIUM = os.getenv("ASSISTANT_ID_PREMIUM")
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
@@ -43,24 +50,43 @@ MONGO_URI = os.getenv("MONGO_URI")
 FOLLOW_UP_INTERVAL_MINUTES = int(os.getenv("FOLLOW_UP_INTERVAL_MINUTES", 1440))
 MAX_FOLLOW_UPS = int(os.getenv("MAX_FOLLOW_UPS", 3))
 
+# ==============================================================================
+# التحقق من المتغيرات الأساسية
+# ==============================================================================
 if not all([OPENAI_API_KEY, ASSISTANT_ID_PREMIUM, TELEGRAM_BOT_TOKEN, MONGO_URI]):
     logger.critical("❌ خطأ فادح: واحد أو أكثر من متغيرات البيئة الأساسية غير موجود.")
     exit()
 
-client_db = MongoClient(MONGO_URI)
-db = client_db["multi_platform_bot"]
-sessions_collection = db["sessions"]
-logger.info("✅ تم الاتصال بقاعدة البيانات بنجاح.")
+# ==============================================================================
+# إعدادات قاعدة البيانات (MongoDB)
+# ==============================================================================
+try:
+    client_db = MongoClient(MONGO_URI)
+    db = client_db["multi_platform_bot"]
+    sessions_collection = db["sessions"]
+    logger.info("✅ تم الاتصال بقاعدة البيانات بنجاح.")
+except Exception as e:
+    logger.critical(f"❌ فشل الاتصال بقاعدة البيانات: {e}")
+    exit()
 
-flask_app = Flask(_name_)
+# ==============================================================================
+# إعداد تطبيق Flask وعميل OpenAI
+# ==============================================================================
+flask_app = Flask(__name__)
 app = WsgiToAsgi(flask_app)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+# ==============================================================================
+# متغيرات عالمية
+# ==============================================================================
 pending_messages = {}
 timers = {}
 thread_locks = {}
 client_processing_locks = {}
 
+# ==============================================================================
+# دوال إدارة الجلسات (مشتركة)
+# ==============================================================================
 def get_session(user_id):
     user_id_str = str(user_id)
     session = sessions_collection.find_one({"_id": user_id_str})
@@ -82,6 +108,9 @@ def save_session(user_id, session_data):
     sessions_collection.replace_one({"_id": user_id_str}, session_data, upsert=True)
     logger.info(f"💾 تم حفظ بيانات الجلسة للمستخدم {user_id_str}.")
 
+# ==============================================================================
+# دوال إرسال الرسائل
+# ==============================================================================
 def send_whatsapp_message(phone, message):
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
     headers = {"Content-Type": "application/json", "Client-Token": CLIENT_TOKEN}
@@ -93,36 +122,12 @@ def send_whatsapp_message(phone, message):
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ [WhatsApp] خطأ أثناء إرسال الرسالة عبر ZAPI: {e}")
 
-async def send_business_reply(context, business_conn_id, message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "business_connection_id": business_conn_id,
-        "text": message
-    }
-    try:
-        response = requests.post(url, json=payload)
-        logger.info(f"📤 [Business] تم إرسال الرد عبر business_connection_id، الحالة: {response.status_code}")
-        return response.status_code == 200
-    except Exception as e:
-        logger.error(f"❌ [Business] فشل إرسال الرد عبر business_connection_id: {e}")
-        return False
-
 async def send_telegram_message(context, chat_id, message):
     try:
         await context.bot.send_message(chat_id=chat_id, text=message)
         logger.info(f"📤 [Telegram] تم إرسال رسالة للعميل {chat_id}.")
     except Exception as e:
         logger.error(f"❌ [Telegram] خطأ أثناء إرسال الرسالة: {e}")
-
-# بقية الكود كما هو دون تغيير...
-# تعديل داخل handle_telegram_message
-# استخرج business_connection_id من update
-business_connection_id = None
-if update.business_message and hasattr(update.business_message, 'business_connection_id'):
-    business_connection_id = update.business_message.business_connection_id
-
-# عند استدعاء send_telegram_message في نهاية handle_telegram_message
-await send_telegram_message(context, chat_id, reply, business_connection_id)
 
 # ==============================================================================
 # دوال مشتركة (تحويل الصوت، التفاعل مع المساعد)
