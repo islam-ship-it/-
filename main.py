@@ -165,6 +165,6 @@ except Exception as e:
 scheduler = BackgroundScheduler()
 scheduler.start()
 
-if _name_ == "__main__":
+if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     flask_app.run(host="0.0.0.0", port=port, debug=True)
