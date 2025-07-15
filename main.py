@@ -8,13 +8,15 @@ from flask import Flask, request, jsonify
 from asgiref.wsgi import WsgiToAsgi
 from openai import OpenAI
 from pymongo import MongoClient
+from datetime import datetime
+from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 
 # Telegram imports
 import telegram
 from telegram.ext import Application, MessageHandler, filters
 
-# إعداد تسجيل الأحداث
+# إعداد نظام التسجيل (Logging)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -31,26 +33,25 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
 
+# تحقق من المتغيرات
 if not all([OPENAI_API_KEY, ASSISTANT_ID_PREMIUM, TELEGRAM_BOT_TOKEN, MONGO_URI]):
     logger.critical("❌ خطأ: متغيرات البيئة ناقصة.")
     exit()
 
-# إعداد الاتصال بقاعدة البيانات
+# الاتصال بقاعدة البيانات
 client_db = MongoClient(MONGO_URI)
 db = client_db["multi_platform_bot"]
 sessions_collection = db["sessions"]
 
-# إعداد Flask و ASGI
+# إعداد Flask وASGI
 flask_app = Flask(__name__)
 app = WsgiToAsgi(flask_app)
 
-# إعداد OpenAI
+# إعداد عملاء OpenAI وTelegram
 client = OpenAI(api_key=OPENAI_API_KEY)
-
-# إعداد تطبيق تيليجرام
 telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-# إدارة الجلسات
+# ======== إدارة الجلسات ========
 def get_session(user_id):
     uid = str(user_id)
     session = sessions_collection.find_one({"_id": uid})
@@ -61,7 +62,7 @@ def get_session(user_id):
 def save_session(user_id, session):
     sessions_collection.replace_one({"_id": str(user_id)}, session, upsert=True)
 
-# إرسال الرد من حساب تجاري (Telegram Business)
+# ======== إرسال رد من الحساب التجاري ========
 def send_business_reply(text, business_connection_id):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -75,7 +76,7 @@ def send_business_reply(text, business_connection_id):
     except Exception as e:
         logger.error(f"❌ فشل إرسال من الحساب التجاري: {e}")
 
-# المحادثة مع مساعد OpenAI
+# ======== طلب رد من المساعد ========
 def ask_assistant(content, sender_id):
     session = get_session(sender_id)
     if not session.get("thread_id"):
@@ -108,25 +109,25 @@ def ask_assistant(content, sender_id):
 
     return "⚠ حدث خطأ أثناء معالجة رد المساعد."
 
-# التعامل مع الرسائل الواردة
+# ======== التعامل مع رسائل تيليجرام ========
 async def handle_telegram_message(update, context):
     msg = update.business_message or update.message
     if not msg:
         return
 
     text = msg.text or ""
-    chat_id = msg.chat.id
+    sender_id = msg.chat.id
     business_connection_id = getattr(update.business_message, 'business_connection_id', None)
 
-    logger.info(f"📩 تم استلام رسالة: {text}")
-    reply = ask_assistant(text, chat_id)
+    logger.info(f"📩 تم استلام رسالة : {text}")
+    reply = ask_assistant(text, sender_id)
 
     if business_connection_id:
         send_business_reply(reply, business_connection_id)
     else:
-        await context.bot.send_message(chat_id=chat_id, text=reply)
+        await context.bot.send_message(chat_id=sender_id, text=reply)
 
-# إعداد Webhook
+# ======== Webhook ========
 @flask_app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
 async def telegram_webhook_handler():
     update_data = request.get_json()
@@ -139,9 +140,10 @@ async def telegram_webhook_handler():
 def home():
     return "✅ البوت يعمل."
 
+# ======== إضافة الهاندلر ========
 telegram_app.add_handler(MessageHandler(filters.ALL, handle_telegram_message))
 
-# إعداد Webhook عند التشغيل
+# ======== إعداد Webhook تلقائي ========
 async def setup():
     if RENDER_EXTERNAL_HOSTNAME:
         await telegram_app.initialize()
@@ -149,7 +151,6 @@ async def setup():
             url=f"https://{RENDER_EXTERNAL_HOSTNAME}/{TELEGRAM_BOT_TOKEN}"
         )
 
-# بدء التطبيق
 try:
     loop = asyncio.get_event_loop()
     if loop.is_running():
@@ -159,6 +160,12 @@ try:
 except Exception as e:
     logger.critical(f"❌ فشل إعداد Webhook: {e}")
 
+# ======== تشغيل المجدول ========
+scheduler = BackgroundScheduler()
+scheduler.start()
+
+# ======== بدء الخادم ========
 if __name__ == "__main__":
     flask_app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)
+
 
