@@ -1,166 +1,84 @@
 import os
-import time
-import json
-import requests
-import asyncio
 import logging
+import requests
 from flask import Flask, request, jsonify
-from asgiref.wsgi import WsgiToAsgi
-from openai import OpenAI
-from pymongo import MongoClient
-from apscheduler.schedulers.background import BackgroundScheduler
-from dotenv import load_dotenv
 
-# Telegram imports
-import telegram
-from telegram.ext import Application, MessageHandler, filters
+app = Flask(__name__)
 
-# إعداد التسجيل التفصيلي
-logging.basicConfig(
-    level=logging.DEBUG,  # DEBUG لعرض كل شيء
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()]
-)
-logger = logging.getLogger(__name__)
+# إعداد اللوجينج
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger("main")
 
-load_dotenv()
+# إعدادات البوت
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8006378063:AAFlHqpGmfIU6rnI1s7MO7Wde9ikUJXMXXI")
+BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-ASSISTANT_ID_PREMIUM = os.getenv("ASSISTANT_ID_PREMIUM")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-MONGO_URI = os.getenv("MONGO_URI")
-RENDER_EXTERNAL_HOSTNAME = os.getenv("RENDER_EXTERNAL_HOSTNAME")
-
-if not all([OPENAI_API_KEY, ASSISTANT_ID_PREMIUM, TELEGRAM_BOT_TOKEN, MONGO_URI]):
-    logger.critical("❌ متغيرات البيئة ناقصة.")
-    exit()
-
-client_db = MongoClient(MONGO_URI)
-db = client_db["multi_platform_bot"]
-sessions_collection = db["sessions"]
-
-flask_app = Flask(__name__)
-app = WsgiToAsgi(flask_app)
-
-client = OpenAI(api_key=OPENAI_API_KEY)
-telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
-# جلسات المستخدم
-def get_session(user_id):
-    uid = str(user_id)
-    session = sessions_collection.find_one({"_id": uid})
-    if not session:
-        session = {"_id": uid, "thread_id": None, "history": []}
-        logger.debug(f"📂 أنشئت جلسة جديدة للمستخدم {uid}")
-    else:
-        logger.debug(f"📁 استرجعت الجلسة الحالية للمستخدم {uid}")
-    return session
-
-def save_session(user_id, session):
-    sessions_collection.replace_one({"_id": str(user_id)}, session, upsert=True)
-    logger.debug(f"💾 تم حفظ الجلسة للمستخدم {user_id}")
-
-# إرسال من الحساب التجاري
-def send_business_reply(text, business_connection_id):
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendBusinessMessage"
-        payload = {
-            "business_connection_id": business_connection_id,
-            "message": {
-                "text": text
-            }
+# دالة إرسال الرد
+def send_business_reply(business_connection_id, message_id, reply_text):
+    url = f"{BASE_URL}/sendMessage"
+    payload = {
+        "business_connection_id": business_connection_id,
+        "message_thread_id": message_id,
+        "text": reply_text,
+        "reply_parameters": {
+            "message_id": message_id
         }
-        headers = {"Content-Type": "application/json"}
-        logger.debug(f"📤 إرسال رد عبر الحساب التجاري:\n{json.dumps(payload, ensure_ascii=False)}")
-        res = requests.post(url, json=payload, headers=headers)
-        logger.info(f"📤 تم إرسال رد من الحساب التجاري. {res.status_code} - {res.text}")
+    }
+
+    logger.debug("📤 إرسال رد عبر sendMessage:")
+    logger.debug(f"📡 URL: {url}")
+    logger.debug(f"📦 Payload: {payload}")
+
+    try:
+        response = requests.post(url, json=payload)
+        logger.info("📤 تم إرسال الرد. %s - %s", response.status_code, response.text)
+
+        if response.status_code != 200:
+            logger.error("❌ فشل إرسال الرسالة: %s", response.text)
+
+        return response
     except Exception as e:
-        logger.error(f"❌ فشل إرسال من الحساب التجاري: {e}")
+        logger.exception("🔥 حصل استثناء أثناء إرسال الرسالة:")
+        return None
 
-# إرسال إلى المساعد الذكي
-def ask_assistant(content, sender_id):
-    logger.debug(f"💬 سؤال موجه لـ OpenAI: {content}")
-    session = get_session(sender_id)
-    if not session.get("thread_id"):
-        thread = client.beta.threads.create()
-        session["thread_id"] = thread.id
-        logger.debug(f"🧵 تم إنشاء thread جديد: {thread.id}")
-    client.beta.threads.messages.create(
-        thread_id=session["thread_id"],
-        role="user",
-        content=[{"type": "text", "text": content}]
-    )
-    run = client.beta.threads.runs.create(
-        thread_id=session["thread_id"],
-        assistant_id=ASSISTANT_ID_PREMIUM
-    )
-    logger.debug(f"▶ بدء التشغيل: run_id={run.id}")
-    while run.status in ["queued", "in_progress"]:
-        time.sleep(1)
-        run = client.beta.threads.runs.retrieve(thread_id=session["thread_id"], run_id=run.id)
-        logger.debug(f"⏳ حالة التشغيل: {run.status}")
-    if run.status == "completed":
-        messages = client.beta.threads.messages.list(thread_id=session["thread_id"])
-        reply = messages.data[0].content[0].text.value.strip()
-        logger.debug(f"✅ رد المساعد: {reply}")
-        save_session(sender_id, session)
-        return reply
-    logger.warning(f"⚠ حدث خطأ أثناء تشغيل المساعد: {run.status}")
-    return "⚠ حدث خطأ أثناء معالجة رد المساعد."
+# Webhook endpoint
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    data = request.json
+    logger.debug("📩 تحديث Webhook:")
+    logger.debug(data)
 
-# التعامل مع الرسائل
-async def handle_telegram_message(update, context):
-    msg = update.business_message or update.message
-    if not msg:
-        logger.warning("📭 لا توجد رسالة يمكن معالجتها.")
-        return
-    chat_id = msg.chat.id
-    text = msg.text or ""
-    business_connection_id = getattr(update.business_message, 'business_connection_id', None)
+    if "business_message" in data:
+        message = data["business_message"]
+        user_id = message["from"]["id"]
+        business_connection_id = message["business_connection_id"]
+        message_id = message["message_id"]
+        text = message.get("text", "")
 
-    logger.info(f"📥 رسالة واردة من {chat_id} - Business: {business_connection_id} - النص: {text}")
-    reply = ask_assistant(text, chat_id)
+        logger.info(f"📥 رسالة من {user_id} - Business: {business_connection_id} - النص: {text}")
 
-    if business_connection_id:
-        send_business_reply(reply, business_connection_id)
-    else:
-        logger.debug("✉️ إرسال الرد باستخدام sendMessage")
-        await context.bot.send_message(chat_id=chat_id, text=reply)
+        # رد تلقائي جاهز
+        reply_text = (
+            "أهلًا يا فندم 😊\n"
+            "لو حضرتك تريد تزود متابعين، لايكات، مشاهدات، أو تعليقات على فيسبوك، تيك توك، أو إنستجرام،\n"
+            "قول لي:\n"
+            "🔹 نوع الخدمة\n"
+            "🔹 الجمهور (مصريين فقط أو مصريين وعرب)\n"
+            "🔹 العدد المطلوب\n"
+            "وأنا هجهزلك العرض المناسب ⚡"
+        )
 
-# Webhook تيليجرام
-@flask_app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
-async def telegram_webhook_handler():
-    update_data = request.get_json()
-    logger.debug(f"📩 Webhook تحديث:\n{json.dumps(update_data, ensure_ascii=False)}")
-    await telegram_app.process_update(telegram.Update.de_json(update_data, telegram_app.bot))
+        send_business_reply(business_connection_id, message_id, reply_text)
+
     return jsonify({"status": "ok"})
 
-@flask_app.route("/")
-def home():
-    return "✅ البوت يعمل."
-
-telegram_app.add_handler(MessageHandler(filters.ALL, handle_telegram_message))
-
-async def setup():
-    if RENDER_EXTERNAL_HOSTNAME:
-        await telegram_app.initialize()
-        url = f"https://{RENDER_EXTERNAL_HOSTNAME}/{TELEGRAM_BOT_TOKEN}"
-        logger.info(f"🔗 إعداد Webhook على: {url}")
-        await telegram_app.bot.set_webhook(url=url)
-
-try:
-    loop = asyncio.get_event_loop()
-    if loop.is_running():
-        loop.create_task(setup())
-    else:
-        asyncio.run(setup())
-except Exception as e:
-    logger.critical(f"❌ فشل إعداد Webhook: {e}")
-
-# تشغيل جدولة المهام
-scheduler = BackgroundScheduler()
-scheduler.start()
+# Health check
+@app.route("/", methods=["GET"])
+def index():
+    return "✅ Bot is running."
 
 if __name__ == "__main__":
-    flask_app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
+
 
