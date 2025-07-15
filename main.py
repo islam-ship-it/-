@@ -15,11 +15,9 @@ from dotenv import load_dotenv
 import telegram
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
-# إعدادات التسجيل
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler()])
 logger = logging.getLogger(__name__)
 
-# تحميل المتغيرات
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ASSISTANT_ID_PREMIUM = os.getenv("ASSISTANT_ID_PREMIUM")
@@ -32,17 +30,14 @@ MONGO_URI = os.getenv("MONGO_URI")
 FOLLOW_UP_INTERVAL_MINUTES = int(os.getenv("FOLLOW_UP_INTERVAL_MINUTES", 1440))
 MAX_FOLLOW_UPS = int(os.getenv("MAX_FOLLOW_UPS", 3))
 
-# تحقق من القيم
 if not all([OPENAI_API_KEY, ASSISTANT_ID_PREMIUM, TELEGRAM_BOT_TOKEN, MONGO_URI]):
-    logger.critical("❌ خطأ: متغيرات بيئة مفقودة.")
+    logger.critical("\u274c \u062e\u0637\u0623: \u0645\u062a\u063a\u064a\u0631\u0627\u062a \u0628\u064a\u0626\u0629 \u0645\u0641\u0642\u0648\u062f\u0629.")
     exit()
 
-# إعداد قاعدة البيانات
 client_db = MongoClient(MONGO_URI)
 db = client_db["multi_platform_bot"]
 sessions_collection = db["sessions"]
 
-# إعداد OpenAI و Flask
 flask_app = Flask(__name__)
 app = WsgiToAsgi(flask_app)
 client = OpenAI(api_key=OPENAI_API_KEY)
@@ -52,7 +47,6 @@ timers = {}
 thread_locks = {}
 client_processing_locks = {}
 
-# إدارة الجلسات
 def get_session(user_id):
     user_id_str = str(user_id)
     session = sessions_collection.find_one({"_id": user_id_str})
@@ -73,18 +67,15 @@ def save_session(user_id, session_data):
     session_data["_id"] = user_id_str
     sessions_collection.replace_one({"_id": user_id_str}, session_data, upsert=True)
 
-# إرسال الرسائل
 async def send_telegram_message(context, chat_id, message, business_connection_id=None):
     try:
         if business_connection_id:
             await context.bot.send_message(chat_id=chat_id, text=message, business_connection_id=business_connection_id)
         else:
             await context.bot.send_message(chat_id=chat_id, text=message)
-        logger.info(f"📤 [Telegram] تم إرسال رسالة للعميل {chat_id}.")
+        logger.info(f"\ud83d\udce4 [Telegram] \u062a\u0645 \u0625\u0631\u0633\u0627\u0644 \u0631\u0633\u0627\u0644\u0629 \u0644\u0644\u0639\u0645\u064a\u0644 {chat_id}.")
     except Exception as e:
-        logger.error(f"❌ [Telegram] خطأ أثناء الإرسال: {e}")
-
-# دالة المساعد
+        logger.error(f"\u274c [Telegram] \u062e\u0637\u0623 \u0623\u062b\u0646\u0627\u0621 \u0627\u0644\u0625\u0631\u0633\u0627\u0644: {e}")
 
 def ask_assistant(content, sender_id, name=""):
     session = get_session(sender_id)
@@ -112,13 +103,12 @@ def ask_assistant(content, sender_id, name=""):
             session["history"] = session["history"][-10:]
             save_session(sender_id, session)
             return reply
-        return "⚠ حدث خطأ في المساعد، حاول لاحقًا."
+        return "\u26a0 \u062d\u062f\u062b \u062e\u0637\u0623 \u0641\u064a \u0627\u0644\u0645\u0633\u0627\u0639\u062f، \u062d\u0627\u0648\u0644 \u0644\u0627\u062d\u0642\u064b\u0627."
 
-# Telegram
 telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
 async def start_command(update, context):
-    await update.message.reply_text(f"مرحباً {update.effective_user.first_name}!")
+    await update.message.reply_text(f"\u0645\u0631\u062d\u0628\u0627ً {update.effective_user.first_name}!")
 
 async def handle_telegram_message(update, context):
     message = update.message or update.business_message
@@ -127,7 +117,14 @@ async def handle_telegram_message(update, context):
     chat_id = message.chat.id
     user_name = message.from_user.first_name
     business_id = getattr(update, "business_connection_id", None)
+
+    logger.info("========== تحديث جديد ==========")
+    logger.info(f"\ud83d\udd0d chat_id: {chat_id}, name: {user_name}")
+    logger.info(f"\ud83d\udd39 business_connection_id: {business_id}")
+    logger.info("\ud83d\udd39 كل بيانات التحديث: \n" + json.dumps(update.to_dict(), indent=2, ensure_ascii=False))
+
     await context.bot.send_chat_action(chat_id=chat_id, action=telegram.constants.ChatAction.TYPING)
+
     session = get_session(chat_id)
     session["last_message_time"] = datetime.utcnow().isoformat()
     session["follow_up_sent"] = 0
@@ -168,7 +165,6 @@ except Exception as e:
 scheduler = BackgroundScheduler()
 scheduler.start()
 
-if __name__ == "__main__":
+if _name_ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     flask_app.run(host="0.0.0.0", port=port, debug=True)
-
