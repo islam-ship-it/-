@@ -123,6 +123,20 @@ def send_whatsapp_message(phone, message):
         logger.error(f"❌ [WhatsApp] خطأ أثناء إرسال الرسالة عبر ZAPI: {e}")
 
 async def send_telegram_message(context, chat_id, message):
+
+def send_business_reply(text, business_connection_id):
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "business_connection_id": business_connection_id,
+            "text": text
+        }
+        headers = {"Content-Type": "application/json"}
+        response = requests.post(url, json=payload, headers=headers)
+        logger.info(f"📤 [Telegram Business] تم إرسال رسالة من الهوية التجارية. الحالة: {response.status_code}")
+        return response
+    except Exception as e:
+        logger.error(f"❌ [Telegram Business] فشل في إرسال الرد من الحساب التجاري: {e}")
     try:
         await context.bot.send_message(chat_id=chat_id, text=message)
         logger.info(f"📤 [Telegram] تم إرسال رسالة للعميل {chat_id}.")
@@ -266,6 +280,17 @@ async def start_command(update, context):
     await update.message.reply_text(f"مرحباً {user.first_name}! أنا هنا لمساعدتك.")
 
 async def handle_telegram_message(update, context):
+    business_message = update.business_message
+    if business_message:
+        business_connection_id = business_message.business_connection_id
+        user_name = business_message.from_user.first_name if business_message.from_user else "عميل"
+        text = business_message.text or ""
+        logger.info(f"💼 [Telegram Business] رسالة من الحساب التجاري: {text}")
+        reply = ask_assistant(text, business_connection_id, user_name)
+        if reply:
+            send_business_reply(reply, business_connection_id)
+        return
+
     # --- نظام طباعة مفصل ---
     chat = update.effective_chat
     user = update.effective_user
