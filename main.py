@@ -31,14 +31,14 @@ FOLLOW_UP_INTERVAL_MINUTES = int(os.getenv("FOLLOW_UP_INTERVAL_MINUTES", 1440))
 MAX_FOLLOW_UPS = int(os.getenv("MAX_FOLLOW_UPS", 3))
 
 if not all([OPENAI_API_KEY, ASSISTANT_ID_PREMIUM, TELEGRAM_BOT_TOKEN, MONGO_URI]):
-    logger.critical("\u274c \u062e\u0637\u0623: \u0645\u062a\u063a\u064a\u0631\u0627\u062a \u0628\u064a\u0626\u0629 \u0645\u0641\u0642\u0648\u062f\u0629.")
+    logger.critical("❌ خطأ: متغيرات بيئة مفقودة.")
     exit()
 
 client_db = MongoClient(MONGO_URI)
 db = client_db["multi_platform_bot"]
 sessions_collection = db["sessions"]
 
-flask_app = Flask(__name__)
+flask_app = Flask(_name_)
 app = WsgiToAsgi(flask_app)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
@@ -71,11 +71,12 @@ async def send_telegram_message(context, chat_id, message, business_connection_i
     try:
         if business_connection_id:
             await context.bot.send_message(chat_id=chat_id, text=message, business_connection_id=business_connection_id)
+            logger.info(f"📤 [Telegram] تم إرسال رسالة باسم الحساب التجاري للعميل {chat_id}.")
         else:
             await context.bot.send_message(chat_id=chat_id, text=message)
-        logger.info(f"\ud83d\udce4 [Telegram] \u062a\u0645 \u0625\u0631\u0633\u0627\u0644 \u0631\u0633\u0627\u0644\u0629 \u0644\u0644\u0639\u0645\u064a\u0644 {chat_id}.")
+            logger.info(f"📤 [Telegram] تم إرسال رسالة من البوت العادي للعميل {chat_id}.")
     except Exception as e:
-        logger.error(f"\u274c [Telegram] \u062e\u0637\u0623 \u0623\u062b\u0646\u0627\u0621 \u0627\u0644\u0625\u0631\u0633\u0627\u0644: {e}")
+        logger.error(f"❌ [Telegram] خطأ أثناء الإرسال: {e}")
 
 def ask_assistant(content, sender_id, name=""):
     session = get_session(sender_id)
@@ -103,25 +104,30 @@ def ask_assistant(content, sender_id, name=""):
             session["history"] = session["history"][-10:]
             save_session(sender_id, session)
             return reply
-        return "\u26a0 \u062d\u062f\u062b \u062e\u0637\u0623 \u0641\u064a \u0627\u0644\u0645\u0633\u0627\u0639\u062f، \u062d\u0627\u0648\u0644 \u0644\u0627\u062d\u0642\u064b\u0627."
+        return "⚠ حدث خطأ في المساعد، حاول لاحقًا."
 
 telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
 async def start_command(update, context):
-    await update.message.reply_text(f"\u0645\u0631\u062d\u0628\u0627ً {update.effective_user.first_name}!")
+    await update.message.reply_text(f"مرحباً {update.effective_user.first_name}!")
 
 async def handle_telegram_message(update, context):
     message = update.message or update.business_message
     if not message:
         return
+
     chat_id = message.chat.id
     user_name = message.from_user.first_name
-    business_id = getattr(update, "business_connection_id", None)
+    business_id = None
+
+    # استخراج business_connection_id من message وليس update
+    if hasattr(message, "business_connection_id"):
+        business_id = message.business_connection_id
 
     logger.info("========== تحديث جديد ==========")
-    logger.info(f"\ud83d\udd0d chat_id: {chat_id}, name: {user_name}")
-    logger.info(f"\ud83d\udd39 business_connection_id: {business_id}")
-    logger.info("\ud83d\udd39 كل بيانات التحديث: \n" + json.dumps(update.to_dict(), indent=2, ensure_ascii=False))
+    logger.info(f"🔍 chat_id: {chat_id}, name: {user_name}")
+    logger.info(f"🔹 business_connection_id: {business_id}")
+    logger.info("🔹 كل بيانات التحديث:\n" + json.dumps(update.to_dict(), indent=2, ensure_ascii=False))
 
     await context.bot.send_chat_action(chat_id=chat_id, action=telegram.constants.ChatAction.TYPING)
 
@@ -130,6 +136,7 @@ async def handle_telegram_message(update, context):
     session["follow_up_sent"] = 0
     session["follow_up_status"] = "responded"
     save_session(chat_id, session)
+
     if message.text:
         reply = ask_assistant(message.text, chat_id, user_name)
         await send_telegram_message(context, chat_id, reply, business_connection_id=business_id)
