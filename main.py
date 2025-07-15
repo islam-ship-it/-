@@ -2,7 +2,6 @@ import os
 import time
 import json
 import requests
-import threading
 import asyncio
 import logging
 from flask import Flask, request, jsonify
@@ -25,6 +24,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# تحميل متغيرات البيئة
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -37,17 +37,19 @@ if not all([OPENAI_API_KEY, ASSISTANT_ID_PREMIUM, TELEGRAM_BOT_TOKEN, MONGO_URI]
     logger.critical("❌ خطأ: متغيرات البيئة ناقصة.")
     exit()
 
+# الاتصال بقاعدة البيانات
 client_db = MongoClient(MONGO_URI)
 db = client_db["multi_platform_bot"]
 sessions_collection = db["sessions"]
 
+# إعدادات التطبيقات
 flask_app = Flask(__name__)
 app = WsgiToAsgi(flask_app)
 client = OpenAI(api_key=OPENAI_API_KEY)
-
 telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-# تخزين الجلسة
+# --------------------------- #
+# جلسات المستخدمين
 def get_session(user_id):
     uid = str(user_id)
     session = sessions_collection.find_one({"_id": uid})
@@ -58,7 +60,8 @@ def get_session(user_id):
 def save_session(user_id, session):
     sessions_collection.replace_one({"_id": str(user_id)}, session, upsert=True)
 
-# إرسال من الحساب التجاري
+# --------------------------- #
+# إرسال رد من الحساب التجاري
 def send_business_reply(text, business_connection_id):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -72,55 +75,110 @@ def send_business_reply(text, business_connection_id):
     except Exception as e:
         logger.error(f"❌ فشل إرسال من الحساب التجاري: {e}")
 
-# المحادثة مع المساعد
+# --------------------------- #
+# سؤال المساعد
 def ask_assistant(content, sender_id):
     session = get_session(sender_id)
     if not session.get("thread_id"):
         thread = client.beta.threads.create()
         session["thread_id"] = thread.id
-    client.beta.threads.messages.create(thread_id=session["thread_id"], role="user", content=[{"type": "text", "text": content}])
-    run = client.beta.threads.runs.create(thread_id=session["thread_id"], assistant_id=ASSISTANT_ID_PREMIUM)
+
+    client.beta.threads.messages.create(
+        thread_id=session["thread_id"],
+        role="user",
+        content=[{"type": "text", "text": content}]
+    )
+
+    run = client.beta.threads.runs.create(
+        thread_id=session["thread_id"],
+        assistant_id=ASSISTANT_ID_PREMIUM
+    )
+
     while run.status in ["queued", "in_progress"]:
         time.sleep(1)
-        run = client.beta.threads.runs.retrieve(thread_id=session["thread_id"], run_id=run.id)
+        run = client.beta.threads.runs.retrieve(
+            thread_id=session["thread_id"],
+            run_id=run.id
+        )
+
     if run.status == "completed":
         messages = client.beta.threads.messages.list(thread_id=session["thread_id"])
         reply = messages.data[0].content[0].text.value.strip()
         save_session(sender_id, session)
         return reply
+
     return "⚠ حدث خطأ أثناء معالجة رد المساعد."
 
+# --------------------------- #
 # معالجة رسائل تيليجرام
 async def handle_telegram_message(update, context):
     msg = update.business_message or update.message
-    if not msg:
+    if not msg or not msg.chat or not msg.chat.id:
+        logger.warning("🚫 لم يتم العثور على chat_id أو الرسالة غير صالحة.")
         return
+
     chat_id = msg.chat.id
     business_connection_id = getattr(update.business_message, 'business_connection_id', None)
     text = msg.text or ""
-    reply = ask_assistant(text, chat_id)
+
+    try:
+        reply = ask_assistant(text, chat_id)
+        if not reply:
+            reply = "❌ لم يتم توليد رد من المساعد."
+    except Exception as e:
+        logger.error(f"⚠️ فشل في توليد رد من المساعد: {e}")
+        reply = "⚠️ حدث خطأ أثناء توليد الرد."
+
     if business_connection_id:
         send_business_reply(reply, business_connection_id)
     else:
-        await context.bot.send_message(chat_id=chat_id, text=reply)
+        try:
+            await context.bot.send_message(chat_id=chat_id, text=reply)
+        except Exception as e:
+            logger.error(f"❌ فشل إرسال الرد عبر تيليجرام: {e}")
 
-# إعداد Webhook تيليجرام
+# --------------------------- #
+# نقطة استقبال Webhook من تيليجرام
 @flask_app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
-async def telegram_webhook_handler():
+def telegram_webhook_handler():
     update_data = request.get_json()
-    await telegram_app.process_update(telegram.Update.de_json(update_data, telegram_app.bot))
+
+    async def process_update_async():
+        try:
+            await telegram_app.process_update(
+                telegram.Update.de_json(update_data, telegram_app.bot)
+            )
+        except Exception as e:
+            logger.error(f"❌ خطأ أثناء معالجة التحديث من تيليجرام: {e}")
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.create_task(process_update_async())
+        else:
+            asyncio.run(process_update_async())
+    except RuntimeError:
+        asyncio.run(process_update_async())
+
     return jsonify({"status": "ok"})
 
+# --------------------------- #
+# صفحة الفحص الرئيسية
 @flask_app.route("/")
 def home():
     return "✅ البوت يعمل."
 
+# --------------------------- #
+# ربط Handlers
 telegram_app.add_handler(MessageHandler(filters.ALL, handle_telegram_message))
 
+# إعداد Webhook وقت التشغيل
 async def setup():
     if RENDER_EXTERNAL_HOSTNAME:
         await telegram_app.initialize()
-        await telegram_app.bot.set_webhook(url=f"https://{RENDER_EXTERNAL_HOSTNAME}/{TELEGRAM_BOT_TOKEN}")
+        await telegram_app.bot.set_webhook(
+            url=f"https://{RENDER_EXTERNAL_HOSTNAME}/{TELEGRAM_BOT_TOKEN}"
+        )
 
 try:
     loop = asyncio.get_event_loop()
@@ -131,8 +189,12 @@ try:
 except Exception as e:
     logger.critical(f"❌ فشل إعداد Webhook: {e}")
 
+# --------------------------- #
+# بدء الجدولة الخلفية
 scheduler = BackgroundScheduler()
 scheduler.start()
 
+# --------------------------- #
+# تشغيل التطبيق
 if __name__ == "__main__":
-    flask_app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=True)
+    flask_app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=False)
