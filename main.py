@@ -160,7 +160,7 @@ def ask_assistant(content, sender_id, name=""):
 def process_whatsapp_messages(sender, name):
     sender_str = str(sender)
     with client_processing_locks.setdefault(sender_str, threading.Lock()):
-        time.sleep(8)
+        time.sleep(12)
         if not pending_messages.get(sender_str):
             timers.pop(sender_str, None)
             return
