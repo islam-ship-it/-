@@ -5,7 +5,6 @@ import requests
 import threading
 import asyncio
 import logging
-import queue
 from flask import Flask, request, jsonify
 from asgiref.wsgi import WsgiToAsgi
 from openai import OpenAI
@@ -16,11 +15,15 @@ from dotenv import load_dotenv
 import telegram
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
-# إعداد اللوج
+# ==============================================================================
+# إعداد نظام التسجيل (Logging)
+# ==============================================================================
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler()])
 logger = logging.getLogger(__name__)
 
-# تحميل البيئة
+# ==============================================================================
+# تحميل متغيرات البيئة
+# ==============================================================================
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ASSISTANT_ID_PREMIUM = os.getenv("ASSISTANT_ID_PREMIUM")
@@ -31,7 +34,9 @@ CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 
-# الاتصال بقاعدة البيانات
+# ==============================================================================
+# إعدادات قاعدة البيانات (MongoDB)
+# ==============================================================================
 try:
     client_db = MongoClient(MONGO_URI)
     db = client_db["multi_platform_bot"]
@@ -41,17 +46,24 @@ except Exception as e:
     logger.critical(f"❌ فشل الاتصال بقاعدة البيانات: {e}")
     exit()
 
-# Flask و OpenAI
+# ==============================================================================
+# إعداد تطبيق Flask وعميل OpenAI
+# ==============================================================================
 flask_app = Flask(__name__)
 app = WsgiToAsgi(flask_app)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# متغيرات عامة
+# ==============================================================================
+# متغيرات عالمية
+# ==============================================================================
+pending_messages = {}
+timers = {}
 thread_locks = {}
 client_processing_locks = {}
-whatsapp_queue = queue.Queue()
 
-# إدارة الجلسات
+# ==============================================================================
+# دوال إدارة الجلسات (مشتركة)
+# ==============================================================================
 def get_session(user_id):
     user_id_str = str(user_id)
     session = sessions_collection.find_one({"_id": user_id_str})
@@ -69,7 +81,9 @@ def save_session(user_id, session_data):
     session_data["_id"] = user_id_str
     sessions_collection.replace_one({"_id": user_id_str}, session_data, upsert=True)
 
-# إرسال واتساب
+# ==============================================================================
+# دوال إرسال الرسائل
+# ==============================================================================
 def send_whatsapp_message(phone, message):
     url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
     headers = {"Content-Type": "application/json", "Client-Token": CLIENT_TOKEN}
@@ -81,7 +95,7 @@ def send_whatsapp_message(phone, message):
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ [WhatsApp] خطأ أثناء إرسال الرسالة عبر ZAPI: {e}")
 
-# إرسال تيليجرام
+# --- دالة إرسال تيليجرام الناجحة ---
 async def send_telegram_message(context, chat_id, message, business_connection_id=None):
     try:
         if business_connection_id:
@@ -92,9 +106,11 @@ async def send_telegram_message(context, chat_id, message, business_connection_i
     except Exception as e:
         logger.error(f"❌ Telegram send error: {e}")
 
-# تحويل الصوت
+# ==============================================================================
+# دوال مشتركة (تحويل الصوت، التفاعل مع المساعد)
+# ==============================================================================
 def transcribe_audio(audio_url, file_format="ogg"):
-    logger.info(f"🎙 محاولة تحميل وتحويل الصوت من: {audio_url}")
+    logger.info(f"🎙️ محاولة تحميل وتحويل الصوت من: {audio_url}")
     try:
         audio_response = requests.get(audio_url, stream=True)
         audio_response.raise_for_status()
@@ -110,7 +126,6 @@ def transcribe_audio(audio_url, file_format="ogg"):
         logger.error(f"❌ خطأ أثناء تحويل الصوت إلى نص: {e}")
         return None
 
-# التفاعل مع المساعد
 def ask_assistant(content, sender_id, name=""):
     session = get_session(sender_id)
     if name and not session.get("name"):
@@ -137,43 +152,34 @@ def ask_assistant(content, sender_id, name=""):
             session["history"] = session["history"][-10:]
             save_session(sender_id, session)
             return reply
-        return "⚠ حصل خطأ، جرب تاني."
+        return "⚠️ حصل خطأ، جرب تاني."
 
-# دالة معالجة طابور واتساب
-def process_whatsapp_queue():
-    while True:
-        if not whatsapp_queue.empty():
-            item = whatsapp_queue.get()
-            sender = item["sender"]
-            name = item["name"]
-            msg = item["msg"]
-            image_url = item["image_url"]
-            audio_url = item["audio_url"]
-            caption = item["caption"]
+# ==============================================================================
+# منطق WhatsApp (Flask Webhook) - بدون تغيير
+# ==============================================================================
+def process_whatsapp_messages(sender, name):
+    sender_str = str(sender)
+    with client_processing_locks.setdefault(sender_str, threading.Lock()):
+        time.sleep(15)
+        if not pending_messages.get(sender_str):
+            timers.pop(sender_str, None)
+            return
 
-            logger.info(f"🛠 [QUEUE] جاري معالجة رسالة من {sender}")
+        combined_text = "\n".join(pending_messages[sender_str])
+        reply = ask_assistant(combined_text, sender_str, name)
 
-            reply = None
-            if audio_url:
-                transcribed_text = transcribe_audio(audio_url)
-                if transcribed_text:
-                    reply = ask_assistant(f"رسالة صوتية من العميل: {transcribed_text}", sender, name)
-            elif image_url:
-                content = [{"type": "image_url", "image_url": {"url": image_url}}]
-                if caption:
-                    content.append({"type": "text", "text": f"تعليق على الصورة: {caption}"})
-                reply = ask_assistant(content, sender, name)
-            elif msg:
-                reply = ask_assistant(msg, sender, name)
+        # ✅ تأخير ثابت قبل الإرسال لحماية الرقم من الحظر
+        time.sleep(3)
 
-            if reply:
-                send_whatsapp_message(sender, reply)
+        send_whatsapp_message(sender_str, reply)
 
-            time.sleep(2)
-        else:
-            time.sleep(1)
+        # ✅ تأخير إضافي اختياري بعد الإرسال
+        time.sleep(1)
 
-# Webhook واتساب
+        # تفريغ الرسائل المؤقتة
+        pending_messages[sender_str] = []
+        timers.pop(sender_str, None)
+
 @flask_app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
@@ -187,20 +193,29 @@ def webhook():
     msg = data.get("text", {}).get("message")
     image_url = data.get("image", {}).get("imageUrl")
     audio_url = data.get("audio", {}).get("audioUrl")
-    caption = data.get("image", {}).get("caption", "")
+    if audio_url:
+        transcribed_text = transcribe_audio(audio_url)
+        if transcribed_text:
+            reply = ask_assistant(f"رسالة صوتية من العميل: {transcribed_text}", sender, name)
+            send_whatsapp_message(sender, reply)
+    elif image_url:
+        caption = data.get("image", {}).get("caption", "")
+        content = [{"type": "image_url", "image_url": {"url": image_url}}]
+        if caption: content.append({"type": "text", "text": f"تعليق على الصورة: {caption}"})
+        reply = ask_assistant(content, sender, name)
+        send_whatsapp_message(sender, reply)
+    elif msg:
+        sender_str = str(sender)
+        if sender_str not in pending_messages: pending_messages[sender_str] = []
+        pending_messages[sender_str].append(msg)
+        if sender_str not in timers:
+            timers[sender_str] = threading.Thread(target=process_whatsapp_messages, args=(sender_str, name))
+            timers[sender_str].start()
+    return jsonify({"status": "received"}), 200
 
-    whatsapp_queue.put({
-        "sender": sender,
-        "name": name,
-        "msg": msg,
-        "image_url": image_url,
-        "caption": caption,
-        "audio_url": audio_url
-    })
-    logger.info(f"📥 [QUEUE] أضيفت رسالة من {sender} إلى الطابور.")
-    return jsonify({"status": "queued"}), 200
-
-# Telegram
+# ==============================================================================
+# منطق Telegram (Webhook) - الحل النهائي والناجح
+# ==============================================================================
 telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
 async def start_command(update, context):
@@ -212,31 +227,47 @@ async def handle_telegram_message(update, context):
         return
     chat_id = message.chat.id
     user_name = message.from_user.first_name
-    business_id = getattr(update.business_message, "business_connection_id", None) if hasattr(update, "business_message") else None
+
+    business_id = None
+    if hasattr(update, "business_message") and update.business_message:
+        business_id = getattr(update.business_message, "business_connection_id", None)
+
+    logger.info("========== تحديث جديد تليجرام ==========")
+    logger.info(f"🔍 chat_id: {chat_id}, name: {user_name}")
+    logger.info(f"🔗 business_connection_id: {business_id}")
+    logger.info("📦 full update:\n" + json.dumps(update.to_dict(), indent=2, ensure_ascii=False))
+
     try:
         await context.bot.send_chat_action(chat_id=chat_id, action=telegram.constants.ChatAction.TYPING, business_connection_id=business_id)
     except Exception as e:
-        logger.warning(f"⚠ لم يتمكن من إرسال chat action: {e}")
+        logger.warning(f"⚠️ لم يتمكن من إرسال chat action: {e}")
+
     session = get_session(chat_id)
     session["last_message_time"] = datetime.utcnow().isoformat()
     save_session(chat_id, session)
+
     reply_text = ""
     content_for_assistant = ""
+
     if message.text:
         content_for_assistant = message.text
     elif message.voice:
         voice_file = await message.voice.get_file()
         transcribed_text = transcribe_audio(voice_file.file_path)
-        content_for_assistant = f"رسالة صوتية من العميل: {transcribed_text}" if transcribed_text else ""
+        if transcribed_text:
+            content_for_assistant = f"رسالة صوتية من العميل: {transcribed_text}"
+        else:
+            reply_text = "عذراً، لم أتمكن من فهم رسالتك الصوتية."
     elif message.photo:
         photo_file = await message.photo[-1].get_file()
         caption = message.caption or ""
         content_list = [{"type": "image_url", "image_url": {"url": photo_file.file_path}}]
-        if caption:
-            content_list.append({"type": "text", "text": f"تعليق على الصورة: {caption}"})
+        if caption: content_list.append({"type": "text", "text": f"تعليق على الصورة: {caption}"})
         content_for_assistant = content_list
+
     if content_for_assistant and not reply_text:
         reply_text = ask_assistant(content_for_assistant, chat_id, user_name)
+
     if reply_text:
         await send_telegram_message(context, chat_id, reply_text, business_connection_id=business_id)
 
@@ -249,6 +280,9 @@ async def telegram_webhook_handler():
     await telegram_app.process_update(telegram.Update.de_json(data, telegram_app.bot))
     return jsonify({"status": "ok"})
 
+# ==============================================================================
+# الإعداد والتشغيل
+# ==============================================================================
 @flask_app.route("/")
 def home():
     return "✅ Bot is running"
@@ -258,7 +292,7 @@ async def setup_telegram():
     if host:
         await telegram_app.initialize()
         webhook_url = f"https://{host}/{TELEGRAM_BOT_TOKEN}"
-        await telegram_app.bot.set_webhook(url=webhook_url, allowed_updates=telegram.Update.ALL_TYPES)
+        await telegram_app.bot.set_webhook(url=webhook_url, allowed_updates=telegram.Update.ALL_TYPES )
         logger.info(f"✅ تم إعداد Telegram Webhook على: {webhook_url}")
 
 try:
@@ -270,10 +304,6 @@ try:
 except Exception as e:
     logger.critical(f"❌ Telegram setup failed: {e}")
 
-# شغّل طابور واتساب
-threading.Thread(target=process_whatsapp_queue, daemon=True).start()
-
-# جدولة
 scheduler = BackgroundScheduler()
 scheduler.start()
 
