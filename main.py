@@ -5,8 +5,8 @@ import requests
 import threading
 import asyncio
 import logging
-import random  # ##### تعديل #####: استيراد مكتبة random
-import queue   # ##### تعديل #####: استيراد مكتبة queue
+import random
+import queue
 
 from flask import Flask, request, jsonify
 from asgiref.wsgi import WsgiToAsgi
@@ -63,7 +63,7 @@ pending_messages = {}
 timers = {}
 thread_locks = {}
 client_processing_locks = {}
-whatsapp_message_queue = queue.Queue() # ##### تعديل #####: إنشاء طابور انتظار لرسائل واتساب
+whatsapp_message_queue = queue.Queue()
 
 # ==============================================================================
 # دوال إدارة الجلسات (مشتركة)
@@ -86,45 +86,41 @@ def save_session(user_id, session_data):
     sessions_collection.replace_one({"_id": user_id_str}, session_data, upsert=True)
 
 # ==============================================================================
-# ##### تعديل #####: نظام إرسال رسائل واتساب عبر طابور الانتظار
+# ##### تعديل #####: نظام إرسال رسائل واتساب عبر مهمة مجدولة
 # ==============================================================================
-def whatsapp_sender_worker():
+def process_whatsapp_queue():
     """
-    هذه الدالة تعمل في خيط منفصل، تسحب الرسائل من الطابور وترسلها
-    مع تأخير عشوائي بين كل رسالة وأخرى.
+    هذه الدالة يتم استدعاؤها بشكل دوري بواسطة APScheduler.
+    تسحب رسالة واحدة من الطابور (إذا لم يكن فارغًا) وترسلها.
     """
-    while True:
+    if not whatsapp_message_queue.empty():
         try:
-            # انتظر حتى تتوفر رسالة في الطابور
             phone, message = whatsapp_message_queue.get()
+            logger.info(f"Processing message for {phone} from queue.")
 
-            # تأخير عشوائي بين 5 و 12 ثانية لمحاكاة السلوك البشري
-            delay = random.randint(5, 12)
-            logger.info(f"⏳ [Sender Worker] انتظار لمدة {delay} ثانية قبل إرسال الرسالة التالية...")
-            time.sleep(delay)
-
-            # إرسال الرسالة الفعلية
             url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
             headers = {"Content-Type": "application/json", "Client-Token": CLIENT_TOKEN}
             payload = {"phone": phone, "message": message}
-            
+
             try:
                 response = requests.post(url, headers=headers, json=payload)
                 logger.info(f"📤 [WhatsApp] تم إرسال رسالة للعميل {phone}، الحالة: {response.status_code}")
                 response.raise_for_status()
             except requests.exceptions.RequestException as e:
                 logger.error(f"❌ [WhatsApp] خطأ أثناء إرسال الرسالة عبر ZAPI: {e}")
-            
-            # إعلام الطابور بأن المهمة قد اكتملت
+                # في حالة الفشل، يمكن إعادة الرسالة إلى الطابور
+                # whatsapp_message_queue.put((phone, message))
+
             whatsapp_message_queue.task_done()
-
+        except queue.Empty:
+            # هذا طبيعي، يعني أن الطابور فارغ
+            pass
         except Exception as e:
-            logger.error(f"❌ [Sender Worker] حدث خطأ غير متوقع: {e}")
-
+            logger.error(f"❌ [Queue Processor] حدث خطأ غير متوقع: {e}")
 
 def send_whatsapp_message(phone, message):
     """
-    هذه الدالة الآن لا ترسل الرسالة مباشرة، بل تضعها في طابور الانتظار.
+    هذه الدالة تضع الرسالة في طابور الانتظار.
     """
     logger.info(f"📥 [Queue] إضافة رسالة إلى طابور الإرسال للرقم: {phone}")
     whatsapp_message_queue.put((phone, message))
@@ -189,12 +185,11 @@ def ask_assistant(content, sender_id, name=""):
         return "⚠️ حصل خطأ، جرب تاني."
 
 # ==============================================================================
-# منطق WhatsApp (Flask Webhook) - مع التعديل
+# منطق WhatsApp (Flask Webhook) - بدون تغيير
 # ==============================================================================
 def process_whatsapp_messages(sender, name):
     sender_str = str(sender)
     with client_processing_locks.setdefault(sender_str, threading.Lock()):
-        # انتظر 15 ثانية لتجميع الرسائل من نفس المستخدم
         time.sleep(15)
         if not pending_messages.get(sender_str):
             timers.pop(sender_str, None)
@@ -202,11 +197,8 @@ def process_whatsapp_messages(sender, name):
 
         combined_text = "\n".join(pending_messages[sender_str])
         reply = ask_assistant(combined_text, sender_str, name)
-
-        # ##### تعديل #####: ضع الرد في طابور الإرسال بدلاً من إرساله مباشرة
         send_whatsapp_message(sender_str, reply)
 
-        # تفريغ الرسائل المؤقتة
         pending_messages[sender_str] = []
         timers.pop(sender_str, None)
 
@@ -224,7 +216,6 @@ def webhook():
     image_url = data.get("image", {}).get("imageUrl")
     audio_url = data.get("audio", {}).get("audioUrl")
     
-    # ##### تعديل #####: منطق الرسائل الفورية (صوت وصورة) يضع الرد في الطابور أيضًا
     if audio_url:
         transcribed_text = transcribe_audio(audio_url)
         if transcribed_text:
@@ -256,51 +247,34 @@ async def start_command(update, context):
 
 async def handle_telegram_message(update, context):
     message = update.message or update.business_message
-    if not message:
-        return
+    if not message: return
     chat_id = message.chat.id
     user_name = message.from_user.first_name
-
-    business_id = None
-    if hasattr(update, "business_message") and update.business_message:
-        business_id = getattr(update.business_message, "business_connection_id", None)
-
-    logger.info("========== تحديث جديد تليجرام ==========")
-    logger.info(f"🔍 chat_id: {chat_id}, name: {user_name}")
-    logger.info(f"🔗 business_connection_id: {business_id}")
-    logger.info("📦 full update:\n" + json.dumps(update.to_dict(), indent=2, ensure_ascii=False))
-
+    business_id = getattr(update.business_message, "business_connection_id", None) if hasattr(update, "business_message") and update.business_message else None
+    logger.info(f"========== تحديث جديد تليجرام | Chat ID: {chat_id}, Name: {user_name}, Business ID: {business_id} ==========")
     try:
         await context.bot.send_chat_action(chat_id=chat_id, action=telegram.constants.ChatAction.TYPING, business_connection_id=business_id)
     except Exception as e:
         logger.warning(f"⚠️ لم يتمكن من إرسال chat action: {e}")
-
     session = get_session(chat_id)
     session["last_message_time"] = datetime.utcnow().isoformat()
     save_session(chat_id, session)
-
-    reply_text = ""
-    content_for_assistant = ""
-
+    reply_text, content_for_assistant = "", ""
     if message.text:
         content_for_assistant = message.text
     elif message.voice:
         voice_file = await message.voice.get_file()
         transcribed_text = transcribe_audio(voice_file.file_path)
-        if transcribed_text:
-            content_for_assistant = f"رسالة صوتية من العميل: {transcribed_text}"
-        else:
-            reply_text = "عذراً، لم أتمكن من فهم رسالتك الصوتية."
+        content_for_assistant = f"رسالة صوتية من العميل: {transcribed_text}" if transcribed_text else ""
+        if not content_for_assistant: reply_text = "عذراً، لم أتمكن من فهم رسالتك الصوتية."
     elif message.photo:
         photo_file = await message.photo[-1].get_file()
         caption = message.caption or ""
         content_list = [{"type": "image_url", "image_url": {"url": photo_file.file_path}}]
         if caption: content_list.append({"type": "text", "text": f"تعليق على الصورة: {caption}"})
         content_for_assistant = content_list
-
     if content_for_assistant and not reply_text:
         reply_text = ask_assistant(content_for_assistant, chat_id, user_name)
-
     if reply_text:
         await send_telegram_message(context, chat_id, reply_text, business_connection_id=business_id)
 
@@ -337,16 +311,24 @@ try:
 except Exception as e:
     logger.critical(f"❌ Telegram setup failed: {e}")
 
+# ##### تعديل #####: إعداد وتشغيل APScheduler لمعالجة طابور الرسائل
 scheduler = BackgroundScheduler()
+# أضف المهمة التي ستعمل كل 10 ثوانٍ مع تفاوت عشوائي يصل إلى 5 ثوانٍ
+scheduler.add_job(
+    func=process_whatsapp_queue,
+    trigger="interval",
+    seconds=10,
+    jitter=5, # هذا يجعل الفاصل الزمني غير ثابت تمامًا، مما يساعد على محاكاة السلوك البشري
+    id="whatsapp_queue_processor",
+    name="Process the WhatsApp message queue",
+    replace_existing=True
+)
 scheduler.start()
+logger.info("🚀 تم تشغيل مجدول المهام (APScheduler) لمعالجة طابور رسائل واتساب.")
+
 
 if __name__ == "__main__":
-    # ##### تعديل #####: تشغيل خيط عامل الإرسال
-    sender_thread = threading.Thread(target=whatsapp_sender_worker, daemon=True)
-    sender_thread.start()
-    logger.info("🚀 [Sender Worker] تم تشغيل عامل إرسال رسائل واتساب.")
-    
+    # لم نعد بحاجة إلى تشغيل خيط منفصل هنا
     port = int(os.environ.get("PORT", 5000))
-    # ملاحظة: عند استخدام debug=True، قد يتم تشغيل الكود مرتين، مما قد يؤدي إلى تشغيل خيطين.
-    # في بيئة الإنتاج (production)، يجب ضبط debug=False.
+    # استخدم debug=False دائمًا في بيئة الإنتاج
     flask_app.run(host="0.0.0.0", port=port, debug=False)
