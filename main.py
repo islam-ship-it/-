@@ -3,10 +3,7 @@ import time
 import json
 import requests
 import threading
-import asyncio
-import logging
-import random
-# لا حاجة لمكتبة queue بعد الآن
+
 # import queue
 
 from flask import Flask, request, jsonify
