@@ -6,9 +6,6 @@ import threading
 import asyncio
 import logging
 import random
-# لا حاجة لمكتبة queue بعد الآن
-# import queue
-
 from flask import Flask, request, jsonify
 from asgiref.wsgi import WsgiToAsgi
 from openai import OpenAI
@@ -19,11 +16,10 @@ from dotenv import load_dotenv
 import telegram
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
-# ... (باقي إعداداتك كما هي) ...
+# --- الإعدادات ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler()])
 logger = logging.getLogger(__name__)
 load_dotenv()
-# ... (تحميل كل متغيرات البيئة) ...
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ASSISTANT_ID_PREMIUM = os.getenv("ASSISTANT_ID_PREMIUM")
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
@@ -33,35 +29,29 @@ CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 MONGO_URI = os.getenv("MONGO_URI")
 
-# ==============================================================================
-# إعدادات قاعدة البيانات (MongoDB)
-# ==============================================================================
+# --- قاعدة البيانات ---
 try:
     client_db = MongoClient(MONGO_URI)
     db = client_db["multi_platform_bot"]
     sessions_collection = db["sessions"]
-    # ##### تعديل #####: إنشاء collection جديد ليكون بمثابة طابور
     outgoing_collection = db["outgoing_whatsapp"]
     logger.info("✅ تم الاتصال بقاعدة البيانات وإعداد المجموعات بنجاح.")
 except Exception as e:
     logger.critical(f"❌ فشل الاتصال بقاعدة البيانات: {e}")
     exit()
 
-# ... (إعداد Flask و OpenAI كما هو) ...
+# --- إعدادات التطبيق ---
 flask_app = Flask(__name__)
 app = WsgiToAsgi(flask_app)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ==============================================================================
-# متغيرات عالمية (تم تبسيطها)
-# ==============================================================================
+# --- متغيرات عالمية ---
 pending_messages = {}
 timers = {}
 thread_locks = {}
 client_processing_locks = {}
-# لم نعد بحاجة إلى whatsapp_message_queue
 
-# ... (دوال get_session و save_session كما هي) ...
+# --- دوال إدارة الجلسات ---
 def get_session(user_id):
     user_id_str = str(user_id)
     session = sessions_collection.find_one({"_id": user_id_str})
@@ -79,21 +69,17 @@ def save_session(user_id, session_data):
     session_data["_id"] = user_id_str
     sessions_collection.replace_one({"_id": user_id_str}, session_data, upsert=True)
 
-# ==============================================================================
-# ##### تعديل جذري #####: نظام إرسال رسائل واتساب عبر قاعدة البيانات
-# ==============================================================================
+# --- نظام إرسال الرسائل عبر قاعدة البيانات ---
 def process_db_queue():
     """
     هذه الدالة يتم استدعاؤها بشكل دوري بواسطة APScheduler.
     تبحث عن رسالة واحدة في حالة 'pending' في قاعدة البيانات، ترسلها، ثم تحدث حالتها.
     """
     try:
-        # ابحث عن رسالة واحدة معلقة وقم بتحديث حالتها إلى 'processing' في خطوة واحدة (atomic)
-        # هذا يمنع العمال الآخرين من أخذ نفس الرسالة
         message_to_send = outgoing_collection.find_one_and_update(
             {"status": "pending"},
             {"$set": {"status": "processing", "processed_at": datetime.utcnow()}},
-            sort=[("created_at", 1)],  # خذ أقدم رسالة أولاً
+            sort=[("created_at", 1)],
             return_document=ReturnDocument.AFTER
         )
 
@@ -112,34 +98,32 @@ def process_db_queue():
                 response = requests.post(url, headers=headers, json=payload, timeout=20)
                 logger.info(f"✅ [ZAPI] تم إرسال الرسالة ({message_id}) بنجاح، الحالة: {response.status_code}")
                 response.raise_for_status()
-                # تحديث الحالة النهائية إلى 'sent'
                 outgoing_collection.update_one({"_id": message_id}, {"$set": {"status": "sent", "sent_at": datetime.utcnow()}})
             except requests.exceptions.RequestException as e:
                 logger.error(f"❌ [ZAPI] فشل إرسال الرسالة ({message_id}): {e}")
-                # إعادة الحالة إلى 'pending' لمحاولة أخرى لاحقًا
                 outgoing_collection.update_one({"_id": message_id}, {"$set": {"status": "pending", "error_count": message_to_send.get("error_count", 0) + 1}})
         else:
-            # هذا طبيعي، يعني أن الطابور (قاعدة البيانات) فارغ
-            logger.info("...[DB Queue] لا توجد رسائل معلقة لإرسالها...")
+            # هذا السجل يظهر كثيرًا، يمكن جعله debug بدلاً من info إذا أردت تقليل الضوضاء
+            # logger.debug("...[DB Queue] لا توجد رسائل معلقة لإرسالها...")
+            pass
             
     except Exception as e:
         logger.error(f"❌ [DB Queue Processor] حدث خطأ جسيم: {e}")
 
 def send_whatsapp_message(phone, message):
     """
-    هذه الدالة الآن تقوم بإدراج الرسالة في قاعدة البيانات (collection: outgoing_whatsapp).
+    هذه الدالة تقوم بإدراج الرسالة في قاعدة البيانات ليتم إرسالها لاحقًا.
     """
     logger.info(f"📥 [DB Queue] إضافة رسالة إلى قاعدة البيانات للرقم: {phone}")
     outgoing_collection.insert_one({
         "phone": str(phone),
         "message": message,
-        "status": "pending", # الحالات الممكنة: pending, processing, sent, failed
+        "status": "pending",
         "created_at": datetime.utcnow(),
         "error_count": 0
     })
 
-# ... (باقي الدوال: send_telegram_message, transcribe_audio, ask_assistant, process_whatsapp_messages, webhook, ومنطق تيليجرام بالكامل يبقى كما هو) ...
-# ... (لا تغيير في هذه الدوال) ...
+# --- الدوال المشتركة ---
 async def send_telegram_message(context, chat_id, message, business_connection_id=None):
     try:
         if business_connection_id:
@@ -195,6 +179,7 @@ def ask_assistant(content, sender_id, name=""):
             return reply
         return "⚠️ حصل خطأ، جرب تاني."
 
+# --- منطق واتساب ---
 def process_whatsapp_messages(sender, name):
     sender_str = str(sender)
     with client_processing_locks.setdefault(sender_str, threading.Lock()):
@@ -202,11 +187,9 @@ def process_whatsapp_messages(sender, name):
         if not pending_messages.get(sender_str):
             timers.pop(sender_str, None)
             return
-
         combined_text = "\n".join(pending_messages[sender_str])
         reply = ask_assistant(combined_text, sender_str, name)
         send_whatsapp_message(sender_str, reply)
-
         pending_messages[sender_str] = []
         timers.pop(sender_str, None)
 
@@ -223,7 +206,6 @@ def webhook():
     msg = data.get("text", {}).get("message")
     image_url = data.get("image", {}).get("imageUrl")
     audio_url = data.get("audio", {}).get("audioUrl")
-    
     if audio_url:
         transcribed_text = transcribe_audio(audio_url)
         if transcribed_text:
@@ -242,14 +224,12 @@ def webhook():
         if sender_str not in timers:
             timers[sender_str] = threading.Thread(target=process_whatsapp_messages, args=(sender_str, name))
             timers[sender_str].start()
-            
     return jsonify({"status": "received"}), 200
 
+# --- منطق تيليجرام ---
 telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
 async def start_command(update, context):
     await update.message.reply_text(f"أهلاً {update.effective_user.first_name}!")
-
 async def handle_telegram_message(update, context):
     message = update.message or update.business_message
     if not message: return
@@ -282,16 +262,15 @@ async def handle_telegram_message(update, context):
         reply_text = ask_assistant(content_for_assistant, chat_id, user_name)
     if reply_text:
         await send_telegram_message(context, chat_id, reply_text, business_connection_id=business_id)
-
 telegram_app.add_handler(CommandHandler("start", start_command))
 telegram_app.add_handler(MessageHandler(filters.ALL, handle_telegram_message))
-
 @flask_app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
 async def telegram_webhook_handler():
     data = request.get_json()
     await telegram_app.process_update(telegram.Update.de_json(data, telegram_app.bot))
     return jsonify({"status": "ok"})
 
+# --- الإعداد والتشغيل ---
 @flask_app.route("/")
 def home():
     return "✅ Bot is running"
@@ -301,19 +280,19 @@ async def setup_telegram():
     if host:
         await telegram_app.initialize()
         webhook_url = f"https://{host}/{TELEGRAM_BOT_TOKEN}"
-        await telegram_app.bot.set_webhook(url=webhook_url, allowed_updates=telegram.Update.ALL_TYPES  )
+        await telegram_app.bot.set_webhook(url=webhook_url, allowed_updates=telegram.Update.ALL_TYPES )
         logger.info(f"✅ تم إعداد Telegram Webhook على: {webhook_url}")
 
 # ==============================================================================
-# ##### تعديل #####: إعداد وتشغيل APScheduler لمعالجة الطابور من قاعدة البيانات
+# ##### هنا التعديل المطلوب #####
 # ==============================================================================
 scheduler = BackgroundScheduler(timezone="UTC")
-# اجعل المهمة تعمل كل 15 ثانية مع تفاوت عشوائي
+# اجعل المهمة تعمل كل 10 ثوانٍ مع تفاوت عشوائي بسيط (بين 8 و 12 ثانية)
 scheduler.add_job(
     func=process_db_queue,
     trigger="interval",
-    seconds=15,
-    jitter=5,
+    seconds=10,
+    jitter=2, # تفاوت ثانيتين (يجعل الوقت الفعلي بين 8 و 12 ثانية)
     id="db_queue_processor",
     name="Process the MongoDB message queue",
     replace_existing=True
@@ -321,7 +300,7 @@ scheduler.add_job(
 scheduler.start()
 logger.info("🚀 تم تشغيل مجدول المهام (APScheduler) لمعالجة طابور الرسائل من قاعدة البيانات.")
 
-# ... (تشغيل التطبيق كما هو) ...
+# --- التشغيل النهائي ---
 if __name__ == "__main__":
     try:
         loop = asyncio.get_event_loop()
@@ -332,8 +311,6 @@ if __name__ == "__main__":
     except Exception as e:
         logger.critical(f"❌ Telegram setup failed: {e}")
         
-    port = int(os.environ.get("PORT", 5000))
-    # لا تقم بتشغيل وضع التصحيح في الإنتاج
+    # عند النشر على Render، سيتم استخدام Gunicorn بدلاً من هذا السطر
+    # port = int(os.environ.get("PORT", 5000))
     # flask_app.run(host="0.0.0.0", port=port, debug=False)
-    # Gunicorn هو الذي سيقوم بتشغيل التطبيق، لذلك هذا السطر ليس ضروريًا عند النشر
-    # ولكن اتركه إذا كنت تختبر محليًا
