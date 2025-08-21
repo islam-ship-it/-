@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import os
 import time
 import json
@@ -115,14 +114,20 @@ def send_meta_whatsapp_message(phone, message):
         "Content-Type": "application/json",
     }
     payload = {
-        "messaging_product": "whatsapp",
+        "messaging_product": "whatsapp",  
+        "recipient_type": "individual",
         "to": phone,
+        "type": "text",
         "text": {"body": message},
     }
+
+    # نطبع البودي للمتابعة في اللوج
+    logger.info(f"📤 [Meta API] Payload: {json.dumps(payload, ensure_ascii=False)}")
+
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=20 )
+        response = requests.post(url, headers=headers, json=payload, timeout=20)
         response.raise_for_status()
-        logger.info(f"✅ [Meta API] تم إرسال الرسالة إلى {phone} بنجاح.")
+        logger.info(f"✅ [Meta API] تم إرسال الرسالة إلى {phone} بنجاح: {response.json()}")
         return True
     except requests.exceptions.RequestException as e:
         error_text = e.response.text if e.response else str(e)
