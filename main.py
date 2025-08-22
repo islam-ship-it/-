@@ -23,7 +23,6 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # --- مفاتيح API ---
-# (نفس قسم مفاتيح API كما هو)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ASSISTANT_ID_PREMIUM = os.getenv("ASSISTANT_ID_PREMIUM")
 MONGO_URI = os.getenv("MONGO_URI")
@@ -36,9 +35,7 @@ ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
 CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 
-
 # --- قاعدة البيانات ---
-# (نفس قسم قاعدة البيانات كما هو)
 try:
     client_db = MongoClient(MONGO_URI)
     db = client_db["multi_platform_bot"]
@@ -49,19 +46,17 @@ except Exception as e:
     logger.critical(f"❌ فشل الاتصال بقاعدة البيانات: {e}")
     exit()
 
-
 # --- إعدادات التطبيق ---
 flask_app = Flask(__name__)
 app = WsgiToAsgi(flask_app)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# --- متغيرات عالمية جديدة لتجميع الرسائل ---
-pending_whatsapp_messages = {}  # لتخزين الرسائل المعلقة لكل مستخدم
-whatsapp_timers = {}            # لتخزين المؤقتات لكل مستخدم
-processing_locks = {}           # لمنع معالجة نفس المستخدم في نفس الوقت
+# --- متغيرات عالمية لتجميع الرسائل ---
+pending_whatsapp_messages = {}
+whatsapp_timers = {}
+processing_locks = {}
 
-# --- دوال إدارة الجلسات وإرسال الرسائل ---
-# (كل الدوال من get_session حتى ask_assistant تبقى كما هي من الإصدار السابق)
+# --- دوال إدارة الجلسات ---
 def get_session(user_id):
     user_id_str = str(user_id)
     session = sessions_collection.find_one({"_id": user_id_str})
@@ -79,11 +74,12 @@ def save_session(user_id, session_data):
     session_data["_id"] = user_id_str
     sessions_collection.replace_one({"_id": user_id_str}, session_data, upsert=True)
 
+# --- دوال إرسال واتساب ---
 def send_meta_whatsapp_message(phone, message):
     url = f"https://graph.facebook.com/v19.0/{META_PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}", "Content-Type": "application/json"}
     payload = {"messaging_product": "whatsapp", "to": phone, "text": {"body": message}}
-    logger.info(f"📤 [Meta API] Preparing to send message to {phone}. Payload: {json.dumps(payload )}")
+    logger.info(f"📤 [Meta API] Preparing to send message to {phone}." )
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=20)
         response.raise_for_status()
@@ -94,6 +90,7 @@ def send_meta_whatsapp_message(phone, message):
         logger.error(f"❌ [Meta API] فشل إرسال الرسالة إلى {phone}: {error_text}")
         return False
 
+# --- الدوال المشتركة ---
 def download_meta_media(media_id):
     logger.info(f"⬇️ [Meta Media] Attempting to get URL for media_id: {media_id}")
     url = f"https://graph.facebook.com/v19.0/{media_id}/"
@@ -161,9 +158,6 @@ async def ask_assistant(content, sender_id, name=""):
 
 # --- دالة معالجة الرسائل المجمعة ---
 def process_batched_messages(sender_id, sender_name):
-    """
-    هذه الدالة يتم استدعاؤها بواسطة المؤقت بعد انتهاء فترة الانتظار.
-    """
     lock = processing_locks.setdefault(sender_id, threading.Lock())
     with lock:
         if sender_id not in pending_whatsapp_messages or not pending_whatsapp_messages[sender_id]:
@@ -171,25 +165,23 @@ def process_batched_messages(sender_id, sender_name):
 
         logger.info(f"⏰ Timer finished for {sender_id}. Processing {len(pending_whatsapp_messages[sender_id])} batched messages.")
         
-        # دمج كل الرسائل في محتوى واحد
         combined_content = "\n".join(pending_whatsapp_messages[sender_id])
         
-        # إرسال المحتوى المجمع إلى المساعد
+        logger.info(f"📝 Combined message for {sender_id}:\n--- START ---\n{combined_content}\n--- END ---")
+        
         reply_text = asyncio.run(ask_assistant(combined_content, sender_id, sender_name))
         
         if reply_text:
             send_meta_whatsapp_message(sender_id, reply_text)
         
-        # تنظيف الرسائل والمؤقت بعد المعالجة
         del pending_whatsapp_messages[sender_id]
         if sender_id in whatsapp_timers:
             del whatsapp_timers[sender_id]
 
-# --- منطق واتساب Meta Cloud API (مُعدّل لتجميع الرسائل) ---
+# --- منطق واتساب Meta Cloud API ---
 @flask_app.route("/meta_webhook", methods=["GET", "POST"])
 def meta_webhook():
     if request.method == "GET":
-        # نفس كود التحقق من الويب هوك
         if request.args.get("hub.mode") == "subscribe" and request.args.get("hub.challenge"):
             if not request.args.get("hub.verify_token") == META_VERIFY_TOKEN:
                 return "Verification token mismatch", 403
@@ -212,27 +204,24 @@ def meta_webhook():
                 sender_name = value.get("contacts", [{}])[0].get("profile", {}).get("name", "")
                 message_type = message.get("type")
 
-                # فقط الرسائل النصية سيتم تجميعها
                 if message_type == "text":
                     text_body = message.get("text", {}).get("body")
                     
-                    # إلغاء المؤقت القديم إذا كان موجودًا
+                    logger.info(f"💬 [WhatsApp] Received text from {sender_id}: '{text_body}'")
+
                     if sender_id in whatsapp_timers:
                         whatsapp_timers[sender_id].cancel()
 
-                    # إضافة الرسالة الجديدة إلى القائمة
                     if sender_id not in pending_whatsapp_messages:
                         pending_whatsapp_messages[sender_id] = []
                     pending_whatsapp_messages[sender_id].append(text_body)
                     logger.info(f"📥 Message from {sender_id} added to batch. Current batch size: {len(pending_whatsapp_messages[sender_id])}")
 
-                    # بدء مؤقت جديد
                     timer = threading.Timer(15.0, process_batched_messages, args=[sender_id, sender_name])
                     whatsapp_timers[sender_id] = timer
                     timer.start()
 
                 else:
-                    # معالجة الرسائل غير النصية (صور، صوت) فورًا
                     thread = threading.Thread(target=process_single_message, args=(data,))
                     thread.start()
 
@@ -242,9 +231,6 @@ def meta_webhook():
         return "OK", 200
 
 def process_single_message(data):
-    """
-    دالة لمعالجة الرسائل غير النصية (صور، صوت) بشكل فوري.
-    """
     try:
         entry = data.get("entry", [])[0]
         value = entry.get("changes", [])[0].get("value", {})
@@ -252,6 +238,8 @@ def process_single_message(data):
         sender_id = message.get("from")
         sender_name = value.get("contacts", [{}])[0].get("profile", {}).get("name", "")
         message_type = message.get("type")
+
+        logger.info(f"🖼️ [WhatsApp] Received non-text message of type '{message_type}' from {sender_id}")
 
         content_for_assistant, reply_text = None, None
 
@@ -295,9 +283,7 @@ def process_single_message(data):
     except Exception as e:
         logger.error(f"❌ [Single Message Processor] خطأ في معالجة الطلب: {e}", exc_info=True)
 
-
-# --- منطق تيليجرام وبقية الإعدادات ---
-# (لا تغيير هنا، استخدم نفس الكود من الإصدار السابق)
+# --- منطق تيليجرام ---
 if TELEGRAM_BOT_TOKEN:
     telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
@@ -310,38 +296,47 @@ if TELEGRAM_BOT_TOKEN:
         chat_id = message.chat.id
         user_name = message.from_user.first_name
         business_id = getattr(update.business_message, "business_connection_id", None) if hasattr(update, "business_message") and update.business_message else None
-        logger.info(f"📥 [Telegram] رسالة جديدة | Chat ID: {chat_id}, Name: {user_name}")
+        
         try:
             await context.bot.send_chat_action(chat_id=chat_id, action=telegram.constants.ChatAction.TYPING, business_connection_id=business_id)
         except Exception as e:
             logger.warning(f"⚠️ لم يتمكن من إرسال chat action: {e}")
+        
         session = get_session(chat_id)
         session["last_message_time"] = datetime.utcnow().isoformat()
         save_session(chat_id, session)
+        
         reply_text, content_for_assistant = "", None
         try:
             if message.text:
+                logger.info(f"💬 [Telegram] Received text from {chat_id}: '{message.text}'")
                 content_for_assistant = message.text
             elif message.voice:
+                logger.info(f"🎙️ [Telegram] Received voice message from {chat_id}")
                 voice_file = await message.voice.get_file()
                 voice_content = await voice_file.download_as_bytearray()
                 transcribed_text = transcribe_audio(bytes(voice_content))
                 if transcribed_text: content_for_assistant = f"رسالة صوتية من العميل: {transcribed_text}"
                 else: reply_text = "عذراً، لم أتمكن من فهم رسالتك الصوتية."
             elif message.photo:
+                logger.info(f"🖼️ [Telegram] Received photo from {chat_id}")
                 caption = message.caption or ""
                 content_for_assistant = "العميل أرسل صورة."
                 if caption: content_for_assistant += f" وكان التعليق عليها: \"{caption}\""
+            
             if content_for_assistant and not reply_text:
                 reply_text = await ask_assistant(content_for_assistant, chat_id, user_name)
+            
             if reply_text:
                 if business_id: await context.bot.send_message(chat_id=chat_id, text=reply_text, business_connection_id=business_id)
                 else: await context.bot.send_message(chat_id=chat_id, text=reply_text)
         except Exception as e:
             logger.error(f"❌ [Telegram Handler] حدث خطأ أثناء معالجة الرسالة: {e}", exc_info=True)
             await context.bot.send_message(chat_id=chat_id, text="عذرًا، حدث خطأ غير متوقع.", business_connection_id=business_id)
+    
     telegram_app.add_handler(CommandHandler("start", start_command))
     telegram_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_telegram_message))
+    
     @flask_app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
     async def telegram_webhook_handler():
         data = request.get_json()
@@ -349,13 +344,41 @@ if TELEGRAM_BOT_TOKEN:
         await telegram_app.process_update(update)
         return jsonify({"status": "ok"})
 
+# --- الإعداد والتشغيل ---
 @flask_app.route("/")
 def home():
     return "✅ Bot is running with Vision and Batching support"
 
-# (بقية كود الإعداد والتشغيل كما هو)
 def process_db_queue():
-    pass # يمكنك تركها فارغة إذا لم تعد تستخدم Z-API
+    """
+    دالة لمعالجة طابور رسائل Z-API القديم.
+    """
+    if not all([ZAPI_BASE_URL, ZAPI_INSTANCE_ID, ZAPI_TOKEN, CLIENT_TOKEN]):
+        return
+    try:
+        message_to_send = outgoing_collection.find_one_and_update(
+            {"status": "pending"},
+            {"$set": {"status": "processing", "processed_at": datetime.utcnow()}},
+            sort=[("created_at", 1)],
+            return_document=ReturnDocument.AFTER
+        )
+        if message_to_send:
+            phone = message_to_send["phone"]
+            message_text = message_to_send["message"]
+            message_id = message_to_send["_id"]
+            logger.info(f"📤 [DB Queue - ZAPI] تم سحب رسالة ({message_id}) للرقم {phone}.")
+            url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
+            headers = {"Content-Type": "application/json", "Client-Token": CLIENT_TOKEN}
+            payload = {"phone": phone, "message": message_text}
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=20)
+                response.raise_for_status()
+                outgoing_collection.update_one({"_id": message_id}, {"$set": {"status": "sent", "sent_at": datetime.utcnow()}})
+            except requests.exceptions.RequestException as e:
+                logger.error(f"❌ [ZAPI] فشل إرسال الرسالة ({message_id}): {e}")
+                outgoing_collection.update_one({"_id": message_id}, {"$set": {"status": "pending", "error_count": message_to_send.get("error_count", 0) + 1}})
+    except Exception as e:
+        logger.error(f"❌ [DB Queue Processor] حدث خطأ جسيم: {e}")
 
 if ZAPI_BASE_URL:
     scheduler = BackgroundScheduler(timezone="UTC")
