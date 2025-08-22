@@ -267,137 +267,139 @@ def meta_webhook():
 def process_meta_message(data):
     try:
         entry = data.get("entry", [])[0]
-        change = entry.get("changes", [])[0]
-        if change.get("field") == "messages":
-            value = change.get("value", {})
-            messages = value.get("messages", [{}])
-            if not messages or "from" not in messages[0]:
-                return
+        changes = entry.get("changes", [])
+        if not changes:
+            return
+        change = changes[0]
+        
+        if change.get("field") != "messages":
+            return
 
-            message = messages[0]
-            sender_id = message.get("from")
-            contacts = value.get("contacts", [{}])
-            sender_name = contacts[0].get("profile", {}).get("name", "")
-            message_type = message.get("type")
-            
-            logger.info(f"📥 [Meta API] Processing message from {sender_id} ({sender_name}) | Type: {message_type}")
-            
-            session = get_session(sender_id)
-            session["last_message_time"] = datetime.utcnow().isoformat()
-            save_session(sender_id, session)
+        value = change.get("value", {})
+        messages = value.get("messages", [{}])
+        if not messages or "from" not in messages[0]:
+            return
 
-            content_for_assistant = None
-            reply_text = None
+        message = messages[0]
+        sender_id = message.get("from")
+        contacts = value.get("contacts", [{}])
+        sender_name = contacts[0].get("profile", {}).get("name", "")
+        message_type = message.get("type")
+        
+        logger.info(f"📥 [Meta API] Processing message from {sender_id} ({sender_name}) | Type: {message_type}")
+        
+        session = get_session(sender_id)
+        session["last_message_time"] = datetime.utcnow().isoformat()
+        save_session(sender_id, session)
 
-            if message_type == "text":
-                content_for_assistant = message.get("text", {}).get("body")
-            
-            elif message_type == "image":
-                image_id = message.get("image", {}).get("id")
-                caption = message.get("image", {}).get("caption", "")
-                _, image_url = download_meta_media(image_id)
-                if image_url:
-                    content_list = [{"type": "image_url", "image_url": {"url": image_url}}]
-                    if caption:
-                        content_list.append({"type": "text", "text": f"تعليق على الصورة: {caption}"})
-                    content_for_assistant = content_list
-                else:
-                    reply_text = "عذراً، لم أتمكن من معالجة الصورة."
+        content_for_assistant = None
+        reply_text = None
 
-            elif message_type == "audio":
-                audio_id = message.get("audio", {}).get("id")
-                audio_content, _ = download_meta_media(audio_id)
-                if audio_content:
-                    transcribed_text = transcribe_audio(audio_content)
-                    if transcribed_text:
-                        content_for_assistant = f"رسالة صوتية من العميل: {transcribed_text}"
-                    else:
-                        reply_text = "عذراً، لم أتمكن من فهم رسالتك الصوتية."
-                else:
-                    reply_text = "عذراً، لم أتمكن من معالجة الرسالة الصوتية."
-            
+        if message_type == "text":
+            content_for_assistant = message.get("text", {}).get("body")
+        
+        elif message_type == "image":
+            caption = message.get("image", {}).get("caption", "")
+            content_for_assistant = "العميل أرسل صورة."
+            if caption:
+                content_for_assistant += f" وكان التعليق عليها: \"{caption}\""
             else:
-                logger.info(f"Ignoring message type: {message_type}")
-                return
+                content_for_assistant += " لم يكتب تعليقًا عليها."
 
-            if content_for_assistant and not reply_text:
-                reply_text = asyncio.run(ask_assistant(content_for_assistant, sender_id, sender_name))
-            
-            if reply_text:
-                send_meta_whatsapp_message(sender_id, reply_text)
+        elif message_type == "audio":
+            audio_id = message.get("audio", {}).get("id")
+            audio_content, _ = download_meta_media(audio_id)
+            if audio_content:
+                transcribed_text = transcribe_audio(audio_content)
+                if transcribed_text:
+                    content_for_assistant = f"رسالة صوتية من العميل: {transcribed_text}"
+                else:
+                    reply_text = "عذراً، لم أتمكن من فهم رسالتك الصوتية."
+            else:
+                reply_text = "عذراً، لم أتمكن من معالجة الرسالة الصوتية."
+        
+        else:
+            logger.info(f"Ignoring message type: {message_type}")
+            return
+
+        if content_for_assistant and not reply_text:
+            reply_text = asyncio.run(ask_assistant(content_for_assistant, sender_id, sender_name))
+        
+        if reply_text:
+            send_meta_whatsapp_message(sender_id, reply_text)
 
     except Exception as e:
         logger.error(f"❌ [Meta Webhook Processor] خطأ في معالجة الطلب: {e}", exc_info=True)
 
 # --- منطق تيليجرام ---
-telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+if TELEGRAM_BOT_TOKEN:
+    telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
-async def start_command(update, context):
-    await update.message.reply_text(f"أهلاً {update.effective_user.first_name}!")
+    async def start_command(update, context):
+        await update.message.reply_text(f"أهلاً {update.effective_user.first_name}!")
 
-async def handle_telegram_message(update, context):
-    message = update.message or update.business_message
-    if not message: 
-        return
+    async def handle_telegram_message(update, context):
+        message = update.message or update.business_message
+        if not message: 
+            return
+            
+        chat_id = message.chat.id
+        user_name = message.from_user.first_name
+        business_id = getattr(update.business_message, "business_connection_id", None) if hasattr(update, "business_message") and update.business_message else None
         
-    chat_id = message.chat.id
-    user_name = message.from_user.first_name
-    business_id = getattr(update.business_message, "business_connection_id", None) if hasattr(update, "business_message") and update.business_message else None
-    
-    logger.info(f"📥 [Telegram] رسالة جديدة | Chat ID: {chat_id}, Name: {user_name}")
-    
-    try:
-        await context.bot.send_chat_action(chat_id=chat_id, action=telegram.constants.ChatAction.TYPING, business_connection_id=business_id)
-    except Exception as e:
-        logger.warning(f"⚠️ لم يتمكن من إرسال chat action: {e}")
-    
-    session = get_session(chat_id)
-    session["last_message_time"] = datetime.utcnow().isoformat()
-    save_session(chat_id, session)
-    
-    reply_text = ""
-    content_for_assistant = None
-
-    try:
-        if message.text:
-            content_for_assistant = message.text
-        elif message.voice:
-            voice_file = await message.voice.get_file()
-            voice_content = await voice_file.download_as_bytearray()
-            transcribed_text = transcribe_audio(bytes(voice_content))
-            if transcribed_text:
-                content_for_assistant = f"رسالة صوتية من العميل: {transcribed_text}"
-            else:
-                reply_text = "عذراً، لم أتمكن من فهم رسالتك الصوتية."
-        elif message.photo:
-            photo_file = await message.photo[-1].get_file()
-            caption = message.caption or ""
-            content_list = [{"type": "image_url", "image_url": {"url": photo_file.file_path}}]
-            if caption: content_list.append({"type": "text", "text": f"تعليق على الصورة: {caption}"})
-            content_for_assistant = content_list
-    
-        if content_for_assistant and not reply_text:
-            reply_text = await ask_assistant(content_for_assistant, chat_id, user_name)
+        logger.info(f"📥 [Telegram] رسالة جديدة | Chat ID: {chat_id}, Name: {user_name}")
         
-        if reply_text:
-            if business_id:
-                await context.bot.send_message(chat_id=chat_id, text=reply_text, business_connection_id=business_connection_id)
-            else:
-                await context.bot.send_message(chat_id=chat_id, text=reply_text)
+        try:
+            await context.bot.send_chat_action(chat_id=chat_id, action=telegram.constants.ChatAction.TYPING, business_connection_id=business_id)
+        except Exception as e:
+            logger.warning(f"⚠️ لم يتمكن من إرسال chat action: {e}")
+        
+        session = get_session(chat_id)
+        session["last_message_time"] = datetime.utcnow().isoformat()
+        save_session(chat_id, session)
+        
+        reply_text = ""
+        content_for_assistant = None
 
-    except Exception as e:
-        logger.error(f"❌ [Telegram Handler] حدث خطأ أثناء معالجة الرسالة: {e}", exc_info=True)
-        await context.bot.send_message(chat_id=chat_id, text="عذرًا، حدث خطأ غير متوقع. يرجى المحاولة مرة أخرى.", business_connection_id=business_id)
+        try:
+            if message.text:
+                content_for_assistant = message.text
+            elif message.voice:
+                voice_file = await message.voice.get_file()
+                voice_content = await voice_file.download_as_bytearray()
+                transcribed_text = transcribe_audio(bytes(voice_content))
+                if transcribed_text:
+                    content_for_assistant = f"رسالة صوتية من العميل: {transcribed_text}"
+                else:
+                    reply_text = "عذراً، لم أتمكن من فهم رسالتك الصوتية."
+            elif message.photo:
+                caption = message.caption or ""
+                content_for_assistant = "العميل أرسل صورة."
+                if caption:
+                    content_for_assistant += f" وكان التعليق عليها: \"{caption}\""
+        
+            if content_for_assistant and not reply_text:
+                reply_text = await ask_assistant(content_for_assistant, chat_id, user_name)
+            
+            if reply_text:
+                if business_id:
+                    await context.bot.send_message(chat_id=chat_id, text=reply_text, business_connection_id=business_id)
+                else:
+                    await context.bot.send_message(chat_id=chat_id, text=reply_text)
 
-telegram_app.add_handler(CommandHandler("start", start_command))
-telegram_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_telegram_message))
+        except Exception as e:
+            logger.error(f"❌ [Telegram Handler] حدث خطأ أثناء معالجة الرسالة: {e}", exc_info=True)
+            await context.bot.send_message(chat_id=chat_id, text="عذرًا، حدث خطأ غير متوقع. يرجى المحاولة مرة أخرى.", business_connection_id=business_id)
 
-@flask_app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
-async def telegram_webhook_handler():
-    data = request.get_json()
-    update = telegram.Update.de_json(data, telegram_app.bot)
-    await telegram_app.process_update(update)
-    return jsonify({"status": "ok"})
+    telegram_app.add_handler(CommandHandler("start", start_command))
+    telegram_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_telegram_message))
+
+    @flask_app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
+    async def telegram_webhook_handler():
+        data = request.get_json()
+        update = telegram.Update.de_json(data, telegram_app.bot)
+        await telegram_app.process_update(update)
+        return jsonify({"status": "ok"})
 
 # --- الإعداد والتشغيل ---
 @flask_app.route("/")
@@ -426,5 +428,3 @@ if ZAPI_BASE_URL:
 # التشغيل النهائي
 if __name__ == "__main__":
     logger.info("🚀 التطبيق جاهز للتشغيل عبر خادم WSGI (مثل Gunicorn).")
-    # لإعداد ويب هوك تيليجرام لأول مرة، يمكنك تشغيل هذا الأمر في شل Render
-    # python -c "import asyncio; from main import setup_telegram_webhook; asyncio.run(setup_telegram_webhook())"
