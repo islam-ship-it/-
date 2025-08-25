@@ -27,10 +27,19 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ASSISTANT_ID_PREMIUM = os.getenv("ASSISTANT_ID_PREMIUM")
 MONGO_URI = os.getenv("MONGO_URI")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+
+# واتساب (كما هو)
 META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN")
 META_PHONE_NUMBER_ID = os.getenv("META_PHONE_NUMBER_ID")
 META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN")
+
+# (قديم) كان بيستخدم لتنين — هنسيبه لو محتاجه في حتت تانية، لكن الإرسال هيتم بالتوكنات المنفصلة تحت
 MESSENGER_ACCESS_TOKEN = os.getenv("MESSENGER_ACCESS_TOKEN")
+
+# ✅ جديد: فصل توكنات ماسنجر/إنستا
+PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")                 # توكن صفحة فيسبوك (Messenger)
+INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN")       # توكن Instagram Messaging عبر الصفحة
+
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
@@ -75,12 +84,17 @@ def save_session(user_id, session_data):
     session_data["_id"] = user_id_str
     sessions_collection.replace_one({"_id": user_id_str}, session_data, upsert=True)
 
+# --- دوال مساعدة صغيرة ---
+def _mask_token(tok: str) -> str:
+    if not tok: return "None"
+    return f"{tok[:6]}...{tok[-4:]}" if len(tok) > 12 else "****"
+
 # --- دوال الإرسال ---
 def send_meta_whatsapp_message(phone, message):
     url = f"https://graph.facebook.com/v19.0/{META_PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}", "Content-Type": "application/json"}
     payload = {"messaging_product": "whatsapp", "to": phone, "text": {"body": message}}
-    logger.info(f"📤 [Meta API] Preparing to send message to {phone}."  )
+    logger.info(f"📤 [Meta API] Preparing to send message to {phone}.")
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=20)
         response.raise_for_status()
@@ -91,27 +105,38 @@ def send_meta_whatsapp_message(phone, message):
         logger.error(f"❌ [Meta API] فشل إرسال الرسالة إلى {phone}: {error_text}")
         return False
 
-def send_messenger_instagram_message(recipient_id, message):
-    if not MESSENGER_ACCESS_TOKEN:
-        logger.warning("⚠️ MESSENGER_ACCESS_TOKEN is not set. Cannot send message.")
+# ✅ تم التعديل هنا: الدالة دلوقتي بتختار التوكن حسب المنصة
+def send_messenger_instagram_message(recipient_id, message, platform="Messenger"):
+    # تحديد التوكن المناسب
+    if platform == "Messenger":
+        token = PAGE_ACCESS_TOKEN
+    else:
+        platform = "Instagram"  # للتوحيد في اللوج
+        token = INSTAGRAM_ACCESS_TOKEN
+
+    if not token:
+        logger.warning(f"⚠️ [{platform}] Access token not set. Cannot send message.")
         return
+
     url = "https://graph.facebook.com/v19.0/me/messages"
-    headers = {"Authorization": f"Bearer {MESSENGER_ACCESS_TOKEN}", "Content-Type": "application/json"}
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = {"recipient": {"id": recipient_id}, "message": {"text": message}}
+
+    logger.info(f"📤 [{platform}] Sending reply to {recipient_id} using token {_mask_token(token)}")
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=20 )
+        response = requests.post(url, headers=headers, json=payload, timeout=20)
         response.raise_for_status()
-        logger.info(f"✅ [Messenger/IG] تم إرسال الرسالة إلى {recipient_id} بنجاح.")
+        logger.info(f"✅ [{platform}] تم إرسال الرسالة إلى {recipient_id} بنجاح.")
     except requests.exceptions.RequestException as e:
-        logger.error(f"❌ [Messenger/IG] فشل إرسال الرسالة: {e.response.text if e.response else e}")
+        logger.error(f"❌ [{platform}] فشل إرسال الرسالة: {e.response.text if e.response else e}")
 
 # --- الدوال المشتركة ---
 def download_meta_media(media_id):
     logger.info(f"⬇️ [Meta Media] Attempting to get URL for media_id: {media_id}")
-    headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}"}
+    headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}"}  # يستخدم توكن واتساب لأنه خاص بوسائط واتساب
     url = f"https://graph.facebook.com/v19.0/{media_id}/"
     try:
-        response = requests.get(url, headers=headers, timeout=20  )
+        response = requests.get(url, headers=headers, timeout=20)
         response.raise_for_status()
         media_info = response.json()
         media_url = media_info.get("url")
@@ -233,6 +258,7 @@ def meta_webhook():
 # --- دوال معالجة الرسائل لكل منصة ---
 
 def process_whatsapp_message(data):
+    # هذه الدالة تبقى كما هي تمامًا، لا تغيير فيها
     try:
         entry = data.get("entry", [])[0]
         change = entry.get("changes", [])[0]
@@ -260,6 +286,7 @@ def process_whatsapp_message(data):
         logger.error(f"❌ [WhatsApp Processor] Error: {e}", exc_info=True)
 
 def process_single_whatsapp_message(data):
+    # هذه الدالة تبقى كما هي تمامًا، لا تغيير فيها
     try:
         entry = data.get("entry", [])[0]
         value = entry.get("changes", [])[0].get("value", {})
@@ -311,20 +338,25 @@ def process_messenger_instagram_message(data):
         message_obj = messaging_event.get("message")
 
         if not sender_id or not message_obj or "text" not in message_obj:
+            # تجاهل الأحداث التي ليست رسائل نصية (مثل seen)
             return
 
         text_body = message_obj.get("text")
         logger.info(f"💬 [{platform_name}] Received text from {sender_id}: '{text_body}'")
-        
+
+        # ملاحظة: لم نطبق تجميع الرسائل هنا بعد للتبسيط، يمكن إضافتها لاحقًا بنفس طريقة واتساب
+        # حاليًا، الرد فوري
         reply_text = asyncio.run(ask_assistant(text_body, sender_id, "User"))
         
         if reply_text:
-            send_messenger_instagram_message(sender_id, reply_text)
+            # ✅ تم التعديل هنا: نمرر اسم المنصة لاختيار التوكن الصحيح
+            send_messenger_instagram_message(sender_id, reply_text, platform=platform_name)
 
     except Exception as e:
         logger.error(f"❌ [Messenger/IG Processor] Error: {e}", exc_info=True)
 
 # --- منطق تيليجرام ---
+# (لا تغيير هنا، كل شيء كما هو)
 if TELEGRAM_BOT_TOKEN:
     telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     async def start_command(update, context):
