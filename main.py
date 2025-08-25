@@ -30,6 +30,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN")
 META_PHONE_NUMBER_ID = os.getenv("META_PHONE_NUMBER_ID")
 META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN")
+MESSENGER_ACCESS_TOKEN = os.getenv("MESSENGER_ACCESS_TOKEN") # <-- جديد: توكن لفيسبوك وانستغرام
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
@@ -74,12 +75,12 @@ def save_session(user_id, session_data):
     session_data["_id"] = user_id_str
     sessions_collection.replace_one({"_id": user_id_str}, session_data, upsert=True)
 
-# --- دوال إرسال واتساب ---
+# --- دوال الإرسال ---
 def send_meta_whatsapp_message(phone, message):
     url = f"https://graph.facebook.com/v19.0/{META_PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}", "Content-Type": "application/json"}
     payload = {"messaging_product": "whatsapp", "to": phone, "text": {"body": message}}
-    logger.info(f"📤 [Meta API] Preparing to send message to {phone}." )
+    logger.info(f"📤 [Meta API] Preparing to send message to {phone}."  )
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=20)
         response.raise_for_status()
@@ -90,13 +91,26 @@ def send_meta_whatsapp_message(phone, message):
         logger.error(f"❌ [Meta API] فشل إرسال الرسالة إلى {phone}: {error_text}")
         return False
 
+# <-- جديد: دالة إرسال جديدة لفيسبوك وانستغرام -->
+def send_messenger_instagram_message(recipient_id, message):
+    if not MESSENGER_ACCESS_TOKEN: return
+    url = "https://graph.facebook.com/v19.0/me/messages"
+    headers = {"Authorization": f"Bearer {MESSENGER_ACCESS_TOKEN}", "Content-Type": "application/json"}
+    payload = {"recipient": {"id": recipient_id}, "message": {"text": message}}
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=20 )
+        response.raise_for_status()
+        logger.info(f"✅ [Messenger/IG] تم إرسال الرسالة إلى {recipient_id} بنجاح.")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ [Messenger/IG] فشل إرسال الرسالة: {e.response.text if e.response else e}")
+
 # --- الدوال المشتركة ---
 def download_meta_media(media_id):
     logger.info(f"⬇️ [Meta Media] Attempting to get URL for media_id: {media_id}")
+    headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}"} # يستخدم توكن واتساب لأنه خاص بوسائط واتساب
     url = f"https://graph.facebook.com/v19.0/{media_id}/"
-    headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}"}
     try:
-        response = requests.get(url, headers=headers, timeout=20 )
+        response = requests.get(url, headers=headers, timeout=20  )
         response.raise_for_status()
         media_info = response.json()
         media_url = media_info.get("url")
@@ -162,23 +176,17 @@ def process_batched_messages(sender_id, sender_name):
     with lock:
         if sender_id not in pending_whatsapp_messages or not pending_whatsapp_messages[sender_id]:
             return
-
         logger.info(f"⏰ Timer finished for {sender_id}. Processing {len(pending_whatsapp_messages[sender_id])} batched messages.")
-        
         combined_content = "\n".join(pending_whatsapp_messages[sender_id])
-        
         logger.info(f"📝 Combined message for {sender_id}:\n--- START ---\n{combined_content}\n--- END ---")
-        
         reply_text = asyncio.run(ask_assistant(combined_content, sender_id, sender_name))
-        
         if reply_text:
             send_meta_whatsapp_message(sender_id, reply_text)
-        
         del pending_whatsapp_messages[sender_id]
         if sender_id in whatsapp_timers:
             del whatsapp_timers[sender_id]
 
-# --- منطق واتساب Meta Cloud API ---
+# --- منطق الويب هوك الرئيسي ---
 @flask_app.route("/meta_webhook", methods=["GET", "POST"])
 def meta_webhook():
     if request.method == "GET":
@@ -190,47 +198,50 @@ def meta_webhook():
 
     if request.method == "POST":
         data = request.json
-        if data.get("object") == "whatsapp_business_account":
-            try:
-                entry = data.get("entry", [])[0]
-                change = entry.get("changes", [])[0]
-                if change.get("field") != "messages": return "OK", 200
-                
-                value = change.get("value", {})
-                message = value.get("messages", [{}])[0]
-                if not message or "from" not in message: return "OK", 200
+        platform = data.get("object") # <-- جديد: تحديد المنصة من هنا
 
-                sender_id = message.get("from")
-                sender_name = value.get("contacts", [{}])[0].get("profile", {}).get("name", "")
-                message_type = message.get("type")
-
-                if message_type == "text":
-                    text_body = message.get("text", {}).get("body")
-                    
-                    logger.info(f"💬 [WhatsApp] Received text from {sender_id}: '{text_body}'")
-
-                    if sender_id in whatsapp_timers:
-                        whatsapp_timers[sender_id].cancel()
-
-                    if sender_id not in pending_whatsapp_messages:
-                        pending_whatsapp_messages[sender_id] = []
-                    pending_whatsapp_messages[sender_id].append(text_body)
-                    logger.info(f"📥 Message from {sender_id} added to batch. Current batch size: {len(pending_whatsapp_messages[sender_id])}")
-
-                    timer = threading.Timer(15.0, process_batched_messages, args=[sender_id, sender_name])
-                    whatsapp_timers[sender_id] = timer
-                    timer.start()
-
-                else:
-                    thread = threading.Thread(target=process_single_message, args=(data,))
-                    thread.start()
-
-            except Exception as e:
-                logger.error(f"❌ [Meta Webhook] Error in main webhook logic: {e}", exc_info=True)
-
+        # <-- جديد: توجيه الرسالة بناءً على المنصة -->
+        if platform == "whatsapp_business_account":
+            thread = threading.Thread(target=process_whatsapp_message, args=(data,))
+            thread.start()
+        elif platform == "instagram" or platform == "page": # "page" هو الاسم الذي تستخدمه Meta للماسنجر
+            thread = threading.Thread(target=process_messenger_instagram_message, args=(data,))
+            thread.start()
+            
         return "OK", 200
 
-def process_single_message(data):
+# --- دوال معالجة الرسائل لكل منصة ---
+
+def process_whatsapp_message(data):
+    # هذه الدالة تبقى كما هي تمامًا، لا تغيير فيها
+    try:
+        entry = data.get("entry", [])[0]
+        change = entry.get("changes", [])[0]
+        if change.get("field") != "messages": return
+        value = change.get("value", {})
+        message = value.get("messages", [{}])[0]
+        if not message or "from" not in message: return
+        sender_id = message.get("from")
+        sender_name = value.get("contacts", [{}])[0].get("profile", {}).get("name", "")
+        message_type = message.get("type")
+        if message_type == "text":
+            text_body = message.get("text", {}).get("body")
+            logger.info(f"💬 [WhatsApp] Received text from {sender_id}: '{text_body}'")
+            if sender_id in whatsapp_timers: whatsapp_timers[sender_id].cancel()
+            if sender_id not in pending_whatsapp_messages: pending_whatsapp_messages[sender_id] = []
+            pending_whatsapp_messages[sender_id].append(text_body)
+            logger.info(f"📥 Message from {sender_id} added to batch. Current batch size: {len(pending_whatsapp_messages[sender_id])}")
+            timer = threading.Timer(15.0, process_batched_messages, args=[sender_id, sender_name])
+            whatsapp_timers[sender_id] = timer
+            timer.start()
+        else:
+            media_thread = threading.Thread(target=process_single_whatsapp_message, args=(data,))
+            media_thread.start()
+    except Exception as e:
+        logger.error(f"❌ [WhatsApp Processor] Error: {e}", exc_info=True)
+
+def process_single_whatsapp_message(data):
+    # هذه الدالة تبقى كما هي تمامًا، لا تغيير فيها
     try:
         entry = data.get("entry", [])[0]
         value = entry.get("changes", [])[0].get("value", {})
@@ -238,11 +249,8 @@ def process_single_message(data):
         sender_id = message.get("from")
         sender_name = value.get("contacts", [{}])[0].get("profile", {}).get("name", "")
         message_type = message.get("type")
-
         logger.info(f"🖼️ [WhatsApp] Received non-text message of type '{message_type}' from {sender_id}")
-
         content_for_assistant, reply_text = None, None
-
         if message_type == "image":
             caption = message.get("image", {}).get("caption", "")
             image_id = message.get("image", {}).get("id")
@@ -250,11 +258,7 @@ def process_single_message(data):
             if image_content:
                 base64_image = base64.b64encode(image_content).decode('utf-8')
                 try:
-                    vision_response = client.chat.completions.create(
-                        model="gpt-4o",
-                        messages=[{"role": "user", "content": [{"type": "text", "text": "صف هذه الصورة باختصار شديد باللغة العربية."}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]}],
-                        max_tokens=100
-                    )
+                    vision_response = client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": [{"type": "text", "text": "صف هذه الصورة باختصار شديد باللغة العربية."}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]}], max_tokens=100)
                     image_description = vision_response.choices[0].message.content
                     content_for_assistant = f"العميل أرسل صورة. وصفها: '{image_description}'."
                     if caption: content_for_assistant += f" تعليقه: \"{caption}\""
@@ -263,7 +267,6 @@ def process_single_message(data):
                     reply_text = "تم استلام الصورة، ولكن حدث خطأ أثناء تحليلها."
             else:
                 reply_text = "عذراً، لم أتمكن من معالجة الصورة."
-        
         elif message_type == "audio":
             audio_id = message.get("audio", {}).get("id")
             audio_content = download_meta_media(audio_id)
@@ -273,39 +276,59 @@ def process_single_message(data):
                 else: reply_text = "عذراً، لم أتمكن من فهم رسالتك الصوتية."
             else:
                 reply_text = "عذراً، لم أتمكن من معالجة الرسالة الصوتية."
-
         if content_for_assistant and not reply_text:
             reply_text = asyncio.run(ask_assistant(content_for_assistant, sender_id, sender_name))
-        
         if reply_text:
             send_meta_whatsapp_message(sender_id, reply_text)
-
     except Exception as e:
         logger.error(f"❌ [Single Message Processor] خطأ في معالجة الطلب: {e}", exc_info=True)
 
+# <-- جديد: دالة معالجة جديدة لرسائل فيسبوك وانستغرام -->
+def process_messenger_instagram_message(data):
+    try:
+        platform_name = "Messenger" if data.get("object") == "page" else "Instagram"
+        entry = data.get("entry", [])[0]
+        messaging_event = entry.get("messaging", [{}])[0]
+        
+        sender_id = messaging_event.get("sender", {}).get("id")
+        message_obj = messaging_event.get("message")
+
+        if not sender_id or not message_obj or "text" not in message_obj:
+            # تجاهل الأحداث التي ليست رسائل نصية (مثل seen)
+            return
+
+        text_body = message_obj.get("text")
+        logger.info(f"💬 [{platform_name}] Received text from {sender_id}: '{text_body}'")
+
+        # ملاحظة: لم نطبق تجميع الرسائل هنا بعد للتبسيط، يمكن إضافتها لاحقًا بنفس طريقة واتساب
+        # حاليًا، الرد فوري
+        reply_text = asyncio.run(ask_assistant(text_body, sender_id, "User"))
+        
+        if reply_text:
+            send_messenger_instagram_message(sender_id, reply_text)
+
+    except Exception as e:
+        logger.error(f"❌ [Messenger/IG Processor] Error: {e}", exc_info=True)
+
 # --- منطق تيليجرام ---
+# (لا تغيير هنا، كل شيء كما هو)
 if TELEGRAM_BOT_TOKEN:
     telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-
     async def start_command(update, context):
         await update.message.reply_text(f"أهلاً {update.effective_user.first_name}!")
-
     async def handle_telegram_message(update, context):
         message = update.message or update.business_message
         if not message: return
         chat_id = message.chat.id
         user_name = message.from_user.first_name
         business_id = getattr(update.business_message, "business_connection_id", None) if hasattr(update, "business_message") and update.business_message else None
-        
         try:
             await context.bot.send_chat_action(chat_id=chat_id, action=telegram.constants.ChatAction.TYPING, business_connection_id=business_id)
         except Exception as e:
             logger.warning(f"⚠️ لم يتمكن من إرسال chat action: {e}")
-        
         session = get_session(chat_id)
         session["last_message_time"] = datetime.utcnow().isoformat()
         save_session(chat_id, session)
-        
         reply_text, content_for_assistant = "", None
         try:
             if message.text:
@@ -323,20 +346,16 @@ if TELEGRAM_BOT_TOKEN:
                 caption = message.caption or ""
                 content_for_assistant = "العميل أرسل صورة."
                 if caption: content_for_assistant += f" وكان التعليق عليها: \"{caption}\""
-            
             if content_for_assistant and not reply_text:
                 reply_text = await ask_assistant(content_for_assistant, chat_id, user_name)
-            
             if reply_text:
                 if business_id: await context.bot.send_message(chat_id=chat_id, text=reply_text, business_connection_id=business_id)
                 else: await context.bot.send_message(chat_id=chat_id, text=reply_text)
         except Exception as e:
             logger.error(f"❌ [Telegram Handler] حدث خطأ أثناء معالجة الرسالة: {e}", exc_info=True)
             await context.bot.send_message(chat_id=chat_id, text="عذرًا، حدث خطأ غير متوقع.", business_connection_id=business_id)
-    
     telegram_app.add_handler(CommandHandler("start", start_command))
     telegram_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_telegram_message))
-    
     @flask_app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
     async def telegram_webhook_handler():
         data = request.get_json()
@@ -350,18 +369,9 @@ def home():
     return "✅ Bot is running with Vision and Batching support"
 
 def process_db_queue():
-    """
-    دالة لمعالجة طابور رسائل Z-API القديم.
-    """
-    if not all([ZAPI_BASE_URL, ZAPI_INSTANCE_ID, ZAPI_TOKEN, CLIENT_TOKEN]):
-        return
+    if not all([ZAPI_BASE_URL, ZAPI_INSTANCE_ID, ZAPI_TOKEN, CLIENT_TOKEN]): return
     try:
-        message_to_send = outgoing_collection.find_one_and_update(
-            {"status": "pending"},
-            {"$set": {"status": "processing", "processed_at": datetime.utcnow()}},
-            sort=[("created_at", 1)],
-            return_document=ReturnDocument.AFTER
-        )
+        message_to_send = outgoing_collection.find_one_and_update({"status": "pending"}, {"$set": {"status": "processing", "processed_at": datetime.utcnow()}}, sort=[("created_at", 1)], return_document=ReturnDocument.AFTER)
         if message_to_send:
             phone = message_to_send["phone"]
             message_text = message_to_send["message"]
