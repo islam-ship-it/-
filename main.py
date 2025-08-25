@@ -30,7 +30,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN")
 META_PHONE_NUMBER_ID = os.getenv("META_PHONE_NUMBER_ID")
 META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN")
-MESSENGER_ACCESS_TOKEN = os.getenv("MESSENGER_ACCESS_TOKEN") # <-- جديد: توكن لفيسبوك وانستغرام
+MESSENGER_ACCESS_TOKEN = os.getenv("MESSENGER_ACCESS_TOKEN")
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
@@ -91,9 +91,10 @@ def send_meta_whatsapp_message(phone, message):
         logger.error(f"❌ [Meta API] فشل إرسال الرسالة إلى {phone}: {error_text}")
         return False
 
-# <-- جديد: دالة إرسال جديدة لفيسبوك وانستغرام -->
 def send_messenger_instagram_message(recipient_id, message):
-    if not MESSENGER_ACCESS_TOKEN: return
+    if not MESSENGER_ACCESS_TOKEN:
+        logger.warning("⚠️ MESSENGER_ACCESS_TOKEN is not set. Cannot send message.")
+        return
     url = "https://graph.facebook.com/v19.0/me/messages"
     headers = {"Authorization": f"Bearer {MESSENGER_ACCESS_TOKEN}", "Content-Type": "application/json"}
     payload = {"recipient": {"id": recipient_id}, "message": {"text": message}}
@@ -107,7 +108,7 @@ def send_messenger_instagram_message(recipient_id, message):
 # --- الدوال المشتركة ---
 def download_meta_media(media_id):
     logger.info(f"⬇️ [Meta Media] Attempting to get URL for media_id: {media_id}")
-    headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}"} # يستخدم توكن واتساب لأنه خاص بوسائط واتساب
+    headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}"}
     url = f"https://graph.facebook.com/v19.0/{media_id}/"
     try:
         response = requests.get(url, headers=headers, timeout=20  )
@@ -186,34 +187,52 @@ def process_batched_messages(sender_id, sender_name):
         if sender_id in whatsapp_timers:
             del whatsapp_timers[sender_id]
 
-# --- منطق الويب هوك الرئيسي ---
+# --- منطق الويب هوك الرئيسي (مع طباعة شاملة) ---
 @flask_app.route("/meta_webhook", methods=["GET", "POST"])
 def meta_webhook():
+    # GET: للتحقق من الويب هوك لأول مرة
     if request.method == "GET":
+        logger.info("Received a GET request for webhook verification.")
         if request.args.get("hub.mode") == "subscribe" and request.args.get("hub.challenge"):
             if not request.args.get("hub.verify_token") == META_VERIFY_TOKEN:
+                logger.error("Webhook verification failed: Token mismatch.")
                 return "Verification token mismatch", 403
+            logger.info("✅ Webhook verified successfully!")
             return request.args.get("hub.challenge"), 200
         return "Hello World", 200
 
+    # POST: لاستقبال الأحداث (الرسائل)
     if request.method == "POST":
-        data = request.json
-        platform = data.get("object") # <-- جديد: تحديد المنصة من هنا
+        # --- الطباعة الشاملة ---
+        logger.info("="*50)
+        logger.info("📬 NEW POST REQUEST RECEIVED ON /meta_webhook 📬")
+        logger.info(f"Request Headers: {request.headers}")
+        try:
+            data = request.get_json()
+            logger.info(f"Request Body (JSON): {json.dumps(data, indent=2)}")
+        except Exception as e:
+            logger.error(f"Could not parse request body as JSON: {e}")
+            logger.info(f"Request Body (Raw): {request.data}")
+            return "OK", 200
+        logger.info("="*50)
+        # --- نهاية الطباعة الشاملة ---
 
-        # <-- جديد: توجيه الرسالة بناءً على المنصة -->
+        platform = data.get("object")
+        
         if platform == "whatsapp_business_account":
             thread = threading.Thread(target=process_whatsapp_message, args=(data,))
             thread.start()
-        elif platform == "instagram" or platform == "page": # "page" هو الاسم الذي تستخدمه Meta للماسنجر
+        elif platform == "instagram" or platform == "page":
             thread = threading.Thread(target=process_messenger_instagram_message, args=(data,))
             thread.start()
+        else:
+            logger.warning(f"Received webhook for an unhandled object type: {platform}")
             
         return "OK", 200
 
 # --- دوال معالجة الرسائل لكل منصة ---
 
 def process_whatsapp_message(data):
-    # هذه الدالة تبقى كما هي تمامًا، لا تغيير فيها
     try:
         entry = data.get("entry", [])[0]
         change = entry.get("changes", [])[0]
@@ -241,7 +260,6 @@ def process_whatsapp_message(data):
         logger.error(f"❌ [WhatsApp Processor] Error: {e}", exc_info=True)
 
 def process_single_whatsapp_message(data):
-    # هذه الدالة تبقى كما هي تمامًا، لا تغيير فيها
     try:
         entry = data.get("entry", [])[0]
         value = entry.get("changes", [])[0].get("value", {})
@@ -283,7 +301,6 @@ def process_single_whatsapp_message(data):
     except Exception as e:
         logger.error(f"❌ [Single Message Processor] خطأ في معالجة الطلب: {e}", exc_info=True)
 
-# <-- جديد: دالة معالجة جديدة لرسائل فيسبوك وانستغرام -->
 def process_messenger_instagram_message(data):
     try:
         platform_name = "Messenger" if data.get("object") == "page" else "Instagram"
@@ -294,14 +311,11 @@ def process_messenger_instagram_message(data):
         message_obj = messaging_event.get("message")
 
         if not sender_id or not message_obj or "text" not in message_obj:
-            # تجاهل الأحداث التي ليست رسائل نصية (مثل seen)
             return
 
         text_body = message_obj.get("text")
         logger.info(f"💬 [{platform_name}] Received text from {sender_id}: '{text_body}'")
-
-        # ملاحظة: لم نطبق تجميع الرسائل هنا بعد للتبسيط، يمكن إضافتها لاحقًا بنفس طريقة واتساب
-        # حاليًا، الرد فوري
+        
         reply_text = asyncio.run(ask_assistant(text_body, sender_id, "User"))
         
         if reply_text:
@@ -311,7 +325,6 @@ def process_messenger_instagram_message(data):
         logger.error(f"❌ [Messenger/IG Processor] Error: {e}", exc_info=True)
 
 # --- منطق تيليجرام ---
-# (لا تغيير هنا، كل شيء كما هو)
 if TELEGRAM_BOT_TOKEN:
     telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     async def start_command(update, context):
