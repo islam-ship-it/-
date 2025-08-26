@@ -88,7 +88,7 @@ def send_meta_whatsapp_message(phone, message):
     url = f"https://graph.facebook.com/v19.0/{META_PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}", "Content-Type": "application/json"}
     payload = {"messaging_product": "whatsapp", "to": phone, "text": {"body": message}}
-    logger.info(f"📤 [Meta API] Preparing to send message to {phone}." )
+    logger.info(f"📤 [Meta API] Preparing to send message to {phone}."  )
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=20)
         response.raise_for_status()
@@ -111,7 +111,7 @@ def send_messenger_instagram_message(recipient_id, message, platform="Messenger"
     url = "https://graph.facebook.com/v19.0/me/messages"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = {"recipient": {"id": recipient_id}, "message": {"text": message}}
-    logger.info(f"📤 [{platform}] Sending reply to {recipient_id} using token {_mask_token(token )}")
+    logger.info(f"📤 [{platform}] Sending reply to {recipient_id} using token {_mask_token(token  )}")
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=20)
         response.raise_for_status()
@@ -125,7 +125,7 @@ def download_meta_media(media_id):
     headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}"}
     url = f"https://graph.facebook.com/v19.0/{media_id}/"
     try:
-        response = requests.get(url, headers=headers, timeout=20 )
+        response = requests.get(url, headers=headers, timeout=20  )
         response.raise_for_status()
         media_info = response.json()
         media_url = media_info.get("url")
@@ -272,7 +272,7 @@ def manychat_webhook_handler():
         # 3. تحديد المحتوى
         content_for_assistant = None
         if last_text:
-            if last_text.startswith("https://cdn.fbsbx.com/" ):
+            if last_text.startswith("https://cdn.fbsbx.com/"  ):
                 content_for_assistant = f"العميل أرسل ملف وسائط. الرابط: {last_text}"
             else:
                 content_for_assistant = last_text
@@ -287,15 +287,22 @@ def manychat_webhook_handler():
         # 5. بناء الرد الذي سيفهمه ManyChat
         if reply_text:
             logger.info(f"✅ [ManyChat] Got reply from assistant: '{reply_text}'")
+            
+            # ✅✅✅ التعديل هنا: تم تغيير بنية الرد للتوافق مع توثيق ManyChat
             response_to_manychat = {
                 "version": "v2",
-                "content": {
-                    "messages": [
-                        {"type": "text", "text": reply_text}
-                    ]
-                }
+                "messages": [
+                    {
+                        "type": "text",
+                        "text": reply_text
+                    }
+                ]
             }
-            return jsonify(response_to_manychat), 200
+            
+            # استخدام jsonify لضمان إرسال الـ Headers بشكل صحيح مع المحتوى العربي
+            response = jsonify(response_to_manychat)
+            response.headers['Content-Type'] = 'application/json; charset=utf-8'
+            return response, 200
         else:
             return jsonify({"status": "ok", "message": "Assistant had no reply"}), 200
 
