@@ -10,9 +10,8 @@ import base64
 from flask import Flask, request, jsonify
 from asgiref.wsgi import WsgiToAsgi
 from openai import OpenAI
-from pymongo import MongoClient, ReturnDocument
+from pymongo import MongoClient
 from datetime import datetime
-from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
 import telegram
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
@@ -22,29 +21,19 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 load_dotenv()
 
-# --- مفاتيح API ---
+# --- مفاتيح API (النسخة النهائية المبسطة) ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ASSISTANT_ID_PREMIUM = os.getenv("ASSISTANT_ID_PREMIUM")
 MONGO_URI = os.getenv("MONGO_URI")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN")
-META_PHONE_NUMBER_ID = os.getenv("META_PHONE_NUMBER_ID")
-META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN")
-PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
-INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN")
 MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
 MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
-ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
-ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
-ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
-CLIENT_TOKEN = os.getenv("CLIENT_TOKEN")
 
 # --- قاعدة البيانات ---
 try:
     client_db = MongoClient(MONGO_URI)
     db = client_db["multi_platform_bot"]
     sessions_collection = db["sessions"]
-    outgoing_collection = db["outgoing_whatsapp"]
     logger.info("✅ تم الاتصال بقاعدة البيانات بنجاح.")
 except Exception as e:
     logger.critical(f"❌ فشل الاتصال بقاعدة البيانات: {e}")
@@ -55,13 +44,13 @@ flask_app = Flask(__name__)
 app = WsgiToAsgi(flask_app)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# --- متغيرات عالمية لتجميع الرسائل (الآلية الجديدة الموحدة) ---
+# --- متغيرات عالمية لتجميع الرسائل ---
 pending_messages = {}
 message_timers = {}
 processing_locks = {}
-BATCH_WAIT_TIME = 10.0 # مدة الانتظار بالثواني (يمكنك تعديلها)
+BATCH_WAIT_TIME = 10.0
 
-# --- دوال إدارة الجلسات ودوال مساعدة ---
+# --- دوال إدارة الجلسات ---
 def get_session(user_id):
     user_id_str = str(user_id)
     session = sessions_collection.find_one({"_id": user_id_str})
@@ -79,49 +68,14 @@ def save_session(user_id, session_data):
     session_data["_id"] = user_id_str
     sessions_collection.replace_one({"_id": user_id_str}, session_data, upsert=True)
 
-def _mask_token(tok: str):
-    if not tok: return "None"
-    return f"{tok[:6]}...{tok[-4:]}" if len(tok) > 12 else "****"
-
 # --- دوال الإرسال ---
-def send_meta_whatsapp_message(phone, message):
-    url = f"https://graph.facebook.com/v19.0/{META_PHONE_NUMBER_ID}/messages"
-    headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}", "Content-Type": "application/json"}
-    payload = {"messaging_product": "whatsapp", "to": phone, "text": {"body": message}}
-    logger.info(f"📤 [Meta API] Preparing to send message to {phone}."  )
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=20)
-        response.raise_for_status()
-        logger.info(f"✅ [Meta API] تم إرسال الرسالة إلى {phone} بنجاح.")
-        return True
-    except requests.exceptions.RequestException as e:
-        error_text = e.response.text if e.response else str(e)
-        logger.error(f"❌ [Meta API] فشل إرسال الرسالة إلى {phone}: {error_text}")
-        return False
-
-def send_messenger_instagram_message(recipient_id, message, platform="Messenger"):
-    token = PAGE_ACCESS_TOKEN if platform == "Messenger" else INSTAGRAM_ACCESS_TOKEN
-    if not token:
-        logger.warning(f"⚠️ [{platform}] Access token not set. Cannot send message.")
-        return
-    url = "https://graph.facebook.com/v19.0/me/messages"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    payload = {"recipient": {"id": recipient_id}, "message": {"text": message}}
-    logger.info(f"📤 [{platform}] Sending reply to {recipient_id} using token {_mask_token(token  )}")
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=20)
-        response.raise_for_status()
-        logger.info(f"✅ [{platform}] تم إرسال الرسالة إلى {recipient_id} بنجاح.")
-    except requests.exceptions.RequestException as e:
-        logger.error(f"❌ [{platform}] فشل إرسال الرسالة: {e.response.text if e.response else e}")
-
 def send_manychat_reply(subscriber_id, text_message):
     if not MANYCHAT_API_KEY:
         logger.error("❌ [ManyChat API] MANYCHAT_API_KEY is not set. Cannot send message.")
         return
     url = "https://api.manychat.com/fb/sending/sendContent"
     headers = {"Authorization": f"Bearer {MANYCHAT_API_KEY}", "Content-Type": "application/json"}
-    payload = {"subscriber_id": str(subscriber_id  ), "data": {"version": "v2", "content": {"messages": [{"type": "text", "text": text_message}]}}}
+    payload = {"subscriber_id": str(subscriber_id ), "data": {"version": "v2", "content": {"messages": [{"type": "text", "text": text_message}]}}}
     logger.info(f"📤 [ManyChat API] Sending reply to subscriber {subscriber_id}...")
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=20)
@@ -150,18 +104,6 @@ def download_media_from_url(media_url, headers=None):
         return media_response.content
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ [Media Downloader] فشل تحميل الوسائط من الرابط {media_url}: {e}")
-        return None
-
-def download_meta_media_by_id(media_id):
-    headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}"}
-    url = f"https://graph.facebook.com/v19.0/{media_id}/"
-    try:
-        response = requests.get(url, headers=headers, timeout=20  )
-        response.raise_for_status()
-        media_info = response.json()
-        media_url = media_info.get("url")
-        return download_media_from_url(media_url, headers=headers)
-    except requests.exceptions.RequestException:
         return None
 
 def transcribe_audio(audio_content, file_format="mp4"):
@@ -224,11 +166,7 @@ def process_batched_messages_universal(sender_id):
         logger.info(f"Processing batched messages for {sender_id} on {platform}. Content: '{combined_content}'")
         reply_text = asyncio.run(ask_assistant(combined_content, sender_id, user_name))
         if reply_text:
-            if platform == "WhatsApp":
-                send_meta_whatsapp_message(sender_id, reply_text)
-            elif platform in ["Messenger", "Instagram"]:
-                send_messenger_instagram_message(sender_id, reply_text, platform)
-            elif platform == "ManyChat":
+            if platform == "ManyChat":
                 send_manychat_reply(sender_id, reply_text)
             elif platform == "Telegram":
                 bot_instance = telegram_app.bot
@@ -255,9 +193,7 @@ def process_media_message_immediately(sender_id, user_name, platform, content_fo
         logger.info(f"Processing media immediately for {sender_id} on {platform}.")
         reply_text = asyncio.run(ask_assistant(content_for_assistant, sender_id, user_name))
         if reply_text:
-            if platform == "WhatsApp":
-                send_meta_whatsapp_message(sender_id, reply_text)
-            elif platform == "ManyChat":
+            if platform == "ManyChat":
                 send_manychat_reply(sender_id, reply_text)
             elif platform == "Telegram":
                 bot_instance = telegram_app.bot
@@ -267,71 +203,7 @@ def process_media_message_immediately(sender_id, user_name, platform, content_fo
     thread = threading.Thread(target=target)
     thread.start()
 
-# --- ويب هوك Meta (واتساب، ماسنجر، انستغرام) ---
-@flask_app.route("/meta_webhook", methods=["GET", "POST"])
-def meta_webhook():
-    if request.method == "GET":
-        if request.args.get("hub.mode") == "subscribe" and request.args.get("hub.challenge"):
-            if not request.args.get("hub.verify_token") == META_VERIFY_TOKEN:
-                return "Verification token mismatch", 403
-            return request.args.get("hub.challenge"), 200
-        return "Hello World", 200
-    
-    data = request.get_json()
-    platform_object = data.get("object")
-
-    if platform_object == "whatsapp_business_account":
-        try:
-            entry = data["entry"][0]
-            change = entry["changes"][0]
-            if change.get("field") != "messages": return "OK", 200
-            value = change["value"]
-            message = value["messages"][0]
-            sender_id = message["from"]
-            sender_name = value.get("contacts", [{}])[0].get("profile", {}).get("name", "")
-            message_type = message["type"]
-
-            if message_type == "text":
-                handle_text_message(sender_id, message["text"]["body"], "WhatsApp", sender_name)
-            elif message_type in ["image", "audio"]:
-                content_for_assistant = None
-                if message_type == "image":
-                    image_id = message["image"]["id"]
-                    image_content = download_meta_media_by_id(image_id)
-                    if image_content:
-                        base64_image = base64.b64encode(image_content).decode('utf-8')
-                        content_for_assistant = [{"type": "text", "text": "صف هذه الصورة."}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]
-                elif message_type == "audio":
-                    audio_id = message["audio"]["id"]
-                    audio_content = download_meta_media_by_id(audio_id)
-                    if audio_content:
-                        transcribed_text = transcribe_audio(audio_content, file_format="ogg")
-                        if transcribed_text:
-                            content_for_assistant = f"رسالة صوتية: {transcribed_text}"
-                if content_for_assistant:
-                    process_media_message_immediately(sender_id, sender_name, "WhatsApp", content_for_assistant)
-        except (IndexError, KeyError) as e:
-            logger.warning(f"[Meta Webhook] Incomplete data received: {e}")
-        except Exception as e:
-            logger.error(f"❌ [WhatsApp Processor] Error: {e}", exc_info=True)
-
-    elif platform_object in ["instagram", "page"]:
-        try:
-            platform_name = "Instagram" if platform_object == "instagram" else "Messenger"
-            entry = data["entry"][0]
-            messaging_event = entry["messaging"][0]
-            sender_id = messaging_event["sender"]["id"]
-            message_obj = messaging_event.get("message")
-            if sender_id and message_obj and "text" in message_obj:
-                handle_text_message(sender_id, message_obj["text"], platform_name, "User")
-        except (IndexError, KeyError) as e:
-            logger.warning(f"[Meta Webhook] Incomplete data received: {e}")
-        except Exception as e:
-            logger.error(f"❌ [Messenger/IG Processor] Error: {e}", exc_info=True)
-
-    return "OK", 200
-
-# --- ويب هوك ManyChat ---
+# --- ويب هوك ManyChat (نقطة الدخول الوحيدة لفيسبوك وانستغرام) ---
 @flask_app.route("/manychat_webhook", methods=["POST"])
 def manychat_webhook_handler():
     auth_header = request.headers.get('Authorization')
@@ -342,8 +214,6 @@ def manychat_webhook_handler():
     logger.info("✅ [ManyChat Webhook] Authorization successful.")
     data = request.get_json()
     
-    # --- START: التعديل الموحد والنهائي لـ ManyChat ---
-    
     full_contact = data.get("full_contact")
     
     if not full_contact:
@@ -352,24 +222,17 @@ def manychat_webhook_handler():
 
     sender_id = full_contact.get("id")
     user_name = full_contact.get("first_name", "User")
-    
-    # الكود سيبحث عن آخر رسالة نصية سواء من فيسبوك أو انستغرام
-    # ManyChat يضع آخر رسالة في حقل مختلف لكل منصة داخل full_contact
     last_input = full_contact.get("last_text_input") or full_contact.get("last_input_text")
-
-    # --- END: التعديل الموحد والنهائي ---
 
     if not sender_id or not last_input:
         logger.warning(f"[ManyChat BG] Missing sender_id or last_input within full_contact. Data: {full_contact}")
         return jsonify({"status": "error", "message": "Missing critical data within full_contact"}), 400
 
-    # بقية الكود يعمل كما هو بدون تغيير
     is_url = last_input.startswith(("http://", "https://" ))
     is_media_url = is_url and (any(ext in last_input for ext in ['.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mp3', '.ogg']) or "cdn.fbsbx.com" in last_input or "scontent" in last_input)
 
     if is_media_url:
         logger.info(f"Handling media URL immediately for ManyChat: {last_input}")
-        # تم تعديل هذه الدالة سابقًا لتعمل بشكل صحيح مع هذا المنطق
         media_content = download_media_from_url(last_input)
         if media_content:
             content_for_assistant = None
@@ -436,33 +299,7 @@ if TELEGRAM_BOT_TOKEN:
 # --- الإعداد والتشغيل ---
 @flask_app.route("/")
 def home():
-    return "✅ Bot is running with Universal Batching and Unified ManyChat Logic."
-
-def process_db_queue():
-    if not all([ZAPI_BASE_URL, ZAPI_INSTANCE_ID, ZAPI_TOKEN, CLIENT_TOKEN]): return
-    try:
-        message_to_send = outgoing_collection.find_one_and_update({"status": "pending"}, {"$set": {"status": "processing", "processed_at": datetime.utcnow()}}, sort=[("created_at", 1)], return_document=ReturnDocument.AFTER)
-        if message_to_send:
-            phone = message_to_send["phone"]
-            message_text = message_to_send["message"]
-            message_id = message_to_send["_id"]
-            url = f"{ZAPI_BASE_URL}/instances/{ZAPI_INSTANCE_ID}/token/{ZAPI_TOKEN}/send-text"
-            headers = {"Content-Type": "application/json", "Client-Token": CLIENT_TOKEN}
-            payload = {"phone": phone, "message": message_text}
-            try:
-                response = requests.post(url, headers=headers, json=payload, timeout=20)
-                response.raise_for_status()
-                outgoing_collection.update_one({"_id": message_id}, {"$set": {"status": "sent", "sent_at": datetime.utcnow()}})
-            except requests.exceptions.RequestException as e:
-                outgoing_collection.update_one({"_id": message_id}, {"$set": {"status": "pending", "error_count": message_to_send.get("error_count", 0) + 1}})
-    except Exception as e:
-        logger.error(f"❌ [DB Queue Processor] Error: {e}")
-
-if ZAPI_BASE_URL:
-    scheduler = BackgroundScheduler(timezone="UTC")
-    scheduler.add_job(func=process_db_queue, trigger="interval", seconds=15, id="db_queue_processor", replace_existing=True)
-    scheduler.start()
-    logger.info("🚀 تم تشغيل مجدول المهام (APScheduler) لمعالجة طابور رسائل ZAPI.")
+    return "✅ Bot is running with ManyChat & Telegram integrations ONLY. Simplified Edition."
 
 if __name__ == "__main__":
     logger.info("🚀 التطبيق جاهز للتشغيل عبر خادم WSGI (مثل Gunicorn).")
