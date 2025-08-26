@@ -27,22 +27,13 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ASSISTANT_ID_PREMIUM = os.getenv("ASSISTANT_ID_PREMIUM")
 MONGO_URI = os.getenv("MONGO_URI")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-
-# واتساب (كما هو)
 META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN")
 META_PHONE_NUMBER_ID = os.getenv("META_PHONE_NUMBER_ID")
 META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN")
-
-# (قديم) كان بيستخدم لتنين — هنسيبه لو محتاجه في حتت تانية، لكن الإرسال هيتم بالتوكنات المنفصلة تحت
 MESSENGER_ACCESS_TOKEN = os.getenv("MESSENGER_ACCESS_TOKEN")
-
-# ✅ جديد: فصل توكنات ماسنجر/إنستا
-PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")                 # توكن صفحة فيسبوك (Messenger)
-INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN")       # توكن Instagram Messaging عبر الصفحة
-
-# ✅ جديد: مفتاح سري للتحقق من طلبات ManyChat
+PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
+INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN")
 MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
-
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
@@ -114,15 +105,12 @@ def send_messenger_instagram_message(recipient_id, message, platform="Messenger"
     else:
         platform = "Instagram"
         token = INSTAGRAM_ACCESS_TOKEN
-
     if not token:
         logger.warning(f"⚠️ [{platform}] Access token not set. Cannot send message.")
         return
-
     url = "https://graph.facebook.com/v19.0/me/messages"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = {"recipient": {"id": recipient_id}, "message": {"text": message}}
-
     logger.info(f"📤 [{platform}] Sending reply to {recipient_id} using token {_mask_token(token )}")
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=20)
@@ -173,13 +161,12 @@ async def ask_assistant(content, sender_id, name=""):
         session["thread_id"] = thread.id
     thread_id_str = str(session["thread_id"])
     if isinstance(content, str): content = [{"type": "text", "text": content}]
-    
     try:
         client.beta.threads.messages.create(thread_id=thread_id_str, role="user", content=content)
         run = client.beta.threads.runs.create(thread_id=thread_id_str, assistant_id=ASSISTANT_ID_PREMIUM)
         start_time = time.time()
         while run.status in ["queued", "in_progress"]:
-            if time.time() - start_time > 60:
+            if time.time() - start_time > 90: # زيادة المهلة إلى 90 ثانية
                 logger.error(f"Timeout waiting for run {run.id} to complete.")
                 return "⚠️ حدث تأخير في الرد، يرجى المحاولة مرة أخرى."
             await asyncio.sleep(1)
@@ -197,7 +184,7 @@ async def ask_assistant(content, sender_id, name=""):
         logger.error(f"❌ [Assistant] An exception occurred: {e}", exc_info=True)
         return "⚠️ عفوًا، حدث خطأ غير متوقع."
 
-# --- دالة معالجة الرسائل المجمعة ---
+# --- دالة معالجة الرسائل المجمعة (لواتساب) ---
 def process_batched_messages(sender_id, sender_name):
     lock = processing_locks.setdefault(sender_id, threading.Lock())
     with lock:
@@ -213,7 +200,7 @@ def process_batched_messages(sender_id, sender_name):
         if sender_id in whatsapp_timers:
             del whatsapp_timers[sender_id]
 
-# --- منطق الويب هوك الرئيسي (مع طباعة شاملة) ---
+# --- ويب هوك واتساب/ماسنجر (القديم) ---
 @flask_app.route("/meta_webhook", methods=["GET", "POST"])
 def meta_webhook():
     if request.method == "GET":
@@ -252,85 +239,71 @@ def meta_webhook():
         return "OK", 200
 
 # ===============================================================
-#  ✅  مُعدل ونهائي: مسار خاص لاستقبال الطلبات من ManyChat
+#  ✅  الكود النهائي والصحيح: ويب هوك خاص بـ ManyChat
 # ===============================================================
 @flask_app.route("/manychat_webhook", methods=["POST"])
 def manychat_webhook_handler():
     """
-    هذا الويب هوك يستقبل البيانات من ManyChat Default Reply.
+    يستقبل البيانات من ManyChat، يعالجها، ثم يرد على نفس الطلب
+    بالرسالة التي يجب على ManyChat إرسالها.
     """
     logger.info("="*50)
-    logger.info("🤖 NEW POST REQUEST RECEIVED FROM MANYCHAT 🤖")
+    logger.info("🤖 NEW POST REQUEST RECEIVED FROM MANYCHAT (Response Mode) 🤖")
     
+    # 1. التحقق من الأمان
     auth_header = request.headers.get('Authorization')
     expected_header = f'Bearer {MANYCHAT_SECRET_KEY}'
     if not MANYCHAT_SECRET_KEY or not auth_header or auth_header != expected_header:
-        logger.warning(f"🚨 [ManyChat] UNAUTHORIZED ACCESS ATTEMPT! Header received: {auth_header} 🚨")
+        logger.warning(f"🚨 [ManyChat] UNAUTHORIZED ACCESS ATTEMPT! 🚨")
         return jsonify({"status": "error", "message": "Unauthorized"}), 403
     logger.info("✅ [ManyChat] Authorization successful.")
 
     try:
+        # 2. قراءة البيانات
         data = request.get_json()
-        logger.info(f"ManyChat Request Body: {json.dumps(data, indent=2)}")
-
         contact_data = data.get("manychat_data", {})
         sender_id = contact_data.get("id")
         user_name = contact_data.get("first_name", "User")
-        
-        # ✅  التعديل الرئيسي هنا: نقرأ البيانات من الأماكن الصحيحة
         last_text = contact_data.get("last_input_text")
-        last_input_obj = contact_data.get("last_input", {}) # للبيانات المعقدة
-        
-        platform_name = "Messenger" 
 
         if not sender_id:
-            logger.error("❌ [ManyChat] لم يتم العثور على ID المرسل في الطلب.")
             return jsonify({"status": "error", "message": "Sender ID is missing"}), 400
 
+        # 3. تحديد المحتوى
         content_for_assistant = None
-        
-        # التحقق من وجود نص في last_input_text
         if last_text:
-            # التحقق مما إذا كان النص هو رابط لملف وسائط
             if last_text.startswith("https://cdn.fbsbx.com/" ):
-                media_url = last_text
-                media_type = "file" # نوع عام
-                if ".mp4" in media_url or ".ogg" in media_url: media_type = "audio/video"
-                logger.info(f"🖼️ [ManyChat] Received {media_type} from {sender_id} at URL: {media_url}")
-                content_for_assistant = f"العميل أرسل ملف وسائط. الرابط: {media_url}"
+                content_for_assistant = f"العميل أرسل ملف وسائط. الرابط: {last_text}"
             else:
-                # إذا لم يكن رابطاً، فهو نص عادي
-                logger.info(f"💬 [ManyChat] Received text from {sender_id}: '{last_text}'")
                 content_for_assistant = last_text
-        
-        # كود احتياطي للتحقق من last_input object (في حال تغير سلوك ManyChat)
-        elif last_input_obj.get("text"):
-             content_for_assistant = last_input_obj.get("text")
-        elif last_input_obj.get("url"):
-             content_for_assistant = f"العميل أرسل ملف وسائط. الرابط: {last_input_obj.get('url')}"
-
 
         if not content_for_assistant:
-            logger.warning("⚠️ [ManyChat] لم يتم العثور على محتوى يمكن معالجته في الطلب.")
-            return jsonify({"status": "ok", "message": "No processable content found"}), 200
+            return jsonify({"status": "ok", "message": "No processable content"}), 200
 
-        def task():
-            logger.info(f"🤖 [ManyChat] Sending content to assistant for user {sender_id}...")
-            reply_text = asyncio.run(ask_assistant(content_for_assistant, sender_id, user_name))
-            if reply_text:
-                logger.info(f"📤 [ManyChat] Sending reply to {sender_id}: '{reply_text}'")
-                send_messenger_instagram_message(sender_id, reply_text, platform=platform_name)
+        # 4. الحصول على الرد من المساعد (بشكل مباشر)
+        logger.info(f"🤖 [ManyChat] Getting response from assistant for user {sender_id}...")
+        reply_text = asyncio.run(ask_assistant(content_for_assistant, sender_id, user_name))
 
-        thread = threading.Thread(target=task)
-        thread.start()
-
-        return jsonify({"status": "received"}), 200
+        # 5. بناء الرد الذي سيفهمه ManyChat
+        if reply_text:
+            logger.info(f"✅ [ManyChat] Got reply from assistant: '{reply_text}'")
+            response_to_manychat = {
+                "version": "v2",
+                "content": {
+                    "messages": [
+                        {"type": "text", "text": reply_text}
+                    ]
+                }
+            }
+            return jsonify(response_to_manychat), 200
+        else:
+            return jsonify({"status": "ok", "message": "Assistant had no reply"}), 200
 
     except Exception as e:
         logger.error(f"❌ [ManyChat Webhook] حدث خطأ فادح: {e}", exc_info=True)
         return jsonify({"status": "error", "message": "Internal Server Error"}), 500
 
-# --- دوال معالجة الرسائل لكل منصة ---
+# --- دوال معالجة الرسائل لكل منصة (واتساب، ماسنجر) ---
 def process_whatsapp_message(data):
     try:
         entry = data.get("entry", [])[0]
