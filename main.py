@@ -34,6 +34,8 @@ MESSENGER_ACCESS_TOKEN = os.getenv("MESSENGER_ACCESS_TOKEN")
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
 INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN")
 MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
+# ✅✅✅ مفتاح جديد ومهم جداً
+MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
@@ -88,7 +90,7 @@ def send_meta_whatsapp_message(phone, message):
     url = f"https://graph.facebook.com/v19.0/{META_PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}", "Content-Type": "application/json"}
     payload = {"messaging_product": "whatsapp", "to": phone, "text": {"body": message}}
-    logger.info(f"📤 [Meta API] Preparing to send message to {phone}."  )
+    logger.info(f"📤 [Meta API] Preparing to send message to {phone}."   )
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=20)
         response.raise_for_status()
@@ -111,7 +113,7 @@ def send_messenger_instagram_message(recipient_id, message, platform="Messenger"
     url = "https://graph.facebook.com/v19.0/me/messages"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = {"recipient": {"id": recipient_id}, "message": {"text": message}}
-    logger.info(f"📤 [{platform}] Sending reply to {recipient_id} using token {_mask_token(token  )}")
+    logger.info(f"📤 [{platform}] Sending reply to {recipient_id} using token {_mask_token(token   )}")
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=20)
         response.raise_for_status()
@@ -119,13 +121,44 @@ def send_messenger_instagram_message(recipient_id, message, platform="Messenger"
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ [{platform}] فشل إرسال الرسالة: {e.response.text if e.response else e}")
 
+# ✅✅✅ دالة جديدة لإرسال الردود عبر ManyChat API
+def send_manychat_reply(subscriber_id, text_message):
+    if not MANYCHAT_API_KEY:
+        logger.error("❌ [ManyChat API] MANYCHAT_API_KEY is not set. Cannot send message.")
+        return
+
+    url = "https://api.manychat.com/fb/sending/sendContent"
+    headers = {
+        "Authorization": f"Bearer {MANYCHAT_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "subscriber_id": str(subscriber_id ),
+        "data": {
+            "version": "v2",
+            "content": {
+                "messages": [
+                    {"type": "text", "text": text_message}
+                ]
+            }
+        }
+    }
+    
+    logger.info(f"📤 [ManyChat API] Sending reply to subscriber {subscriber_id}...")
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=20)
+        response.raise_for_status()
+        logger.info(f"✅ [ManyChat API] تم إرسال الرسالة إلى {subscriber_id} بنجاح: {response.json()}")
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ [ManyChat API] فشل إرسال الرسالة: {e.response.text if e.response else e}")
+
 # --- الدوال المشتركة ---
 def download_meta_media(media_id):
     logger.info(f"⬇️ [Meta Media] Attempting to get URL for media_id: {media_id}")
     headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}"}
     url = f"https://graph.facebook.com/v19.0/{media_id}/"
     try:
-        response = requests.get(url, headers=headers, timeout=20  )
+        response = requests.get(url, headers=headers, timeout=20   )
         response.raise_for_status()
         media_info = response.json()
         media_url = media_info.get("url")
@@ -239,76 +272,57 @@ def meta_webhook():
         return "OK", 200
 
 # ===============================================================
-#  ✅  الكود النهائي والصحيح: ويب هوك خاص بـ ManyChat
+#  ✅✅✅ الكود النهائي والصحيح: ويب هوك خاص بـ ManyChat
 # ===============================================================
+
+# ✅✅✅ دالة جديدة للمعالجة في الخلفية
+def process_manychat_in_background(contact_data):
+    sender_id = contact_data.get("id")
+    user_name = contact_data.get("first_name", "User")
+    last_text = contact_data.get("last_input_text")
+    
+    if not sender_id or not last_text:
+        logger.warning("[ManyChat BG] Missing sender_id or last_text in contact data.")
+        return
+
+    content_for_assistant = None
+    if last_text.startswith("https://cdn.fbsbx.com/" ):
+        content_for_assistant = f"العميل أرسل ملف وسائط. الرابط: {last_text}"
+    else:
+        content_for_assistant = last_text
+    
+    if content_for_assistant:
+        logger.info(f"🤖 [ManyChat BG] Getting response from assistant for user {sender_id}...")
+        reply_text = asyncio.run(ask_assistant(content_for_assistant, sender_id, user_name))
+        if reply_text:
+            logger.info(f"✅ [ManyChat BG] Got reply from assistant: '{reply_text}'")
+            # ✅ التغيير الجوهري: نستخدم الدالة الجديدة لإرسال الرد عبر ManyChat API
+            send_manychat_reply(sender_id, reply_text)
+
+# ✅✅✅ ويب هوك ManyChat المعدل
 @flask_app.route("/manychat_webhook", methods=["POST"])
 def manychat_webhook_handler():
     """
-    يستقبل البيانات من ManyChat، يعالجها، ثم يرد على نفس الطلب
-    بالرسالة التي يجب على ManyChat إرسالها.
+    يستقبل الطلب من ManyChat، ويرد فوراً، ثم يبدأ المعالجة في الخلفية.
     """
-    logger.info("="*50)
-    logger.info("🤖 NEW POST REQUEST RECEIVED FROM MANYCHAT (Response Mode) 🤖")
-    
     # 1. التحقق من الأمان
     auth_header = request.headers.get('Authorization')
     expected_header = f'Bearer {MANYCHAT_SECRET_KEY}'
     if not MANYCHAT_SECRET_KEY or not auth_header or auth_header != expected_header:
-        logger.warning(f"🚨 [ManyChat] UNAUTHORIZED ACCESS ATTEMPT! 🚨")
+        logger.warning(f"🚨 [ManyChat Webhook] UNAUTHORIZED ACCESS ATTEMPT! 🚨")
         return jsonify({"status": "error", "message": "Unauthorized"}), 403
-    logger.info("✅ [ManyChat] Authorization successful.")
-
-    try:
-        # 2. قراءة البيانات
-        data = request.get_json()
-        contact_data = data.get("manychat_data", {})
-        sender_id = contact_data.get("id")
-        user_name = contact_data.get("first_name", "User")
-        last_text = contact_data.get("last_input_text")
-
-        if not sender_id:
-            return jsonify({"status": "error", "message": "Sender ID is missing"}), 400
-
-        # 3. تحديد المحتوى
-        content_for_assistant = None
-        if last_text:
-            if last_text.startswith("https://cdn.fbsbx.com/"  ):
-                content_for_assistant = f"العميل أرسل ملف وسائط. الرابط: {last_text}"
-            else:
-                content_for_assistant = last_text
-
-        if not content_for_assistant:
-            return jsonify({"status": "ok", "message": "No processable content"}), 200
-
-        # 4. الحصول على الرد من المساعد (بشكل مباشر)
-        logger.info(f"🤖 [ManyChat] Getting response from assistant for user {sender_id}...")
-        reply_text = asyncio.run(ask_assistant(content_for_assistant, sender_id, user_name))
-
-        # 5. بناء الرد الذي سيفهمه ManyChat
-        if reply_text:
-            logger.info(f"✅ [ManyChat] Got reply from assistant: '{reply_text}'")
-            
-            # ✅✅✅ التعديل هنا: تم تغيير بنية الرد للتوافق مع توثيق ManyChat
-            response_to_manychat = {
-                "version": "v2",
-                "messages": [
-                    {
-                        "type": "text",
-                        "text": reply_text
-                    }
-                ]
-            }
-            
-            # استخدام jsonify لضمان إرسال الـ Headers بشكل صحيح مع المحتوى العربي
-            response = jsonify(response_to_manychat)
-            response.headers['Content-Type'] = 'application/json; charset=utf-8'
-            return response, 200
-        else:
-            return jsonify({"status": "ok", "message": "Assistant had no reply"}), 200
-
-    except Exception as e:
-        logger.error(f"❌ [ManyChat Webhook] حدث خطأ فادح: {e}", exc_info=True)
-        return jsonify({"status": "error", "message": "Internal Server Error"}), 500
+    
+    logger.info("✅ [ManyChat Webhook] Authorization successful.")
+    data = request.get_json()
+    contact_data = data.get("manychat_data", {})
+    
+    # 2. ابدأ المعالجة في الخلفية حتى لا يتأخر الرد
+    thread = threading.Thread(target=process_manychat_in_background, args=(contact_data,))
+    thread.start()
+    
+    # 3. رد فوراً على ManyChat لإعلامه بالاستلام
+    logger.info("✅ [ManyChat Webhook] Request received and acknowledged. Processing in background.")
+    return jsonify({"status": "received"}), 200
 
 # --- دوال معالجة الرسائل لكل منصة (واتساب، ماسنجر) ---
 def process_whatsapp_message(data):
