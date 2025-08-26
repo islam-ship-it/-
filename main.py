@@ -40,6 +40,9 @@ MESSENGER_ACCESS_TOKEN = os.getenv("MESSENGER_ACCESS_TOKEN")
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")                 # توكن صفحة فيسبوك (Messenger)
 INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN")       # توكن Instagram Messaging عبر الصفحة
 
+# ✅ جديد: مفتاح سري للتحقق من طلبات ManyChat
+MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
+
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
@@ -94,7 +97,7 @@ def send_meta_whatsapp_message(phone, message):
     url = f"https://graph.facebook.com/v19.0/{META_PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}", "Content-Type": "application/json"}
     payload = {"messaging_product": "whatsapp", "to": phone, "text": {"body": message}}
-    logger.info(f"📤 [Meta API] Preparing to send message to {phone}.")
+    logger.info(f"📤 [Meta API] Preparing to send message to {phone}." )
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=20)
         response.raise_for_status()
@@ -105,13 +108,11 @@ def send_meta_whatsapp_message(phone, message):
         logger.error(f"❌ [Meta API] فشل إرسال الرسالة إلى {phone}: {error_text}")
         return False
 
-# ✅ تم التعديل هنا: الدالة دلوقتي بتختار التوكن حسب المنصة
 def send_messenger_instagram_message(recipient_id, message, platform="Messenger"):
-    # تحديد التوكن المناسب
     if platform == "Messenger":
         token = PAGE_ACCESS_TOKEN
     else:
-        platform = "Instagram"  # للتوحيد في اللوج
+        platform = "Instagram"
         token = INSTAGRAM_ACCESS_TOKEN
 
     if not token:
@@ -122,7 +123,7 @@ def send_messenger_instagram_message(recipient_id, message, platform="Messenger"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = {"recipient": {"id": recipient_id}, "message": {"text": message}}
 
-    logger.info(f"📤 [{platform}] Sending reply to {recipient_id} using token {_mask_token(token)}")
+    logger.info(f"📤 [{platform}] Sending reply to {recipient_id} using token {_mask_token(token )}")
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=20)
         response.raise_for_status()
@@ -133,10 +134,10 @@ def send_messenger_instagram_message(recipient_id, message, platform="Messenger"
 # --- الدوال المشتركة ---
 def download_meta_media(media_id):
     logger.info(f"⬇️ [Meta Media] Attempting to get URL for media_id: {media_id}")
-    headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}"}  # يستخدم توكن واتساب لأنه خاص بوسائط واتساب
+    headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}"}
     url = f"https://graph.facebook.com/v19.0/{media_id}/"
     try:
-        response = requests.get(url, headers=headers, timeout=20)
+        response = requests.get(url, headers=headers, timeout=20 )
         response.raise_for_status()
         media_info = response.json()
         media_url = media_info.get("url")
@@ -215,7 +216,6 @@ def process_batched_messages(sender_id, sender_name):
 # --- منطق الويب هوك الرئيسي (مع طباعة شاملة) ---
 @flask_app.route("/meta_webhook", methods=["GET", "POST"])
 def meta_webhook():
-    # GET: للتحقق من الويب هوك لأول مرة
     if request.method == "GET":
         logger.info("Received a GET request for webhook verification.")
         if request.args.get("hub.mode") == "subscribe" and request.args.get("hub.challenge"):
@@ -226,12 +226,9 @@ def meta_webhook():
             return request.args.get("hub.challenge"), 200
         return "Hello World", 200
 
-    # POST: لاستقبال الأحداث (الرسائل)
     if request.method == "POST":
-        # --- الطباعة الشاملة ---
         logger.info("="*50)
         logger.info("📬 NEW POST REQUEST RECEIVED ON /meta_webhook 📬")
-        logger.info(f"Request Headers: {request.headers}")
         try:
             data = request.get_json()
             logger.info(f"Request Body (JSON): {json.dumps(data, indent=2)}")
@@ -240,7 +237,6 @@ def meta_webhook():
             logger.info(f"Request Body (Raw): {request.data}")
             return "OK", 200
         logger.info("="*50)
-        # --- نهاية الطباعة الشاملة ---
 
         platform = data.get("object")
         
@@ -255,10 +251,74 @@ def meta_webhook():
             
         return "OK", 200
 
-# --- دوال معالجة الرسائل لكل منصة ---
+# ===============================================================
+#  ✅  جديد: مسار خاص لاستقبال الطلبات من ManyChat
+# ===============================================================
+@flask_app.route("/manychat_webhook", methods=["POST"])
+def manychat_webhook_handler():
+    """
+    هذا الويب هوك يستقبل البيانات من ManyChat Default Reply.
+    """
+    logger.info("="*50)
+    logger.info("🤖 NEW POST REQUEST RECEIVED FROM MANYCHAT 🤖")
+    
+    # --- التحقق من الأمان ---
+    auth_header = request.headers.get('Authorization')
+    expected_header = f'Bearer {MANYCHAT_SECRET_KEY}'
+    if not MANYCHAT_SECRET_KEY or not auth_header or auth_header != expected_header:
+        logger.warning(f"🚨 [ManyChat] UNAUTHORIZED ACCESS ATTEMPT! Header received: {auth_header} 🚨")
+        return jsonify({"status": "error", "message": "Unauthorized"}), 403
+    logger.info("✅ [ManyChat] Authorization successful.")
+    # --- نهاية التحقق ---
 
+    try:
+        data = request.get_json()
+        logger.info(f"ManyChat Request Body: {json.dumps(data, indent=2)}")
+
+        contact_data = data.get("manychat_data", {})
+        sender_id = contact_data.get("id")
+        user_name = contact_data.get("first_name", "User")
+        last_input = contact_data.get("last_input", {})
+        platform_name = "Messenger" 
+
+        if not sender_id:
+            logger.error("❌ [ManyChat] لم يتم العثور على ID المرسل في الطلب.")
+            return jsonify({"status": "error", "message": "Sender ID is missing"}), 400
+
+        content_for_assistant = None
+        
+        if last_input.get("type") == "text":
+            text_message = last_input.get("text")
+            logger.info(f"💬 [ManyChat] Received text from {sender_id}: '{text_message}'")
+            content_for_assistant = text_message
+        elif last_input.get("url"):
+            media_url = last_input.get("url")
+            media_type = last_input.get("type", "file")
+            logger.info(f"🖼️ [ManyChat] Received {media_type} from {sender_id} at URL: {media_url}")
+            content_for_assistant = f"العميل أرسل ملف من نوع '{media_type}'. الرابط: {media_url}"
+
+        if not content_for_assistant:
+            logger.warning("⚠️ [ManyChat] لم يتم العثور على محتوى يمكن معالجته في الطلب.")
+            return jsonify({"status": "ok", "message": "No processable content found"}), 200
+
+        def task():
+            logger.info(f"🤖 [ManyChat] Sending content to assistant for user {sender_id}...")
+            reply_text = asyncio.run(ask_assistant(content_for_assistant, sender_id, user_name))
+            if reply_text:
+                logger.info(f"📤 [ManyChat] Sending reply to {sender_id}: '{reply_text}'")
+                send_messenger_instagram_message(sender_id, reply_text, platform=platform_name)
+
+        thread = threading.Thread(target=task)
+        thread.start()
+
+        return jsonify({"status": "received"}), 200
+
+    except Exception as e:
+        logger.error(f"❌ [ManyChat Webhook] حدث خطأ فادح: {e}", exc_info=True)
+        return jsonify({"status": "error", "message": "Internal Server Error"}), 500
+
+# --- دوال معالجة الرسائل لكل منصة ---
 def process_whatsapp_message(data):
-    # هذه الدالة تبقى كما هي تمامًا، لا تغيير فيها
     try:
         entry = data.get("entry", [])[0]
         change = entry.get("changes", [])[0]
@@ -286,7 +346,6 @@ def process_whatsapp_message(data):
         logger.error(f"❌ [WhatsApp Processor] Error: {e}", exc_info=True)
 
 def process_single_whatsapp_message(data):
-    # هذه الدالة تبقى كما هي تمامًا، لا تغيير فيها
     try:
         entry = data.get("entry", [])[0]
         value = entry.get("changes", [])[0].get("value", {})
@@ -338,25 +397,20 @@ def process_messenger_instagram_message(data):
         message_obj = messaging_event.get("message")
 
         if not sender_id or not message_obj or "text" not in message_obj:
-            # تجاهل الأحداث التي ليست رسائل نصية (مثل seen)
             return
 
         text_body = message_obj.get("text")
         logger.info(f"💬 [{platform_name}] Received text from {sender_id}: '{text_body}'")
 
-        # ملاحظة: لم نطبق تجميع الرسائل هنا بعد للتبسيط، يمكن إضافتها لاحقًا بنفس طريقة واتساب
-        # حاليًا، الرد فوري
         reply_text = asyncio.run(ask_assistant(text_body, sender_id, "User"))
         
         if reply_text:
-            # ✅ تم التعديل هنا: نمرر اسم المنصة لاختيار التوكن الصحيح
             send_messenger_instagram_message(sender_id, reply_text, platform=platform_name)
 
     except Exception as e:
         logger.error(f"❌ [Messenger/IG Processor] Error: {e}", exc_info=True)
 
 # --- منطق تيليجرام ---
-# (لا تغيير هنا، كل شيء كما هو)
 if TELEGRAM_BOT_TOKEN:
     telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     async def start_command(update, context):
