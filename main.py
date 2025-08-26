@@ -30,11 +30,10 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 META_ACCESS_TOKEN = os.getenv("META_ACCESS_TOKEN")
 META_PHONE_NUMBER_ID = os.getenv("META_PHONE_NUMBER_ID")
 META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN")
-MESSENGER_ACCESS_TOKEN = os.getenv("MESSENGER_ACCESS_TOKEN")
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
 INSTAGRAM_ACCESS_TOKEN = os.getenv("INSTAGRAM_ACCESS_TOKEN")
-MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
 MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
+MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
 ZAPI_BASE_URL = os.getenv("ZAPI_BASE_URL")
 ZAPI_INSTANCE_ID = os.getenv("ZAPI_INSTANCE_ID")
 ZAPI_TOKEN = os.getenv("ZAPI_TOKEN")
@@ -56,12 +55,13 @@ flask_app = Flask(__name__)
 app = WsgiToAsgi(flask_app)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# --- متغيرات عالمية لتجميع الرسائل ---
-pending_whatsapp_messages = {}
-whatsapp_timers = {}
+# --- متغيرات عالمية لتجميع الرسائل (الآلية الجديدة الموحدة) ---
+pending_messages = {}
+message_timers = {}
 processing_locks = {}
+BATCH_WAIT_TIME = 10.0 # مدة الانتظار بالثواني (يمكنك تعديلها)
 
-# --- دوال إدارة الجلسات ---
+# --- دوال إدارة الجلسات ودوال مساعدة ---
 def get_session(user_id):
     user_id_str = str(user_id)
     session = sessions_collection.find_one({"_id": user_id_str})
@@ -79,8 +79,7 @@ def save_session(user_id, session_data):
     session_data["_id"] = user_id_str
     sessions_collection.replace_one({"_id": user_id_str}, session_data, upsert=True)
 
-# --- دوال مساعدة صغيرة ---
-def _mask_token(tok: str) -> str:
+def _mask_token(tok: str):
     if not tok: return "None"
     return f"{tok[:6]}...{tok[-4:]}" if len(tok) > 12 else "****"
 
@@ -89,7 +88,7 @@ def send_meta_whatsapp_message(phone, message):
     url = f"https://graph.facebook.com/v19.0/{META_PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}", "Content-Type": "application/json"}
     payload = {"messaging_product": "whatsapp", "to": phone, "text": {"body": message}}
-    logger.info(f"📤 [Meta API] Preparing to send message to {phone}."    )
+    logger.info(f"📤 [Meta API] Preparing to send message to {phone}." )
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=20)
         response.raise_for_status()
@@ -101,18 +100,14 @@ def send_meta_whatsapp_message(phone, message):
         return False
 
 def send_messenger_instagram_message(recipient_id, message, platform="Messenger"):
-    if platform == "Messenger":
-        token = PAGE_ACCESS_TOKEN
-    else:
-        platform = "Instagram"
-        token = INSTAGRAM_ACCESS_TOKEN
+    token = PAGE_ACCESS_TOKEN if platform == "Messenger" else INSTAGRAM_ACCESS_TOKEN
     if not token:
         logger.warning(f"⚠️ [{platform}] Access token not set. Cannot send message.")
         return
     url = "https://graph.facebook.com/v19.0/me/messages"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = {"recipient": {"id": recipient_id}, "message": {"text": message}}
-    logger.info(f"📤 [{platform}] Sending reply to {recipient_id} using token {_mask_token(token    )}")
+    logger.info(f"📤 [{platform}] Sending reply to {recipient_id} using token {_mask_token(token )}")
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=20)
         response.raise_for_status()
@@ -124,24 +119,9 @@ def send_manychat_reply(subscriber_id, text_message):
     if not MANYCHAT_API_KEY:
         logger.error("❌ [ManyChat API] MANYCHAT_API_KEY is not set. Cannot send message.")
         return
-
     url = "https://api.manychat.com/fb/sending/sendContent"
-    headers = {
-        "Authorization": f"Bearer {MANYCHAT_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "subscriber_id": str(subscriber_id  ),
-        "data": {
-            "version": "v2",
-            "content": {
-                "messages": [
-                    {"type": "text", "text": text_message}
-                ]
-            }
-        }
-    }
-    
+    headers = {"Authorization": f"Bearer {MANYCHAT_API_KEY}", "Content-Type": "application/json"}
+    payload = {"subscriber_id": str(subscriber_id ), "data": {"version": "v2", "content": {"messages": [{"type": "text", "text": text_message}]}}}
     logger.info(f"📤 [ManyChat API] Sending reply to subscriber {subscriber_id}...")
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=20)
@@ -150,16 +130,38 @@ def send_manychat_reply(subscriber_id, text_message):
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ [ManyChat API] فشل إرسال الرسالة: {e.response.text if e.response else e}")
 
-# --- الدوال المشتركة ---
-def download_media_from_url(media_url):
+async def send_telegram_message(bot, chat_id, text, business_id=None):
+    try:
+        if business_id:
+            await bot.send_message(chat_id=chat_id, text=text, business_connection_id=business_id)
+        else:
+            await bot.send_message(chat_id=chat_id, text=text)
+        logger.info(f"✅ [Telegram] تم إرسال الرسالة إلى {chat_id} بنجاح.")
+    except Exception as e:
+        logger.error(f"❌ [Telegram] فشل إرسال الرسالة إلى {chat_id}: {e}")
+
+# --- دوال معالجة الوسائط والذكاء الاصطناعي ---
+def download_media_from_url(media_url, headers=None):
     logger.info(f"⬇️ [Media Downloader] Attempting to download from URL: {media_url}")
     try:
-        media_response = requests.get(media_url, timeout=20)
+        media_response = requests.get(media_url, headers=headers, timeout=20)
         media_response.raise_for_status()
         logger.info(f"✅ [Media Downloader] Successfully downloaded media content.")
         return media_response.content
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ [Media Downloader] فشل تحميل الوسائط من الرابط {media_url}: {e}")
+        return None
+
+def download_meta_media_by_id(media_id):
+    headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}"}
+    url = f"https://graph.facebook.com/v19.0/{media_id}/"
+    try:
+        response = requests.get(url, headers=headers, timeout=20 )
+        response.raise_for_status()
+        media_info = response.json()
+        media_url = media_info.get("url")
+        return download_media_from_url(media_url, headers=headers)
+    except requests.exceptions.RequestException:
         return None
 
 def transcribe_audio(audio_content, file_format="mp4"):
@@ -209,91 +211,63 @@ async def ask_assistant(content, sender_id, name=""):
         logger.error(f"❌ [Assistant] An exception occurred: {e}", exc_info=True)
         return "⚠️ عفوًا، حدث خطأ غير متوقع."
 
-# ===============================================================
-#  ✅✅✅ الكود النهائي والصحيح: ويب هوك خاص بـ ManyChat
-# ===============================================================
+# --- آلية التجميع الموحدة ---
+def process_batched_messages_universal(sender_id):
+    lock = processing_locks.setdefault(sender_id, threading.Lock())
+    with lock:
+        if sender_id not in pending_messages or not pending_messages[sender_id]:
+            return
+        user_data = pending_messages[sender_id]
+        combined_content = "\n".join(user_data["texts"])
+        platform = user_data["platform"]
+        user_name = user_data["name"]
+        logger.info(f"Processing batched messages for {sender_id} on {platform}. Content: '{combined_content}'")
+        reply_text = asyncio.run(ask_assistant(combined_content, sender_id, user_name))
+        if reply_text:
+            if platform == "WhatsApp":
+                send_meta_whatsapp_message(sender_id, reply_text)
+            elif platform in ["Messenger", "Instagram"]:
+                send_messenger_instagram_message(sender_id, reply_text, platform)
+            elif platform == "ManyChat":
+                send_manychat_reply(sender_id, reply_text)
+            elif platform == "Telegram":
+                bot_instance = telegram_app.bot
+                business_id = user_data.get("business_id")
+                asyncio.run(send_telegram_message(bot_instance, sender_id, reply_text, business_id))
+        del pending_messages[sender_id]
+        if sender_id in message_timers:
+            del message_timers[sender_id]
 
-def process_manychat_in_background(contact_data):
-    sender_id = contact_data.get("id")
-    user_name = contact_data.get("first_name", "User")
-    last_input = contact_data.get("last_input_text")
-    
-    if not sender_id or not last_input:
-        logger.warning("[ManyChat BG] Missing sender_id or last_input in contact data.")
-        return
+def handle_text_message(sender_id, text, platform, user_name, **kwargs):
+    if sender_id in message_timers:
+        message_timers[sender_id].cancel()
+    if sender_id not in pending_messages:
+        pending_messages[sender_id] = {"texts": [], "platform": platform, "name": user_name, **kwargs}
+    pending_messages[sender_id]["texts"].append(text)
+    logger.info(f"Message from {sender_id} on {platform} added to batch. Current batch size: {len(pending_messages[sender_id]['texts'])}")
+    timer = threading.Timer(BATCH_WAIT_TIME, process_batched_messages_universal, args=[sender_id])
+    message_timers[sender_id] = timer
+    timer.start()
 
-    content_for_assistant = None
-    reply_text = None
-
-    # الشرط الجديد والأكثر مرونة لاكتشاف الروابط
-    is_url = last_input.startswith("http://" ) or last_input.startswith("https://" )
-    is_media_url = is_url and (any(ext in last_input for ext in ['.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mp3', '.ogg']) or "cdn.fbsbx.com" in last_input or "scontent" in last_input)
-
-    if is_media_url:
-        logger.info(f"🖼️ [ManyChat BG] Detected media URL: {last_input}")
-        media_content = download_media_from_url(last_input)
-        
-        if media_content:
-            is_audio = any(ext in last_input for ext in ['.mp4', '.mp3', '.ogg']) or "audioclip" in last_input
-            
-            if is_audio:
-                logger.info("🎙️ [ManyChat BG] Media is audio. Transcribing...")
-                transcribed_text = transcribe_audio(media_content, file_format="mp4")
-                if transcribed_text:
-                    content_for_assistant = f"العميل أرسل رسالة صوتية، هذا هو نصها: \"{transcribed_text}\""
-                else:
-                    reply_text = "عذراً، لم أتمكن من فهم رسالتك الصوتية. هل يمكنك كتابتها؟"
-            else: 
-                logger.info("🖼️ [ManyChat BG] Media is an image. Analyzing with Vision API...")
-                base64_image = base64.b64encode(media_content).decode('utf-8')
-                try:
-                    vision_response = client.chat.completions.create(
-                        model="gpt-4o",
-                        messages=[{
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": "صف هذه الصورة باختصار شديد باللغة العربية. إذا كانت الصورة غير واضحة أو مجرد أيقونة، اذكر ذلك."},
-                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                            ]
-                        }],
-                        max_tokens=150
-                    )
-                    image_description = vision_response.choices[0].message.content
-                    content_for_assistant = f"العميل أرسل صورة، هذا هو وصفها: '{image_description}'."
-                except Exception as e:
-                    logger.error(f"❌ [Vision API] فشل تحليل الصورة: {e}")
-                    reply_text = "تم استلام الصورة، ولكن حدث خطأ أثناء تحليلها."
-        else:
-            reply_text = "عذراً، لم أتمكن من تحميل الملف الذي أرسلته."
-    else:
-        content_for_assistant = last_input
-
-    if content_for_assistant:
-        logger.info(f"🤖 [ManyChat BG] Getting response from assistant for user {sender_id}...")
+# --- معالجة الوسائط الفورية ---
+def process_media_message_immediately(sender_id, user_name, platform, content_for_assistant, **kwargs):
+    def target():
+        logger.info(f"Processing media immediately for {sender_id} on {platform}.")
         reply_text = asyncio.run(ask_assistant(content_for_assistant, sender_id, user_name))
+        if reply_text:
+            if platform == "WhatsApp":
+                send_meta_whatsapp_message(sender_id, reply_text)
+            elif platform == "ManyChat":
+                send_manychat_reply(sender_id, reply_text)
+            elif platform == "Telegram":
+                bot_instance = telegram_app.bot
+                business_id = kwargs.get("business_id")
+                asyncio.run(send_telegram_message(bot_instance, sender_id, reply_text, business_id))
     
-    if reply_text:
-        send_manychat_reply(sender_id, reply_text)
-
-@flask_app.route("/manychat_webhook", methods=["POST"])
-def manychat_webhook_handler():
-    auth_header = request.headers.get('Authorization')
-    expected_header = f'Bearer {MANYCHAT_SECRET_KEY}'
-    if not MANYCHAT_SECRET_KEY or not auth_header or auth_header != expected_header:
-        logger.warning(f"🚨 [ManyChat Webhook] UNAUTHORIZED ACCESS ATTEMPT! 🚨")
-        return jsonify({"status": "error", "message": "Unauthorized"}), 403
-    
-    logger.info("✅ [ManyChat Webhook] Authorization successful.")
-    data = request.get_json()
-    contact_data = data.get("manychat_data", {})
-    
-    thread = threading.Thread(target=process_manychat_in_background, args=(contact_data,))
+    thread = threading.Thread(target=target)
     thread.start()
-    
-    logger.info("✅ [ManyChat Webhook] Request received and acknowledged. Processing in background.")
-    return jsonify({"status": "received"}), 200
 
-# --- ويب هوك واتساب/ماسنجر (القديم) ---
+# --- ويب هوك Meta (واتساب، ماسنجر، انستغرام) ---
 @flask_app.route("/meta_webhook", methods=["GET", "POST"])
 def meta_webhook():
     if request.method == "GET":
@@ -302,166 +276,138 @@ def meta_webhook():
                 return "Verification token mismatch", 403
             return request.args.get("hub.challenge"), 200
         return "Hello World", 200
-    if request.method == "POST":
-        data = request.get_json()
-        platform = data.get("object")
-        if platform == "whatsapp_business_account":
-            thread = threading.Thread(target=process_whatsapp_message, args=(data,))
-            thread.start()
-        elif platform == "instagram" or platform == "page":
-            thread = threading.Thread(target=process_messenger_instagram_message, args=(data,))
-            thread.start()
-        return "OK", 200
+    
+    data = request.get_json()
+    platform_object = data.get("object")
 
-# --- دوال معالجة الرسائل لكل منصة (واتساب، ماسنجر) ---
-def process_whatsapp_message(data):
-    try:
-        entry = data.get("entry", [])[0]
-        change = entry.get("changes", [])[0]
-        if change.get("field") != "messages": return
-        value = change.get("value", {})
-        message = value.get("messages", [{}])[0]
-        if not message or "from" not in message: return
-        sender_id = message.get("from")
-        sender_name = value.get("contacts", [{}])[0].get("profile", {}).get("name", "")
-        message_type = message.get("type")
-        if message_type == "text":
-            text_body = message.get("text", {}).get("body")
-            if sender_id in whatsapp_timers: whatsapp_timers[sender_id].cancel()
-            if sender_id not in pending_whatsapp_messages: pending_whatsapp_messages[sender_id] = []
-            pending_whatsapp_messages[sender_id].append(text_body)
-            timer = threading.Timer(15.0, process_batched_messages, args=[sender_id, sender_name])
-            whatsapp_timers[sender_id] = timer
-            timer.start()
-        else:
-            media_thread = threading.Thread(target=process_single_whatsapp_message, args=(data,))
-            media_thread.start()
-    except Exception as e:
-        logger.error(f"❌ [WhatsApp Processor] Error: {e}", exc_info=True)
+    if platform_object == "whatsapp_business_account":
+        try:
+            entry = data["entry"][0]
+            change = entry["changes"][0]
+            if change.get("field") != "messages": return "OK", 200
+            value = change["value"]
+            message = value["messages"][0]
+            sender_id = message["from"]
+            sender_name = value.get("contacts", [{}])[0].get("profile", {}).get("name", "")
+            message_type = message["type"]
 
-def process_single_whatsapp_message(data):
-    try:
-        entry = data.get("entry", [])[0]
-        value = entry.get("changes", [])[0].get("value", {})
-        message = value.get("messages", [{}])[0]
-        sender_id = message.get("from")
-        sender_name = value.get("contacts", [{}])[0].get("profile", {}).get("name", "")
-        message_type = message.get("type")
-        content_for_assistant, reply_text = None, None
-        if message_type == "image":
-            caption = message.get("image", {}).get("caption", "")
-            image_id = message.get("image", {}).get("id")
-            image_content = download_meta_media_by_id(image_id)
-            if image_content:
-                base64_image = base64.b64encode(image_content).decode('utf-8')
-                try:
-                    vision_response = client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": [{"type": "text", "text": "صف هذه الصورة."}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]}], max_tokens=100)
-                    image_description = vision_response.choices[0].message.content
-                    content_for_assistant = f"صورة: '{image_description}'. تعليق: \"{caption}\""
-                except Exception as e:
-                    reply_text = "خطأ في تحليل الصورة."
+            if message_type == "text":
+                handle_text_message(sender_id, message["text"]["body"], "WhatsApp", sender_name)
+            elif message_type in ["image", "audio"]:
+                content_for_assistant = None
+                if message_type == "image":
+                    image_id = message["image"]["id"]
+                    image_content = download_meta_media_by_id(image_id)
+                    if image_content:
+                        base64_image = base64.b64encode(image_content).decode('utf-8')
+                        content_for_assistant = [{"type": "text", "text": "صف هذه الصورة."}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]
+                elif message_type == "audio":
+                    audio_id = message["audio"]["id"]
+                    audio_content = download_meta_media_by_id(audio_id)
+                    if audio_content:
+                        transcribed_text = transcribe_audio(audio_content, file_format="ogg")
+                        if transcribed_text:
+                            content_for_assistant = f"رسالة صوتية: {transcribed_text}"
+                if content_for_assistant:
+                    process_media_message_immediately(sender_id, sender_name, "WhatsApp", content_for_assistant)
+        except (IndexError, KeyError) as e:
+            logger.warning(f"[Meta Webhook] Incomplete data received: {e}")
+        except Exception as e:
+            logger.error(f"❌ [WhatsApp Processor] Error: {e}", exc_info=True)
+
+    elif platform_object in ["instagram", "page"]:
+        try:
+            platform_name = "Instagram" if platform_object == "instagram" else "Messenger"
+            entry = data["entry"][0]
+            messaging_event = entry["messaging"][0]
+            sender_id = messaging_event["sender"]["id"]
+            message_obj = messaging_event.get("message")
+            if sender_id and message_obj and "text" in message_obj:
+                handle_text_message(sender_id, message_obj["text"], platform_name, "User")
+        except (IndexError, KeyError) as e:
+            logger.warning(f"[Meta Webhook] Incomplete data received: {e}")
+        except Exception as e:
+            logger.error(f"❌ [Messenger/IG Processor] Error: {e}", exc_info=True)
+
+    return "OK", 200
+
+# --- ويب هوك ManyChat ---
+@flask_app.route("/manychat_webhook", methods=["POST"])
+def manychat_webhook_handler():
+    auth_header = request.headers.get('Authorization')
+    if not MANYCHAT_SECRET_KEY or auth_header != f'Bearer {MANYCHAT_SECRET_KEY}':
+        logger.warning(f"🚨 [ManyChat Webhook] UNAUTHORIZED ACCESS ATTEMPT! 🚨")
+        return jsonify({"status": "error", "message": "Unauthorized"}), 403
+    
+    data = request.get_json()
+    contact_data = data.get("manychat_data", {})
+    sender_id = contact_data.get("id")
+    user_name = contact_data.get("first_name", "User")
+    last_input = contact_data.get("last_input_text")
+
+    if not sender_id or not last_input:
+        return jsonify({"status": "error", "message": "Missing data"}), 400
+
+    is_url = last_input.startswith(("http://", "https://" ))
+    is_media_url = is_url and (any(ext in last_input for ext in ['.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mp3', '.ogg']) or "cdn.fbsbx.com" in last_input or "scontent" in last_input)
+
+    if is_media_url:
+        media_content = download_media_from_url(last_input)
+        if media_content:
+            content_for_assistant = None
+            is_audio = any(ext in last_input for ext in ['.mp4', '.mp3', '.ogg']) or "audioclip" in last_input
+            if is_audio:
+                transcribed_text = transcribe_audio(media_content, file_format="mp4")
+                if transcribed_text:
+                    content_for_assistant = f"العميل أرسل رسالة صوتية، هذا هو نصها: \"{transcribed_text}\""
             else:
-                reply_text = "خطأ في تحميل الصورة."
-        elif message_type == "audio":
-            audio_id = message.get("audio", {}).get("id")
-            audio_content = download_meta_media_by_id(audio_id)
-            if audio_content:
-                transcribed_text = transcribe_audio(audio_content, file_format="ogg")
-                if transcribed_text: content_for_assistant = f"رسالة صوتية: {transcribed_text}"
-                else: reply_text = "خطأ في تحويل الصوت."
-            else:
-                reply_text = "خطأ في تحميل الصوت."
-        if content_for_assistant and not reply_text:
-            reply_text = asyncio.run(ask_assistant(content_for_assistant, sender_id, sender_name))
-        if reply_text:
-            send_meta_whatsapp_message(sender_id, reply_text)
-    except Exception as e:
-        logger.error(f"❌ [Single Message Processor] Error: {e}", exc_info=True)
+                base64_image = base64.b64encode(media_content).decode('utf-8')
+                content_for_assistant = [{"type": "text", "text": "صف هذه الصورة باختصار شديد باللغة العربية."}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]
+            if content_for_assistant:
+                process_media_message_immediately(sender_id, user_name, "ManyChat", content_for_assistant)
+    else:
+        handle_text_message(sender_id, last_input, "ManyChat", user_name)
 
-def download_meta_media_by_id(media_id):
-    headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}"}
-    url = f"https://graph.facebook.com/v19.0/{media_id}/"
-    try:
-        response = requests.get(url, headers=headers, timeout=20 )
-        response.raise_for_status()
-        media_info = response.json()
-        media_url = media_info.get("url")
-        media_response = requests.get(media_url, headers=headers, timeout=20)
-        media_response.raise_for_status()
-        return media_response.content
-    except requests.exceptions.RequestException as e:
-        return None
-
-def process_messenger_instagram_message(data):
-    try:
-        platform_name = "Messenger" if data.get("object") == "page" else "Instagram"
-        entry = data.get("entry", [])[0]
-        messaging_event = entry.get("messaging", [{}])[0]
-        sender_id = messaging_event.get("sender", {}).get("id")
-        message_obj = messaging_event.get("message")
-        if not sender_id or not message_obj or "text" not in message_obj:
-            return
-        text_body = message_obj.get("text")
-        reply_text = asyncio.run(ask_assistant(text_body, sender_id, "User"))
-        if reply_text:
-            send_messenger_instagram_message(sender_id, reply_text, platform=platform_name)
-    except Exception as e:
-        logger.error(f"❌ [Messenger/IG Processor] Error: {e}", exc_info=True)
-
-def process_batched_messages(sender_id, sender_name):
-    lock = processing_locks.setdefault(sender_id, threading.Lock())
-    with lock:
-        if sender_id not in pending_whatsapp_messages or not pending_whatsapp_messages[sender_id]:
-            return
-        combined_content = "\n".join(pending_whatsapp_messages[sender_id])
-        reply_text = asyncio.run(ask_assistant(combined_content, sender_id, sender_name))
-        if reply_text:
-            send_meta_whatsapp_message(sender_id, reply_text)
-        del pending_whatsapp_messages[sender_id]
-        if sender_id in whatsapp_timers:
-            del whatsapp_timers[sender_id]
+    return jsonify({"status": "received"}), 200
 
 # --- منطق تيليجرام ---
 if TELEGRAM_BOT_TOKEN:
     telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    
     async def start_command(update, context):
         await update.message.reply_text(f"أهلاً {update.effective_user.first_name}!")
+
     async def handle_telegram_message(update, context):
         message = update.message or update.business_message
         if not message: return
-        chat_id = message.chat.id
+        
+        chat_id = str(message.chat.id)
         user_name = message.from_user.first_name
         business_id = getattr(update.business_message, "business_connection_id", None) if hasattr(update, "business_message") and update.business_message else None
-        try:
-            await context.bot.send_chat_action(chat_id=chat_id, action=telegram.constants.ChatAction.TYPING, business_connection_id=business_id)
-        except Exception as e:
-            logger.warning(f"⚠️ لم يتمكن من إرسال chat action: {e}")
-        session = get_session(chat_id)
-        session["last_message_time"] = datetime.utcnow().isoformat()
-        save_session(chat_id, session)
-        reply_text, content_for_assistant = "", None
-        try:
-            if message.text:
-                content_for_assistant = message.text
-            elif message.voice:
+        
+        if message.text:
+            handle_text_message(chat_id, message.text, "Telegram", user_name, business_id=business_id)
+        else:
+            content_for_assistant = None
+            if message.voice:
                 voice_file = await message.voice.get_file()
                 voice_content = await voice_file.download_as_bytearray()
                 transcribed_text = transcribe_audio(bytes(voice_content), file_format="ogg")
-                if transcribed_text: content_for_assistant = f"رسالة صوتية: {transcribed_text}"
-                else: reply_text = "خطأ في تحويل الصوت."
+                if transcribed_text:
+                    content_for_assistant = f"رسالة صوتية: {transcribed_text}"
             elif message.photo:
                 caption = message.caption or ""
-                content_for_assistant = f"صورة. تعليق: \"{caption}\""
-            if content_for_assistant and not reply_text:
-                reply_text = await ask_assistant(content_for_assistant, chat_id, user_name)
-            if reply_text:
-                if business_id: await context.bot.send_message(chat_id=chat_id, text=reply_text, business_connection_id=business_id)
-                else: await context.bot.send_message(chat_id=chat_id, text=reply_text)
-        except Exception as e:
-            logger.error(f"❌ [Telegram Handler] Error: {e}", exc_info=True)
-            await context.bot.send_message(chat_id=chat_id, text="عذرًا، حدث خطأ.", business_connection_id=business_id)
+                photo_file = await message.photo[-1].get_file()
+                photo_content = await photo_file.download_as_bytearray()
+                base64_image = base64.b64encode(bytes(photo_content)).decode('utf-8')
+                content_for_assistant = [{"type": "text", "text": f"هذه صورة أرسلها العميل. التعليق عليها هو: '{caption}'. قم بوصف الصورة والرد على التعليق."}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]
+            
+            if content_for_assistant:
+                process_media_message_immediately(chat_id, user_name, "Telegram", content_for_assistant, business_id=business_id)
+
     telegram_app.add_handler(CommandHandler("start", start_command))
     telegram_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_telegram_message))
+
     @flask_app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
     async def telegram_webhook_handler():
         data = request.get_json()
@@ -472,7 +418,7 @@ if TELEGRAM_BOT_TOKEN:
 # --- الإعداد والتشغيل ---
 @flask_app.route("/")
 def home():
-    return "✅ Bot is running with Enhanced Media Support for ManyChat"
+    return "✅ Bot is running with Universal Batching Logic."
 
 def process_db_queue():
     if not all([ZAPI_BASE_URL, ZAPI_INSTANCE_ID, ZAPI_TOKEN, CLIENT_TOKEN]): return
