@@ -50,57 +50,41 @@ message_timers = {}
 processing_locks = {}
 BATCH_WAIT_TIME = 10.0
 
-# --- دوال إدارة الجلسات (النسخة المطورة) ---
+# --- دوال إدارة الجلسات (النسخة المصححة) ---
 def get_or_create_session_from_contact(contact_data, platform):
-    """
-    هذه هي الدالة المحورية الجديدة. تنشئ أو تحدث جلسة مستخدم في MongoDB
-    بناءً على بيانات كاملة من أي منصة.
-    """
-    # تحديد المعرف الأساسي الدائم للمستخدم
     if platform in ["ManyChat-Instagram", "ManyChat-Facebook"]:
-        user_id = str(contact_data.get("id")) # في ManyChat، الـ ID هو المعرف الأساسي
+        user_id = str(contact_data.get("id"))
     elif platform == "Telegram":
         user_id = str(contact_data.get("id"))
-    # أضف هنا منطق واتساب مستقبلاً
-    # elif platform == "WhatsApp":
-    #     user_id = str(contact_data.get("wa_id"))
-
-    if not user_id:
+    else:
         logger.error(f"Could not determine user_id for platform {platform}")
         return None
 
-    # البحث عن المستخدم في قاعدة البيانات
     session = sessions_collection.find_one({"_id": user_id})
     now_utc = datetime.now(timezone.utc)
 
+    main_platform = "Unknown"
+    if platform == "ManyChat-Instagram":
+        main_platform = "Instagram"
+    elif platform == "ManyChat-Facebook":
+        main_platform = "Facebook"
+    elif platform == "Telegram":
+        main_platform = "Telegram"
+
     if session:
-        # المستخدم موجود، نقوم بتحديث بياناته
         update_fields = {
             "last_contact_date": now_utc,
+            "platform": main_platform, # <-- هذا هو السطر الذي تم إضافته للتصحيح
             "profile.name": contact_data.get("name"),
             "profile.profile_pic": contact_data.get("profile_pic"),
             "status": "active"
         }
-        # إزالة أي حقول فارغة من التحديث
         update_fields = {k: v for k, v in update_fields.items() if v is not None}
         sessions_collection.update_one({"_id": user_id}, {"$set": update_fields})
         logger.info(f"Updated session for existing user: {user_id} on platform {platform}")
-        # إعادة تحميل الجلسة بعد التحديث للتأكد من أننا نستخدم أحدث البيانات
         session = sessions_collection.find_one({"_id": user_id})
-
     else:
-        # المستخدم جديد، نقوم بإنشاء مستند كامل له
         logger.info(f"Creating new comprehensive session for user: {user_id} on platform {platform}")
-        
-        # تحديد المنصة الرئيسية (Instagram or Facebook) من بيانات ManyChat
-        main_platform = "Unknown"
-        if platform == "ManyChat-Instagram":
-            main_platform = "Instagram"
-        elif platform == "ManyChat-Facebook":
-            main_platform = "Facebook"
-        elif platform == "Telegram":
-            main_platform = "Telegram"
-
         new_session = {
             "_id": user_id,
             "platform": main_platform,
@@ -110,7 +94,7 @@ def get_or_create_session_from_contact(contact_data, platform):
                 "last_name": contact_data.get("last_name"),
                 "profile_pic": contact_data.get("profile_pic")
             },
-            "openai_thread_id": None, # سيتم إنشاؤه عند أول رسالة
+            "openai_thread_id": None,
             "tags": [f"source:{main_platform.lower()}"],
             "custom_fields": contact_data.get("custom_fields", {}),
             "conversation_summary": "",
@@ -125,9 +109,6 @@ def get_or_create_session_from_contact(contact_data, platform):
     return session
 
 async def get_assistant_reply(session, content):
-    """
-    دالة مساعدة للحصول على رد من OpenAI وتحديث الجلسة.
-    """
     user_id = session["_id"]
     thread_id = session.get("openai_thread_id")
 
@@ -137,13 +118,11 @@ async def get_assistant_reply(session, content):
         thread_id = thread.id
         sessions_collection.update_one({"_id": user_id}, {"$set": {"openai_thread_id": thread_id}})
     
-    if isinstance(content, str):
-        content = [{"type": "text", "text": content}]
+    if isinstance(content, str): content = [{"type": "text", "text": content}]
 
     try:
         client.beta.threads.messages.create(thread_id=thread_id, role="user", content=content)
         run = client.beta.threads.runs.create(thread_id=thread_id, assistant_id=ASSISTANT_ID_PREMIUM)
-        
         start_time = time.time()
         while run.status in ["queued", "in_progress"]:
             if time.time() - start_time > 90:
@@ -151,7 +130,6 @@ async def get_assistant_reply(session, content):
                 return "⚠️ حدث تأخير في الرد، يرجى المحاولة مرة أخرى."
             await asyncio.sleep(1)
             run = client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
-
         if run.status == "completed":
             messages = client.beta.threads.messages.list(thread_id=thread_id, limit=1)
             return messages.data[0].content[0].text.value.strip()
@@ -286,7 +264,6 @@ def manychat_webhook_handler():
         logger.error(f"[ManyChat Webhook] CRITICAL: 'full_contact' data not found. Data: {data}")
         return jsonify({"status": "error", "message": "'full_contact' data is required."}), 400
 
-    # تحديد المنصة وتمريرها لدالة التسجيل
     platform = "ManyChat-Instagram" if full_contact.get("ig_id") else "ManyChat-Facebook"
     session = get_or_create_session_from_contact(full_contact, platform)
     
@@ -330,7 +307,6 @@ if TELEGRAM_BOT_TOKEN:
         message = update.message or update.business_message
         if not message: return
         
-        # تحضير بيانات المستخدم بنفس شكل ManyChat لتمريرها للدالة الموحدة
         user_contact_data = {
             "id": message.from_user.id,
             "name": message.from_user.full_name,
@@ -374,7 +350,7 @@ if TELEGRAM_BOT_TOKEN:
 # --- الإعداد والتشغيل ---
 @flask_app.route("/")
 def home():
-    return "✅ Bot is running with Advanced MongoDB Logging."
+    return "✅ Bot is running with Advanced MongoDB Logging (v2 - Patched)."
 
 if __name__ == "__main__":
     logger.info("🚀 التطبيق جاهز للتشغيل عبر خادم WSGI (مثل Gunicorn).")
