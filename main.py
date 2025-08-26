@@ -252,7 +252,7 @@ def meta_webhook():
         return "OK", 200
 
 # ===============================================================
-#  ✅  جديد: مسار خاص لاستقبال الطلبات من ManyChat
+#  ✅  مُعدل ونهائي: مسار خاص لاستقبال الطلبات من ManyChat
 # ===============================================================
 @flask_app.route("/manychat_webhook", methods=["POST"])
 def manychat_webhook_handler():
@@ -262,14 +262,12 @@ def manychat_webhook_handler():
     logger.info("="*50)
     logger.info("🤖 NEW POST REQUEST RECEIVED FROM MANYCHAT 🤖")
     
-    # --- التحقق من الأمان ---
     auth_header = request.headers.get('Authorization')
     expected_header = f'Bearer {MANYCHAT_SECRET_KEY}'
     if not MANYCHAT_SECRET_KEY or not auth_header or auth_header != expected_header:
         logger.warning(f"🚨 [ManyChat] UNAUTHORIZED ACCESS ATTEMPT! Header received: {auth_header} 🚨")
         return jsonify({"status": "error", "message": "Unauthorized"}), 403
     logger.info("✅ [ManyChat] Authorization successful.")
-    # --- نهاية التحقق ---
 
     try:
         data = request.get_json()
@@ -278,7 +276,11 @@ def manychat_webhook_handler():
         contact_data = data.get("manychat_data", {})
         sender_id = contact_data.get("id")
         user_name = contact_data.get("first_name", "User")
-        last_input = contact_data.get("last_input", {})
+        
+        # ✅  التعديل الرئيسي هنا: نقرأ البيانات من الأماكن الصحيحة
+        last_text = contact_data.get("last_input_text")
+        last_input_obj = contact_data.get("last_input", {}) # للبيانات المعقدة
+        
         platform_name = "Messenger" 
 
         if not sender_id:
@@ -287,15 +289,26 @@ def manychat_webhook_handler():
 
         content_for_assistant = None
         
-        if last_input.get("type") == "text":
-            text_message = last_input.get("text")
-            logger.info(f"💬 [ManyChat] Received text from {sender_id}: '{text_message}'")
-            content_for_assistant = text_message
-        elif last_input.get("url"):
-            media_url = last_input.get("url")
-            media_type = last_input.get("type", "file")
-            logger.info(f"🖼️ [ManyChat] Received {media_type} from {sender_id} at URL: {media_url}")
-            content_for_assistant = f"العميل أرسل ملف من نوع '{media_type}'. الرابط: {media_url}"
+        # التحقق من وجود نص في last_input_text
+        if last_text:
+            # التحقق مما إذا كان النص هو رابط لملف وسائط
+            if last_text.startswith("https://cdn.fbsbx.com/" ):
+                media_url = last_text
+                media_type = "file" # نوع عام
+                if ".mp4" in media_url or ".ogg" in media_url: media_type = "audio/video"
+                logger.info(f"🖼️ [ManyChat] Received {media_type} from {sender_id} at URL: {media_url}")
+                content_for_assistant = f"العميل أرسل ملف وسائط. الرابط: {media_url}"
+            else:
+                # إذا لم يكن رابطاً، فهو نص عادي
+                logger.info(f"💬 [ManyChat] Received text from {sender_id}: '{last_text}'")
+                content_for_assistant = last_text
+        
+        # كود احتياطي للتحقق من last_input object (في حال تغير سلوك ManyChat)
+        elif last_input_obj.get("text"):
+             content_for_assistant = last_input_obj.get("text")
+        elif last_input_obj.get("url"):
+             content_for_assistant = f"العميل أرسل ملف وسائط. الرابط: {last_input_obj.get('url')}"
+
 
         if not content_for_assistant:
             logger.warning("⚠️ [ManyChat] لم يتم العثور على محتوى يمكن معالجته في الطلب.")
