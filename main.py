@@ -88,7 +88,7 @@ def send_meta_whatsapp_message(phone, message):
     url = f"https://graph.facebook.com/v19.0/{META_PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}", "Content-Type": "application/json"}
     payload = {"messaging_product": "whatsapp", "to": phone, "text": {"body": message}}
-    logger.info(f"📤 [Meta API] Preparing to send message to {phone}." )
+    logger.info(f"📤 [Meta API] Preparing to send message to {phone}."  )
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=20)
         response.raise_for_status()
@@ -107,7 +107,7 @@ def send_messenger_instagram_message(recipient_id, message, platform="Messenger"
     url = "https://graph.facebook.com/v19.0/me/messages"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     payload = {"recipient": {"id": recipient_id}, "message": {"text": message}}
-    logger.info(f"📤 [{platform}] Sending reply to {recipient_id} using token {_mask_token(token )}")
+    logger.info(f"📤 [{platform}] Sending reply to {recipient_id} using token {_mask_token(token  )}")
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=20)
         response.raise_for_status()
@@ -121,7 +121,7 @@ def send_manychat_reply(subscriber_id, text_message):
         return
     url = "https://api.manychat.com/fb/sending/sendContent"
     headers = {"Authorization": f"Bearer {MANYCHAT_API_KEY}", "Content-Type": "application/json"}
-    payload = {"subscriber_id": str(subscriber_id ), "data": {"version": "v2", "content": {"messages": [{"type": "text", "text": text_message}]}}}
+    payload = {"subscriber_id": str(subscriber_id  ), "data": {"version": "v2", "content": {"messages": [{"type": "text", "text": text_message}]}}}
     logger.info(f"📤 [ManyChat API] Sending reply to subscriber {subscriber_id}...")
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=20)
@@ -156,7 +156,7 @@ def download_meta_media_by_id(media_id):
     headers = {"Authorization": f"Bearer {META_ACCESS_TOKEN}"}
     url = f"https://graph.facebook.com/v19.0/{media_id}/"
     try:
-        response = requests.get(url, headers=headers, timeout=20 )
+        response = requests.get(url, headers=headers, timeout=20  )
         response.raise_for_status()
         media_info = response.json()
         media_url = media_info.get("url")
@@ -339,19 +339,37 @@ def manychat_webhook_handler():
         logger.warning(f"🚨 [ManyChat Webhook] UNAUTHORIZED ACCESS ATTEMPT! 🚨")
         return jsonify({"status": "error", "message": "Unauthorized"}), 403
     
+    logger.info("✅ [ManyChat Webhook] Authorization successful.")
     data = request.get_json()
-    contact_data = data.get("manychat_data", {})
-    sender_id = contact_data.get("id")
-    user_name = contact_data.get("first_name", "User")
-    last_input = contact_data.get("last_input_text")
+    
+    # --- START: التعديل الموحد والنهائي لـ ManyChat ---
+    
+    full_contact = data.get("full_contact")
+    
+    if not full_contact:
+        logger.error(f"[ManyChat Webhook] CRITICAL: 'full_contact' data not found in the request body. Data: {data}")
+        return jsonify({"status": "error", "message": "'full_contact' data is required."}), 400
+
+    sender_id = full_contact.get("id")
+    user_name = full_contact.get("first_name", "User")
+    
+    # الكود سيبحث عن آخر رسالة نصية سواء من فيسبوك أو انستغرام
+    # ManyChat يضع آخر رسالة في حقل مختلف لكل منصة داخل full_contact
+    last_input = full_contact.get("last_text_input") or full_contact.get("last_input_text")
+
+    # --- END: التعديل الموحد والنهائي ---
 
     if not sender_id or not last_input:
-        return jsonify({"status": "error", "message": "Missing data"}), 400
+        logger.warning(f"[ManyChat BG] Missing sender_id or last_input within full_contact. Data: {full_contact}")
+        return jsonify({"status": "error", "message": "Missing critical data within full_contact"}), 400
 
+    # بقية الكود يعمل كما هو بدون تغيير
     is_url = last_input.startswith(("http://", "https://" ))
     is_media_url = is_url and (any(ext in last_input for ext in ['.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mp3', '.ogg']) or "cdn.fbsbx.com" in last_input or "scontent" in last_input)
 
     if is_media_url:
+        logger.info(f"Handling media URL immediately for ManyChat: {last_input}")
+        # تم تعديل هذه الدالة سابقًا لتعمل بشكل صحيح مع هذا المنطق
         media_content = download_media_from_url(last_input)
         if media_content:
             content_for_assistant = None
@@ -418,7 +436,7 @@ if TELEGRAM_BOT_TOKEN:
 # --- الإعداد والتشغيل ---
 @flask_app.route("/")
 def home():
-    return "✅ Bot is running with Universal Batching Logic."
+    return "✅ Bot is running with Universal Batching and Unified ManyChat Logic."
 
 def process_db_queue():
     if not all([ZAPI_BASE_URL, ZAPI_INSTANCE_ID, ZAPI_TOKEN, CLIENT_TOKEN]): return
