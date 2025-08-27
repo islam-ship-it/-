@@ -51,91 +51,67 @@ logger.info("🚀 [APP] تم إعداد تطبيق Flask و OpenAI Client.")
 pending_messages = {}
 message_timers = {}
 processing_locks = {}
-BATCH_WAIT_TIME = 10.0
+BATCH_WAIT_TIME = 2.0
 
 # --- دوال إدارة الجلسات ---
 def get_or_create_session_from_contact(contact_data, platform):
-    logger.debug(f"🔄 [SESSION] بدء عملية الحصول على جلسة أو إنشائها للمنصة: {platform}")
-    user_id = None
-    if platform in ["ManyChat-Instagram", "ManyChat-Facebook"]:
-        user_id = str(contact_data.get("id"))
-    elif platform == "Telegram":
-        user_id = str(contact_data.get("id"))
-    
+    user_id = str(contact_data.get("id"))
     if not user_id:
-        logger.error(f"❌ [SESSION] لم يتم تحديد user_id للمنصة {platform}. البيانات الواردة: {contact_data}")
+        logger.error(f"❌ [SESSION] لم يتم العثور على user_id في البيانات: {contact_data}")
         return None
-    
-    logger.info(f"🆔 [SESSION] معرّف المستخدم المحدد: {user_id}")
+        
     session = sessions_collection.find_one({"_id": user_id})
     now_utc = datetime.now(timezone.utc)
-
+    
     main_platform = "Unknown"
-    if platform == "ManyChat-Instagram": main_platform = "Instagram"
-    elif platform == "ManyChat-Facebook": main_platform = "Facebook"
-    elif platform == "Telegram": main_platform = "Telegram"
+    if platform.startswith("ManyChat"):
+        main_platform = "Instagram" if contact_data.get("ig_id") else "Facebook"
+    elif platform == "Telegram":
+        main_platform = "Telegram"
 
     if session:
-        logger.info(f"👤 [SESSION] تم العثور على مستخدم حالي. جاري تحديث بياناته...")
         update_fields = {
-            "last_contact_date": now_utc,
-            "platform": main_platform,
-            "profile.name": contact_data.get("name"),
-            "profile.profile_pic": contact_data.get("profile_pic"),
+            "last_contact_date": now_utc, "platform": main_platform,
+            "profile.name": contact_data.get("name"), "profile.profile_pic": contact_data.get("profile_pic"),
             "status": "active"
         }
-        update_fields = {k: v for k, v in update_fields.items() if v is not None}
-        sessions_collection.update_one({"_id": user_id}, {"$set": update_fields})
-        logger.info(f"✅ [SESSION] تم تحديث الجلسة للمستخدم: {user_id} على المنصة {platform}")
-        session = sessions_collection.find_one({"_id": user_id})
+        sessions_collection.update_one({"_id": user_id}, {"$set": {k: v for k, v in update_fields.items() if v is not None}})
+        return sessions_collection.find_one({"_id": user_id})
     else:
-        logger.info(f"🆕 [SESSION] مستخدم جديد. جاري إنشاء جلسة شاملة له: {user_id} على المنصة {platform}")
+        logger.info(f"🆕 [SESSION] مستخدم جديد. جاري إنشاء جلسة شاملة له: {user_id}")
         new_session = {
             "_id": user_id, "platform": main_platform,
-            "profile": {
-                "name": contact_data.get("name"), "first_name": contact_data.get("first_name"),
-                "last_name": contact_data.get("last_name"), "profile_pic": contact_data.get("profile_pic")
-            },
+            "profile": {"name": contact_data.get("name"), "first_name": contact_data.get("first_name"), "last_name": contact_data.get("last_name"), "profile_pic": contact_data.get("profile_pic")},
             "openai_thread_id": None, "tags": [f"source:{main_platform.lower()}"],
             "custom_fields": contact_data.get("custom_fields", {}),
             "conversation_summary": "", "status": "active",
             "first_contact_date": now_utc, "last_contact_date": now_utc
         }
         sessions_collection.insert_one(new_session)
-        session = new_session
-        logger.info(f"✅ [SESSION] تم إنشاء جلسة جديدة بنجاح للمستخدم {user_id}")
-
-    return session
+        return new_session
 
 # --- دوال OpenAI ---
-
-async def get_image_description_from_openai(base64_image, caption=""):
-    logger.info("🤖 [CHAT-VISION] بدء تحليل صورة باستخدام Chat Completions API (gpt-4o).")
-    prompt_text = f"هذه صورة أرسلها عميل. التعليق عليها هو: '{caption}'. صفها له بشكل جذاب ومختصر باللغة العربية، ثم اسأله كيف يمكنك مساعدته بخصوصها."
-    if not caption:
-        prompt_text = "هذه صورة أرسلها عميل. صفها له بشكل جذاب ومختصر باللغة العربية، ثم اسأله كيف يمكنك مساعدته بخصوصها."
-
+async def get_image_description_for_assistant(base64_image):
+    logger.info("🤖 [VISION-FOR-ASSISTANT] بدء استخلاص وصف صورة للمساعد...")
     try:
         response = await asyncio.to_thread(
             client.chat.completions.create,
             model="gpt-4o",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt_text},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
-                    ],
-                }
-            ],
-            max_tokens=300,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "صف هذه الصورة بشكل موضوعي وموجز جداً في بضع كلمات. هذا الوصف سيتم إرساله إلى مساعد ذكاء اصطناعي آخر كسياق."},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
+                ],
+            }],
+            max_tokens=50,
         )
-        reply = response.choices[0].message.content
-        logger.info(f"✅ [CHAT-VISION] تم تحليل الصورة بنجاح. الرد: \"{reply}\"")
-        return reply
+        description = response.choices[0].message.content
+        logger.info(f"✅ [VISION-FOR-ASSISTANT] تم استخلاص الوصف: \"{description}\"")
+        return description
     except Exception as e:
-        logger.error(f"❌ [CHAT-VISION] فشل تحليل الصورة: {e}", exc_info=True)
-        return "⚠️ عفوًا، لم أتمكن من تحليل الصورة. هل يمكنك وصفها لي؟"
+        logger.error(f"❌ [VISION-FOR-ASSISTANT] فشل استخلاص وصف الصورة: {e}", exc_info=True)
+        return None
 
 async def get_assistant_reply(session, content):
     user_id = session["_id"]
@@ -145,21 +121,18 @@ async def get_assistant_reply(session, content):
     if not thread_id:
         logger.warning(f"🧵 [ASSISTANT] لا يوجد thread للمستخدم {user_id}. سيتم إنشاء واحد جديد.")
         try:
-            thread = client.beta.threads.create()
+            thread = await asyncio.to_thread(client.beta.threads.create)
             thread_id = thread.id
             sessions_collection.update_one({"_id": user_id}, {"$set": {"openai_thread_id": thread_id}})
             logger.info(f"✅ [ASSISTANT] تم إنشاء وتخزين thread جديد: {thread_id}")
         except Exception as e:
             logger.error(f"❌ [ASSISTANT] فشل في إنشاء thread جديد: {e}", exc_info=True)
             return "⚠️ عفوًا، حدث خطأ أثناء تهيئة المحادثة."
-
-    if isinstance(content, str): content = [{"type": "text", "text": content}]
-    logger.debug(f"💬 [ASSISTANT] المحتوى الذي سيتم إرساله إلى OpenAI: {json.dumps(content, ensure_ascii=False)}")
-
+    
     try:
-        client.beta.threads.messages.create(thread_id=thread_id, role="user", content=content)
+        await asyncio.to_thread(client.beta.threads.messages.create, thread_id=thread_id, role="user", content=content)
         logger.info(f"▶️ [ASSISTANT] بدء تشغيل المساعد (run) للـ thread: {thread_id}")
-        run = client.beta.threads.runs.create(thread_id=thread_id, assistant_id=ASSISTANT_ID_PREMIUM)
+        run = await asyncio.to_thread(client.beta.threads.runs.create, thread_id=thread_id, assistant_id=ASSISTANT_ID_PREMIUM)
         
         start_time = time.time()
         while run.status in ["queued", "in_progress"]:
@@ -167,11 +140,10 @@ async def get_assistant_reply(session, content):
                 logger.error(f"⏰ [ASSISTANT] Timeout! استغرق الـ run {run.id} أكثر من 90 ثانية.")
                 return "⚠️ حدث تأخير في الرد، يرجى المحاولة مرة أخرى."
             await asyncio.sleep(1)
-            run = client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
-            logger.debug(f"⏳ [ASSISTANT] حالة الـ run {run.id} هي: {run.status}")
+            run = await asyncio.to_thread(client.beta.threads.runs.retrieve, thread_id=thread_id, run_id=run.id)
 
         if run.status == "completed":
-            messages = client.beta.threads.messages.list(thread_id=thread_id, limit=1)
+            messages = await asyncio.to_thread(client.beta.threads.messages.list, thread_id=thread_id, limit=1)
             reply = messages.data[0].content[0].text.value.strip()
             logger.info(f"🗣️ [ASSISTANT] الرد الذي تم الحصول عليه: \"{reply}\"")
             return reply
@@ -179,7 +151,7 @@ async def get_assistant_reply(session, content):
             logger.error(f"❌ [ASSISTANT] لم يكتمل الـ run. الحالة: {run.status}. الخطأ: {run.last_error}")
             return "⚠️ عفوًا، حدث خطأ فني. فريقنا يعمل على إصلاحه."
     except Exception as e:
-        logger.error(f"❌ [ASSISTANT] حدث استثناء غير متوقع أثناء التواصل مع OpenAI: {e}", exc_info=True)
+        logger.error(f"❌ [ASSISTANT] حدث استثناء غير متوقع: {e}", exc_info=True)
         return "⚠️ عفوًا، حدث خطأ غير متوقع."
 
 # --- دوال الإرسال والوسائط ---
@@ -209,12 +181,12 @@ async def send_telegram_message(bot, chat_id, text, business_id=None):
     except Exception as e:
         logger.error(f"❌ [TELEGRAM] فشل إرسال الرسالة إلى {chat_id}: {e}", exc_info=True)
 
-def download_media_from_url(media_url, headers=None):
+def download_media_from_url(media_url):
     logger.info(f"⬇️ [MEDIA] محاولة تحميل وسائط من الرابط: {media_url}")
     try:
-        media_response = requests.get(media_url, headers=headers, timeout=20)
+        media_response = requests.get(media_url, timeout=20)
         media_response.raise_for_status()
-        logger.info(f"✅ [MEDIA] تم تحميل الوسائط بنجاح. الحجم: {len(media_response.content)} بايت.")
+        logger.info(f"✅ [MEDIA] تم تحميل الوسائط بنجاح.")
         return media_response.content
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ [MEDIA] فشل تحميل الوسائط من {media_url}: {e}", exc_info=True)
@@ -228,146 +200,110 @@ def transcribe_audio(audio_content, file_format="mp4"):
         with open(temp_audio_file, "rb") as audio_file:
             transcription = client.audio.transcriptions.create(model="whisper-1", file=audio_file)
         os.remove(temp_audio_file)
-        logger.info(f"✅ [WHISPER] تم تحويل الصوت إلى نص بنجاح: \"{transcription.text}\"")
+        logger.info(f"✅ [WHISPER] تم تحويل الصوت إلى نص بنجاح.")
         return transcription.text
     except Exception as e:
         logger.error(f"❌ [WHISPER] خطأ أثناء تحويل الصوت: {e}", exc_info=True)
         return None
 
-# --- آلية التجميع والمعالجة ---
-def process_batched_messages_universal(user_id):
+# --- آلية المعالجة الموحدة ---
+def schedule_assistant_response(user_id):
     lock = processing_locks.setdefault(user_id, threading.Lock())
     with lock:
-        if user_id not in pending_messages or not pending_messages[user_id]:
-            return
+        if user_id not in pending_messages or not pending_messages[user_id]: return
         
         user_data = pending_messages[user_id]
         session = user_data["session"]
         platform = session["platform"]
         combined_content = "\n".join(user_data["texts"])
         
-        logger.info(f"⚙️ [BATCH] بدء معالجة الرسائل المجمعة للمستخدم {user_id} على {platform}. المحتوى: '{combined_content}'")
+        logger.info(f"⚙️ [BATCH] بدء معالجة المحتوى المجمع للمستخدم {user_id} على {platform}: '{combined_content}'")
         reply_text = asyncio.run(get_assistant_reply(session, combined_content))
         
         if reply_text:
             if platform in ["Instagram", "Facebook"]:
                 send_manychat_reply(user_id, reply_text)
             elif platform == "Telegram":
+                # نحتاج إلى استرداد bot و business_id من مكان ما
+                # هذا الجزء قد يحتاج تعديلاً إذا كنت تستخدم business_id في تليجرام
                 bot_instance = telegram_app.bot
                 business_id = user_data.get("business_id")
                 asyncio.run(send_telegram_message(bot_instance, user_id, reply_text, business_id))
-        
-        del pending_messages[user_id]
-        if user_id in message_timers:
-            del message_timers[user_id]
-        logger.info(f"🗑️ [BATCH] تم الانتهاء من المعالجة وحذف الرسائل المعلقة للمستخدم {user_id}.")
 
-def handle_text_message(session, text, **kwargs):
+        if user_id in pending_messages: del pending_messages[user_id]
+        if user_id in message_timers: del message_timers[user_id]
+        logger.info(f"🗑️ [BATCH] تم الانتهاء من المعالجة للمستخدم {user_id}.")
+
+def add_to_processing_queue(session, text_content, **kwargs):
     user_id = session["_id"]
-    logger.info(f"📥 [HANDLER] استلام رسالة نصية من {user_id} على {session['platform']}.")
-    if user_id in message_timers:
-        message_timers[user_id].cancel()
+    if user_id in message_timers: message_timers[user_id].cancel()
     
     if user_id not in pending_messages:
         pending_messages[user_id] = {"texts": [], "session": session, **kwargs}
     
-    pending_messages[user_id]["texts"].append(text)
-    logger.info(f"➕ [HANDLER] تمت إضافة الرسالة إلى دفعة المعالجة. حجم الدفعة الآن: {len(pending_messages[user_id]['texts'])}")
+    pending_messages[user_id]["texts"].append(text_content)
+    logger.info(f"➕ [QUEUE] تمت إضافة محتوى إلى قائمة الانتظار للمستخدم {user_id}. حجم القائمة الآن: {len(pending_messages[user_id]['texts'])}")
     
-    timer = threading.Timer(BATCH_WAIT_TIME, process_batched_messages_universal, args=[user_id])
+    timer = threading.Timer(BATCH_WAIT_TIME, schedule_assistant_response, args=[user_id])
     message_timers[user_id] = timer
     timer.start()
 
-def process_media_message_immediately(session, media_type, media_payload, **kwargs):
-    async def async_target():
-        user_id = session["_id"]
-        platform = session["platform"]
-        reply_text = None
-
-        if media_type == "image":
-            logger.info(f"⚙️ [MEDIA HANDLER] بدء معالجة فورية لـ 'صورة' للمستخدم {user_id}.")
-            caption = kwargs.get("caption", "")
-            reply_text = await get_image_description_from_openai(media_payload, caption)
-        elif media_type == "audio":
-            logger.info(f"⚙️ [MEDIA HANDLER] بدء معالجة فورية لـ 'صوت' للمستخدم {user_id}.")
-            reply_text = await get_assistant_reply(session, media_payload)
-        
-        if reply_text:
-            if platform in ["Instagram", "Facebook"]:
-                send_manychat_reply(user_id, reply_text)
-            elif platform == "Telegram":
-                bot_instance = telegram_app.bot
-                business_id = kwargs.get("business_id")
-                await send_telegram_message(bot_instance, user_id, reply_text, business_id)
-        logger.info(f"✅ [MEDIA HANDLER] انتهت المعالجة الفورية للوسائط للمستخدم {user_id}.")
-    
-    thread = threading.Thread(target=lambda: asyncio.run(async_target()))
-    thread.start()
-    logger.debug("[MEDIA HANDLER] تم بدء thread جديد للمعالجة الفورية.")
-
-# --- ويب هوك ManyChat (النسخة النهائية والمعدلة v7) ---
+# --- ويب هوك ManyChat ---
 @flask_app.route("/manychat_webhook", methods=["POST"])
 def manychat_webhook_handler():
-    logger.info("📞 [WEBHOOK] تم استلام طلب جديد على ManyChat Webhook.")
+    logger.info("📞 [WEBHOOK-MC] تم استلام طلب جديد.")
     auth_header = request.headers.get('Authorization')
     if not MANYCHAT_SECRET_KEY or auth_header != f'Bearer {MANYCHAT_SECRET_KEY}':
-        logger.critical(f"🚨 [WEBHOOK] محاولة وصول غير مصرح بها! 🚨")
+        logger.critical("🚨 [WEBHOOK-MC] محاولة وصول غير مصرح بها!")
         return jsonify({"status": "error", "message": "Unauthorized"}), 403
     
     data = request.get_json()
     full_contact = data.get("full_contact")
-    
     if not full_contact:
-        logger.error(f"❌ [WEBHOOK] CRITICAL: 'full_contact' غير موجودة في البيانات.")
+        logger.error("❌ [WEBHOOK-MC] CRITICAL: 'full_contact' غير موجودة.")
         return jsonify({"status": "error", "message": "'full_contact' data is required."}), 400
 
-    platform = "ManyChat-Instagram" if full_contact.get("ig_id") else "ManyChat-Facebook"
-    session = get_or_create_session_from_contact(full_contact, platform)
-    
+    session = get_or_create_session_from_contact(full_contact, "ManyChat")
     if not session:
-        logger.error("❌ [WEBHOOK] فشل في إنشاء أو الحصول على جلسة.")
+        logger.error("❌ [WEBHOOK-MC] فشل في إنشاء أو الحصول على جلسة.")
         return jsonify({"status": "error", "message": "Failed to create or get session"}), 500
 
     last_input = full_contact.get("last_text_input") or full_contact.get("last_input_text")
     if not last_input:
-        logger.warning("[WEBHOOK] لا يوجد إدخال نصي للمعالجة (last_input).")
+        logger.warning("[WEBHOOK-MC] لا يوجد إدخال نصي للمعالجة.")
         return jsonify({"status": "received", "message": "No text input to process"}), 200
     
-    logger.info(f"💬 [WEBHOOK] الإدخال المستلم: \"{last_input}\"")
+    logger.info(f"💬 [WEBHOOK-MC] الإدخال المستلم: \"{last_input}\"")
     is_url = last_input.startswith(("http://", "https://" ))
-    is_media_url = is_url and (any(ext in last_input for ext in ['.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mp3', '.ogg']) or "cdn.fbsbx.com" in last_input or "scontent" in last_input)
+    is_media_url = is_url and ("cdn.fbsbx.com" in last_input or "scontent" in last_input)
 
-    # +++ هذا هو التعديل المنطقي الرئيسي (v7) +++
-    if is_media_url:
-        # إذا كان الإدخال رابط وسائط، عالجه كوسائط وتوقف هنا.
-        # لا ترسله أبداً إلى handle_text_message.
-        logger.info(f"🖼️ [WEBHOOK] تم اكتشاف رابط وسائط. سيتم معالجته كوسائط فقط.")
-        is_audio = any(ext in last_input for ext in ['.mp4', '.mp3', '.ogg']) or "audioclip" in last_input
-        
-        media_content = download_media_from_url(last_input)
-        if not media_content:
-            logger.error(f"❌ [WEBHOOK] فشل تحميل الوسائط من الرابط: {last_input}")
-            send_manychat_reply(session["_id"], "⚠️ عفوًا، لم أتمكن من تحميل الملف الذي أرسلته. قد يكون الرابط منتهي الصلاحية.")
-            return jsonify({"status": "error", "message": "Failed to download media"}), 200
+    def background_task():
+        if is_media_url:
+            logger.info("🖼️ [WEBHOOK-MC] تم اكتشاف رابط وسائط. بدء المعالجة في الخلفية.")
+            media_content = download_media_from_url(last_input)
+            if not media_content:
+                send_manychat_reply(session["_id"], "⚠️ عفوًا، لم أتمكن من تحميل الملف الذي أرسلته.")
+                return
 
-        if is_audio:
-            logger.info("🎤 [WEBHOOK] تم تحديد الوسائط كـ 'صوت'.")
-            transcribed_text = transcribe_audio(media_content, file_format="mp4")
-            if transcribed_text:
-                payload = f"العميل أرسل رسالة صوتية، هذا هو نصها: \"{transcribed_text}\""
-                process_media_message_immediately(session, "audio", payload)
+            is_audio = any(ext in last_input for ext in ['.mp4', '.mp3', '.ogg']) or "audioclip" in last_input
+            if is_audio:
+                transcribed_text = transcribe_audio(media_content, file_format="mp4")
+                if transcribed_text:
+                    content_for_assistant = f"[رسالة صوتية من العميل]: \"{transcribed_text}\""
+                    add_to_processing_queue(session, content_for_assistant)
+            else: # It's an image
+                description = asyncio.run(get_image_description_for_assistant(base64.b64encode(media_content).decode('utf-8')))
+                if description:
+                    content_for_assistant = f"[وصف صورة أرسلها العميل]: {description}"
+                    add_to_processing_queue(session, content_for_assistant)
         else:
-            logger.info("📷 [WEBHOOK] تم تحديد الوسائط كـ 'صورة'.")
-            base64_image = base64.b64encode(media_content).decode('utf-8')
-            process_media_message_immediately(session, "image", base64_image)
-    else:
-        # إذا لم يكن الإدخال رابط وسائط، فهو نص عادي. عالجه كنص.
-        logger.info("📝 [WEBHOOK] تم تحديد الإدخال كـ 'نص'. جاري إرساله للمعالجة المجمعة...")
-        handle_text_message(session, last_input)
+            logger.info("📝 [WEBHOOK-MC] تم تحديد الإدخال كنص عادي.")
+            add_to_processing_queue(session, last_input)
 
+    threading.Thread(target=background_task).start()
     return jsonify({"status": "received"}), 200
 
-# --- منطق تيليجرام ---
+# --- منطق تيليجرام (معاد بالكامل) ---
 if TELEGRAM_BOT_TOKEN:
     logger.info("🔌 [TELEGRAM] تم العثور على توكن تليجرام. جاري إعداد البوت...")
     telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
@@ -385,23 +321,29 @@ if TELEGRAM_BOT_TOKEN:
 
         business_id = getattr(update.business_message, "business_connection_id", None) if hasattr(update, "business_message") and update.business_message else None
         
-        if message.text:
-            handle_text_message(session, message.text, business_id=business_id)
-        else:
-            if message.voice:
-                voice_file = await message.voice.get_file()
-                voice_content = await voice_file.download_as_bytearray()
+        def background_task():
+            content_for_assistant = None
+            if message.text:
+                content_for_assistant = message.text
+            elif message.voice:
+                voice_file = asyncio.run(message.voice.get_file())
+                voice_content = asyncio.run(voice_file.download_as_bytearray())
                 transcribed_text = transcribe_audio(bytes(voice_content), file_format="ogg")
-                if transcribed_text: 
-                    payload = f"رسالة صوتية: {transcribed_text}"
-                    process_media_message_immediately(session, "audio", payload, business_id=business_id)
+                if transcribed_text: content_for_assistant = f"[رسالة صوتية من العميل]: {transcribed_text}"
             elif message.photo:
-                caption = message.caption or ""
-                photo_file = await message.photo[-1].get_file()
-                photo_content = await photo_file.download_as_bytearray()
+                photo_file = asyncio.run(message.photo[-1].get_file())
+                photo_content = asyncio.run(photo_file.download_as_bytearray())
                 base64_image = base64.b64encode(bytes(photo_content)).decode('utf-8')
-                process_media_message_immediately(session, "image", base64_image, caption=caption, business_id=business_id)
+                description = asyncio.run(get_image_description_for_assistant(base64_image))
+                if description:
+                    caption = message.caption or ""
+                    content_for_assistant = f"[وصف صورة أرسلها العميل]: {description}\n[تعليق العميل على الصورة]: {caption}"
             
+            if content_for_assistant:
+                add_to_processing_queue(session, content_for_assistant, business_id=business_id)
+
+        threading.Thread(target=background_task).start()
+
     telegram_app.add_handler(CommandHandler("start", start_command))
     telegram_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_telegram_message))
 
@@ -416,7 +358,7 @@ if TELEGRAM_BOT_TOKEN:
 # --- نقطة الدخول الرئيسية ---
 @flask_app.route("/")
 def home():
-    return "✅ Bot is running with Final Logic Fix (v7 - Fully Integrated)."
+    return "✅ Bot is running with Contextual Vision Logic (v9 - Full Integration)."
 
 if __name__ == "__main__":
     logger.info("🚀 التطبيق جاهز للتشغيل. يرجى استخدام خادم WSGI (مثل Gunicorn) لتشغيله في بيئة الإنتاج.")
