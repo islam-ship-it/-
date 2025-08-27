@@ -123,7 +123,6 @@ async def get_assistant_reply(session, content):
             logger.error(f"❌ [ASSISTANT] فشل في إنشاء thread جديد: {e}", exc_info=True)
             return "⚠️ عفوًا، حدث خطأ أثناء تهيئة المحادثة."
 
-    # تحويل المحتوى النصي إلى الصيغة المطلوبة
     if isinstance(content, str): content = [{"type": "text", "text": content}]
     logger.debug(f"💬 [ASSISTANT] المحتوى الذي سيتم إرساله إلى OpenAI: {json.dumps(content, ensure_ascii=False)}")
 
@@ -311,28 +310,32 @@ def manychat_webhook_handler():
 
     if is_media_url:
         logger.info(f"🖼️ [WEBHOOK] تم اكتشاف رابط وسائط: {last_input}")
-        media_content = download_media_from_url(last_input)
-        if media_content:
-            logger.info("✅ [WEBHOOK] تم تحميل الوسائط بنجاح. جاري تحديد النوع...")
-            content_for_assistant = None
-            is_audio = any(ext in last_input for ext in ['.mp4', '.mp3', '.ogg']) or "audioclip" in last_input
-            if is_audio:
-                logger.info("🎤 [WEBHOOK] تم تحديد الوسائط كـ 'صوت'.")
+        content_for_assistant = None
+        is_audio = any(ext in last_input for ext in ['.mp4', '.mp3', '.ogg']) or "audioclip" in last_input
+        
+        if is_audio:
+            logger.info("🎤 [WEBHOOK] تم تحديد الوسائط كـ 'صوت'. جاري التحميل...")
+            media_content = download_media_from_url(last_input)
+            if media_content:
                 transcribed_text = transcribe_audio(media_content, file_format="mp4")
                 if transcribed_text:
                     content_for_assistant = f"العميل أرسل رسالة صوتية، هذا هو نصها: \"{transcribed_text}\""
             else:
-                logger.info("📷 [WEBHOOK] تم تحديد الوسائط كـ 'صورة'.")
-                base64_image = base64.b64encode(media_content).decode('utf-8')
-                content_for_assistant = [{"type": "text", "text": "صف هذه الصورة باختصار شديد باللغة العربية."}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]
-            
-            if content_for_assistant:
-                logger.info("🚀 [WEBHOOK] جاري إرسال محتوى الوسائط إلى المساعد للمعالجة الفورية...")
-                process_media_message_immediately(session, content_for_assistant)
-            else:
-                logger.error("❌ [WEBHOOK] فشل في إنشاء محتوى للمساعد بعد معالجة الوسائط.")
+                logger.error(f"❌ [WEBHOOK] فشل تحميل المحتوى الصوتي من الرابط: {last_input}")
         else:
-            logger.error(f"❌ [WEBHOOK] فشل تحميل الوسائط من الرابط: {last_input}")
+            # +++ هذا هو الجزء الذي تم إصلاحه +++
+            logger.info("📷 [WEBHOOK] تم تحديد الوسائط كـ 'صورة'.")
+            # نرسل رابط الصورة مباشرة إلى OpenAI بدلاً من تحميلها وتحويلها
+            content_for_assistant = [
+                {"type": "text", "text": "العميل أرسل هذه الصورة. قم بوصفها والرد بشكل مناسب."},
+                {"type": "image_url", "image_url": {"url": last_input}}
+            ]
+        
+        if content_for_assistant:
+            logger.info("🚀 [WEBHOOK] جاري إرسال محتوى الوسائط إلى المساعد للمعالجة الفورية...")
+            process_media_message_immediately(session, content_for_assistant)
+        else:
+            logger.error("❌ [WEBHOOK] فشل في إنشاء محتوى للمساعد بعد معالجة الوسائط.")
     else:
         logger.info("📝 [WEBHOOK] تم تحديد الإدخال كـ 'نص'. جاري إرساله للمعالجة المجمعة...")
         handle_text_message(session, last_input)
@@ -405,10 +408,7 @@ if TELEGRAM_BOT_TOKEN:
 # --- الإعداد والتشغيل ---
 @flask_app.route("/")
 def home():
-    return "✅ Bot is running with Advanced MongoDB Logging (v2 - Patched with Full Debug Logging)."
+    return "✅ Bot is running with Advanced MongoDB Logging (v2 - Patched and Fixed)."
 
 if __name__ == "__main__":
     logger.info("🚀 التطبيق جاهز للتشغيل. يرجى استخدام خادم WSGI (مثل Gunicorn) لتشغيله في بيئة الإنتاج.")
-    # للتشغيل المحلي للاختبار فقط، يمكنك إلغاء التعليق على السطر التالي:
-    # flask_app.run(port=5000, debug=True)
-
