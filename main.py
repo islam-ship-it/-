@@ -305,7 +305,7 @@ def process_media_message_immediately(session, media_type, media_payload, **kwar
     thread.start()
     logger.debug("[MEDIA HANDLER] تم بدء thread جديد للمعالجة الفورية.")
 
-# --- ويب هوك ManyChat ---
+# --- ويب هوك ManyChat (النسخة النهائية والمعدلة) ---
 @flask_app.route("/manychat_webhook", methods=["POST"])
 def manychat_webhook_handler():
     logger.info("📞 [WEBHOOK] تم استلام طلب جديد على ManyChat Webhook.")
@@ -337,8 +337,9 @@ def manychat_webhook_handler():
     is_url = last_input.startswith(("http://", "https://" ))
     is_media_url = is_url and (any(ext in last_input for ext in ['.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mp3', '.ogg']) or "cdn.fbsbx.com" in last_input or "scontent" in last_input)
 
+    # +++ هذا هو التعديل المنطقي الرئيسي +++
     if is_media_url:
-        logger.info(f"🖼️ [WEBHOOK] تم اكتشاف رابط وسائط: {last_input}")
+        logger.info(f"🖼️ [WEBHOOK] تم اكتشاف رابط وسائط. سيتم معالجته كوسائط فقط.")
         is_audio = any(ext in last_input for ext in ['.mp4', '.mp3', '.ogg']) or "audioclip" in last_input
         
         media_content = download_media_from_url(last_input)
@@ -412,7 +413,7 @@ if TELEGRAM_BOT_TOKEN:
 # --- نقطة الدخول الرئيسية ---
 @flask_app.route("/")
 def home():
-    return "✅ Bot is running with Final Patched Vision API (v5 - Fully Integrated)."
+    return "✅ Bot is running with Final Logic Fix (v6 - Fully Integrated)."
 
 if __name__ == "__main__":
     logger.info("🚀 التطبيق جاهز للتشغيل. يرجى استخدام خادم WSGI (مثل Gunicorn) لتشغيله في بيئة الإنتاج.")
