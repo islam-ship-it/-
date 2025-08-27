@@ -17,7 +17,7 @@ import telegram
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 # --- الإعدادات ---
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler()])
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler()])
 logger = logging.getLogger(__name__)
 load_dotenv()
 logger.info("▶️ [START] تم تحميل إعدادات البيئة.")
@@ -305,7 +305,7 @@ def process_media_message_immediately(session, media_type, media_payload, **kwar
     thread.start()
     logger.debug("[MEDIA HANDLER] تم بدء thread جديد للمعالجة الفورية.")
 
-# --- ويب هوك ManyChat (النسخة النهائية والمعدلة) ---
+# --- ويب هوك ManyChat (النسخة النهائية والمعدلة v7) ---
 @flask_app.route("/manychat_webhook", methods=["POST"])
 def manychat_webhook_handler():
     logger.info("📞 [WEBHOOK] تم استلام طلب جديد على ManyChat Webhook.")
@@ -337,8 +337,10 @@ def manychat_webhook_handler():
     is_url = last_input.startswith(("http://", "https://" ))
     is_media_url = is_url and (any(ext in last_input for ext in ['.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mp3', '.ogg']) or "cdn.fbsbx.com" in last_input or "scontent" in last_input)
 
-    # +++ هذا هو التعديل المنطقي الرئيسي +++
+    # +++ هذا هو التعديل المنطقي الرئيسي (v7) +++
     if is_media_url:
+        # إذا كان الإدخال رابط وسائط، عالجه كوسائط وتوقف هنا.
+        # لا ترسله أبداً إلى handle_text_message.
         logger.info(f"🖼️ [WEBHOOK] تم اكتشاف رابط وسائط. سيتم معالجته كوسائط فقط.")
         is_audio = any(ext in last_input for ext in ['.mp4', '.mp3', '.ogg']) or "audioclip" in last_input
         
@@ -359,6 +361,7 @@ def manychat_webhook_handler():
             base64_image = base64.b64encode(media_content).decode('utf-8')
             process_media_message_immediately(session, "image", base64_image)
     else:
+        # إذا لم يكن الإدخال رابط وسائط، فهو نص عادي. عالجه كنص.
         logger.info("📝 [WEBHOOK] تم تحديد الإدخال كـ 'نص'. جاري إرساله للمعالجة المجمعة...")
         handle_text_message(session, last_input)
 
@@ -413,7 +416,7 @@ if TELEGRAM_BOT_TOKEN:
 # --- نقطة الدخول الرئيسية ---
 @flask_app.route("/")
 def home():
-    return "✅ Bot is running with Final Logic Fix (v6 - Fully Integrated)."
+    return "✅ Bot is running with Final Logic Fix (v7 - Fully Integrated)."
 
 if __name__ == "__main__":
     logger.info("🚀 التطبيق جاهز للتشغيل. يرجى استخدام خادم WSGI (مثل Gunicorn) لتشغيله في بيئة الإنتاج.")
