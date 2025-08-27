@@ -90,9 +90,13 @@ def get_or_create_session_from_contact(contact_data, platform):
         sessions_collection.insert_one(new_session)
         return new_session
 
-# --- دوال OpenAI ---
+# --- دوال OpenAI (مع تعديل الـ Prompt) ---
 async def get_image_description_for_assistant(base64_image):
-    logger.info("🤖 [VISION-FOR-ASSISTANT] بدء استخلاص وصف صورة للمساعد...")
+    logger.info("🤖 [VISION-FOR-ASSISTANT] بدء استخلاص وصف تفصيلي من الصورة للمساعد...")
+    
+    # +++ هذا هو التعديل الرئيسي (v10) +++
+    prompt_text = "قم باستخراج كل النصوص الموجودة في هذه الصورة بدقة شديدة وبشكل حرفي. اعرض التفاصيل المهمة مثل المبالغ، أرقام الهواتف، التواريخ، وأي بيانات أخرى. هذا الوصف سيتم إرساله إلى مساعد ذكاء اصطناعي آخر كسياق."
+
     try:
         response = await asyncio.to_thread(
             client.chat.completions.create,
@@ -100,14 +104,14 @@ async def get_image_description_for_assistant(base64_image):
             messages=[{
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "صف هذه الصورة بشكل موضوعي وموجز جداً في بضع كلمات. هذا الوصف سيتم إرساله إلى مساعد ذكاء اصطناعي آخر كسياق."},
+                    {"type": "text", "text": prompt_text},
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
                 ],
             }],
-            max_tokens=50,
+            max_tokens=200, # زيادة عدد التوكنز للسماح بوصف أطول
         )
         description = response.choices[0].message.content
-        logger.info(f"✅ [VISION-FOR-ASSISTANT] تم استخلاص الوصف: \"{description}\"")
+        logger.info(f"✅ [VISION-FOR-ASSISTANT] تم استخلاص الوصف التفصيلي: \"{description}\"")
         return description
     except Exception as e:
         logger.error(f"❌ [VISION-FOR-ASSISTANT] فشل استخلاص وصف الصورة: {e}", exc_info=True)
@@ -224,8 +228,6 @@ def schedule_assistant_response(user_id):
             if platform in ["Instagram", "Facebook"]:
                 send_manychat_reply(user_id, reply_text)
             elif platform == "Telegram":
-                # نحتاج إلى استرداد bot و business_id من مكان ما
-                # هذا الجزء قد يحتاج تعديلاً إذا كنت تستخدم business_id في تليجرام
                 bot_instance = telegram_app.bot
                 business_id = user_data.get("business_id")
                 asyncio.run(send_telegram_message(bot_instance, user_id, reply_text, business_id))
@@ -303,7 +305,7 @@ def manychat_webhook_handler():
     threading.Thread(target=background_task).start()
     return jsonify({"status": "received"}), 200
 
-# --- منطق تيليجرام (معاد بالكامل) ---
+# --- منطق تيليجرام ---
 if TELEGRAM_BOT_TOKEN:
     logger.info("🔌 [TELEGRAM] تم العثور على توكن تليجرام. جاري إعداد البوت...")
     telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
@@ -358,7 +360,7 @@ if TELEGRAM_BOT_TOKEN:
 # --- نقطة الدخول الرئيسية ---
 @flask_app.route("/")
 def home():
-    return "✅ Bot is running with Contextual Vision Logic (v9 - Full Integration)."
+    return "✅ Bot is running with Detailed Vision Logic (v10 - Full Integration)."
 
 if __name__ == "__main__":
     logger.info("🚀 التطبيق جاهز للتشغيل. يرجى استخدام خادم WSGI (مثل Gunicorn) لتشغيله في بيئة الإنتاج.")
