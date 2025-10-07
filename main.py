@@ -92,29 +92,33 @@ def get_or_create_session_from_contact(contact_data, platform):
 
 # --- دوال OpenAI (مع تعديل الـ Prompt) ---
 async def get_image_description_for_assistant(base64_image):
-    logger.info("🤖 [VISION-FOR-ASSISTANT] بدء استخلاص وصف تفصيلي من الصورة للمساعد...")
-    
-    # +++ هذا هو التعديل الرئيسي (v10) +++
-    prompt_text = "قم باستخراج كل النصوص الموجودة في هذه الصورة بدقة شديدة وبشكل حرفي. اعرض التفاصيل المهمة مثل المبالغ، أرقام الهواتف، التواريخ، وأي بيانات أخرى. هذا الوصف سيتم إرساله إلى مساعد ذكاء اصطناعي آخر كسياق."
+    logger.info("🤖 [VISION-FOR-ASSISTANT] بدء استخلاص وصف تفصيلي من الصورة...")
+
+    prompt_text = (
+        "استخرج كل النصوص الموجودة في هذه الصورة بدقة شديدة وبشكل حرفي. "
+        "اعرض التفاصيل بالكامل مثل المبالغ، أرقام الهواتف، التواريخ، وأي بيانات أخرى."
+    )
 
     try:
         response = await asyncio.to_thread(
             client.chat.completions.create,
-            model="gpt-4o",
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt_text},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
-                ],
-            }],
-            max_tokens=200, # زيادة عدد التوكنز للسماح بوصف أطول
+            model="gpt-4.1",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt_text},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
+                    ],
+                }
+            ],
+            max_tokens=500,
         )
-        description = response.choices[0].message.content
-        logger.info(f"✅ [VISION-FOR-ASSISTANT] تم استخلاص الوصف التفصيلي: \"{description}\"")
+        description = response.choices[0].message["content"][0]["text"]
+        logger.info(f"✅ [VISION] النص المستخلص: {description}")
         return description
     except Exception as e:
-        logger.error(f"❌ [VISION-FOR-ASSISTANT] فشل استخلاص وصف الصورة: {e}", exc_info=True)
+        logger.error(f"❌ [VISION] فشل استخلاص النص من الصورة: {e}", exc_info=True)
         return None
 
 async def get_assistant_reply(session, content):
