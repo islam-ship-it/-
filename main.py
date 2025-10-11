@@ -8,7 +8,6 @@ import asyncio
 import logging
 import base64
 from flask import Flask, request, jsonify
-from asgiref.wsgi import WsgiToAsgi
 from openai import OpenAI
 from pymongo import MongoClient
 from datetime import datetime, timezone
@@ -42,8 +41,7 @@ except Exception as e:
     exit()
 
 # --- إعدادات التطبيق ---
-flask_app = Flask(__name__)
-app = WsgiToAsgi(flask_app)
+app = Flask(__name__) # <-- تم التبسيط: هذا هو تطبيق Flask الرئيسي
 client = OpenAI(api_key=OPENAI_API_KEY)
 logger.info("🚀 [APP] تم إعداد تطبيق Flask و OpenAI Client.")
 
@@ -64,8 +62,10 @@ def get_or_create_session_from_contact(contact_data, platform):
     now_utc = datetime.now(timezone.utc)
     
     main_platform = "Unknown"
+    # تحديد المنصة بدقة أكبر
     if platform.startswith("ManyChat"):
-        main_platform = "Instagram" if contact_data.get("ig_id") else "Facebook"
+        # ManyChat يرسل `ig_id` للمستخدمين على انستغرام
+        main_platform = "Instagram" if "ig_id" in contact_data and contact_data["ig_id"] else "Facebook"
     elif platform == "Telegram":
         main_platform = "Telegram"
 
@@ -78,7 +78,7 @@ def get_or_create_session_from_contact(contact_data, platform):
         sessions_collection.update_one({"_id": user_id}, {"$set": {k: v for k, v in update_fields.items() if v is not None}})
         return sessions_collection.find_one({"_id": user_id})
     else:
-        logger.info(f"🆕 [SESSION] مستخدم جديد. جاري إنشاء جلسة شاملة له: {user_id}")
+        logger.info(f"🆕 [SESSION] مستخدم جديد. جاري إنشاء جلسة شاملة له: {user_id} على منصة {main_platform}")
         new_session = {
             "_id": user_id, "platform": main_platform,
             "profile": {"name": contact_data.get("name"), "first_name": contact_data.get("first_name"), "last_name": contact_data.get("last_name"), "profile_pic": contact_data.get("profile_pic")},
@@ -90,31 +90,18 @@ def get_or_create_session_from_contact(contact_data, platform):
         sessions_collection.insert_one(new_session)
         return new_session
 
-# --- دوال OpenAI (مع تعديل الـ Prompt) ---
+# --- دوال OpenAI ---
 async def get_image_description_for_assistant(base64_image):
     logger.info("🤖 [VISION-FOR-ASSISTANT] بدء استخلاص وصف تفصيلي من الصورة...")
-
-    prompt_text = (
-        "استخرج كل النصوص الموجودة في هذه الصورة بدقة شديدة وبشكل حرفي. "
-        "اعرض التفاصيل بالكامل مثل المبالغ، أرقام الهواتف، التواريخ، وأي بيانات أخرى."
-    )
-
+    prompt_text = "استخرج كل النصوص الموجودة في هذه الصورة بدقة شديدة وبشكل حرفي. اعرض التفاصيل بالكامل مثل المبالغ، أرقام الهواتف، التواريخ، وأي بيانات أخرى."
     try:
         response = await asyncio.to_thread(
             client.chat.completions.create,
             model="gpt-4.1",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt_text},
-                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}},
-                    ],
-                }
-            ],
+            messages=[{"role": "user", "content": [{"type": "text", "text": prompt_text}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]}],
             max_tokens=500,
         )
-        description = response.choices[0].message["content"][0]["text"]
+        description = response.choices[0].message.content
         logger.info(f"✅ [VISION] النص المستخلص: {description}")
         return description
     except Exception as e:
@@ -125,7 +112,6 @@ async def get_assistant_reply(session, content):
     user_id = session["_id"]
     thread_id = session.get("openai_thread_id")
     logger.info(f"🤖 [ASSISTANT] بدء عملية الحصول على رد للمستخدم {user_id}.")
-
     if not thread_id:
         logger.warning(f"🧵 [ASSISTANT] لا يوجد thread للمستخدم {user_id}. سيتم إنشاء واحد جديد.")
         try:
@@ -136,12 +122,9 @@ async def get_assistant_reply(session, content):
         except Exception as e:
             logger.error(f"❌ [ASSISTANT] فشل في إنشاء thread جديد: {e}", exc_info=True)
             return "⚠️ عفوًا، حدث خطأ أثناء تهيئة المحادثة."
-    
     try:
         await asyncio.to_thread(client.beta.threads.messages.create, thread_id=thread_id, role="user", content=content)
-        logger.info(f"▶️ [ASSISTANT] بدء تشغيل المساعد (run) للـ thread: {thread_id}")
         run = await asyncio.to_thread(client.beta.threads.runs.create, thread_id=thread_id, assistant_id=ASSISTANT_ID_PREMIUM)
-        
         start_time = time.time()
         while run.status in ["queued", "in_progress"]:
             if time.time() - start_time > 90:
@@ -149,7 +132,6 @@ async def get_assistant_reply(session, content):
                 return "⚠️ حدث تأخير في الرد، يرجى المحاولة مرة أخرى."
             await asyncio.sleep(1)
             run = await asyncio.to_thread(client.beta.threads.runs.retrieve, thread_id=thread_id, run_id=run.id)
-
         if run.status == "completed":
             messages = await asyncio.to_thread(client.beta.threads.messages.list, thread_id=thread_id, limit=1)
             reply = messages.data[0].content[0].text.value.strip()
@@ -163,18 +145,26 @@ async def get_assistant_reply(session, content):
         return "⚠️ عفوًا، حدث خطأ غير متوقع."
 
 # --- دوال الإرسال والوسائط ---
-def send_manychat_reply(subscriber_id, text_message):
-    logger.info(f"📤 [MANYCHAT] بدء إرسال رد إلى {subscriber_id}...")
+def send_manychat_reply(subscriber_id, text_message, platform="Facebook"): # <-- تعديل: إضافة بارامتر المنصة
+    logger.info(f"📤 [MANYCHAT] بدء إرسال رد إلى {subscriber_id} على منصة {platform}...")
     if not MANYCHAT_API_KEY:
         logger.error("❌ [MANYCHAT] مفتاح MANYCHAT_API_KEY غير موجود!")
         return
     url = "https://api.manychat.com/fb/sending/sendContent"
     headers = {"Authorization": f"Bearer {MANYCHAT_API_KEY}", "Content-Type": "application/json"}
-    payload = {"subscriber_id": str(subscriber_id ), "data": {"version": "v2", "content": {"messages": [{"type": "text", "text": text_message}]}}}
+    
+    # تحديد القناة (channel ) بناءً على المنصة لإرسال الرد للمكان الصحيح
+    channel = "instagram" if platform == "Instagram" else "facebook"
+    
+    payload = {
+        "subscriber_id": str(subscriber_id),
+        "data": {"version": "v2", "content": {"messages": [{"type": "text", "text": text_message}]}},
+        "channel": channel  # <-- تعديل: إضافة حقل القناة للـ API
+    }
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=20)
         response.raise_for_status()
-        logger.info(f"✅ [MANYCHAT] تم إرسال الرسالة بنجاح إلى {subscriber_id}.")
+        logger.info(f"✅ [MANYCHAT] تم إرسال الرسالة بنجاح إلى {subscriber_id} عبر {channel}.")
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ [MANYCHAT] فشل إرسال الرسالة: {e.response.text if e.response else e}", exc_info=True)
 
@@ -194,7 +184,6 @@ def download_media_from_url(media_url):
     try:
         media_response = requests.get(media_url, timeout=20)
         media_response.raise_for_status()
-        logger.info(f"✅ [MEDIA] تم تحميل الوسائط بنجاح.")
         return media_response.content
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ [MEDIA] فشل تحميل الوسائط من {media_url}: {e}", exc_info=True)
@@ -208,7 +197,6 @@ def transcribe_audio(audio_content, file_format="mp4"):
         with open(temp_audio_file, "rb") as audio_file:
             transcription = client.audio.transcriptions.create(model="whisper-1", file=audio_file)
         os.remove(temp_audio_file)
-        logger.info(f"✅ [WHISPER] تم تحويل الصوت إلى نص بنجاح.")
         return transcription.text
     except Exception as e:
         logger.error(f"❌ [WHISPER] خطأ أثناء تحويل الصوت: {e}", exc_info=True)
@@ -230,7 +218,8 @@ def schedule_assistant_response(user_id):
         
         if reply_text:
             if platform in ["Instagram", "Facebook"]:
-                send_manychat_reply(user_id, reply_text)
+                # تعديل: تمرير المنصة (platform) لضمان الإرسال للقناة الصحيحة
+                send_manychat_reply(user_id, reply_text, platform=platform)
             elif platform == "Telegram":
                 bot_instance = telegram_app.bot
                 business_id = user_data.get("business_id")
@@ -243,19 +232,16 @@ def schedule_assistant_response(user_id):
 def add_to_processing_queue(session, text_content, **kwargs):
     user_id = session["_id"]
     if user_id in message_timers: message_timers[user_id].cancel()
-    
     if user_id not in pending_messages:
         pending_messages[user_id] = {"texts": [], "session": session, **kwargs}
-    
     pending_messages[user_id]["texts"].append(text_content)
     logger.info(f"➕ [QUEUE] تمت إضافة محتوى إلى قائمة الانتظار للمستخدم {user_id}. حجم القائمة الآن: {len(pending_messages[user_id]['texts'])}")
-    
     timer = threading.Timer(BATCH_WAIT_TIME, schedule_assistant_response, args=[user_id])
     message_timers[user_id] = timer
     timer.start()
 
 # --- ويب هوك ManyChat ---
-@flask_app.route("/manychat_webhook", methods=["POST"])
+@app.route("/manychat_webhook", methods=["POST"])
 def manychat_webhook_handler():
     logger.info("📞 [WEBHOOK-MC] تم استلام طلب جديد.")
     auth_header = request.headers.get('Authorization')
@@ -280,7 +266,7 @@ def manychat_webhook_handler():
         return jsonify({"status": "received", "message": "No text input to process"}), 200
     
     logger.info(f"💬 [WEBHOOK-MC] الإدخال المستلم: \"{last_input}\"")
-    is_url = last_input.startswith(("http://", "https://" ))
+    is_url = last_input.startswith(("http://", "https://"  ))
     is_media_url = is_url and ("cdn.fbsbx.com" in last_input or "scontent" in last_input)
 
     def background_task():
@@ -288,7 +274,7 @@ def manychat_webhook_handler():
             logger.info("🖼️ [WEBHOOK-MC] تم اكتشاف رابط وسائط. بدء المعالجة في الخلفية.")
             media_content = download_media_from_url(last_input)
             if not media_content:
-                send_manychat_reply(session["_id"], "⚠️ عفوًا، لم أتمكن من تحميل الملف الذي أرسلته.")
+                send_manychat_reply(session["_id"], "⚠️ عفوًا، لم أتمكن من تحميل الملف الذي أرسلته.", platform=session["platform"])
                 return
 
             is_audio = any(ext in last_input for ext in ['.mp4', '.mp3', '.ogg']) or "audioclip" in last_input
@@ -353,7 +339,7 @@ if TELEGRAM_BOT_TOKEN:
     telegram_app.add_handler(CommandHandler("start", start_command))
     telegram_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_telegram_message))
 
-    @flask_app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
+    @app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
     async def telegram_webhook_handler():
         data = request.get_json()
         update = telegram.Update.de_json(data, telegram_app.bot)
@@ -362,10 +348,9 @@ if TELEGRAM_BOT_TOKEN:
     logger.info("✅ [TELEGRAM] تم إعداد معالجات تليجرام والويب هوك بنجاح.")
 
 # --- نقطة الدخول الرئيسية ---
-@flask_app.route("/")
+@app.route("/")
 def home():
     return "✅ Bot is running with Detailed Vision Logic (v10 - Full Integration)."
 
 if __name__ == "__main__":
     logger.info("🚀 التطبيق جاهز للتشغيل. يرجى استخدام خادم WSGI (مثل Gunicorn) لتشغيله في بيئة الإنتاج.")
-
