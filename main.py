@@ -42,8 +42,7 @@ except Exception as e:
     exit()
 
 # --- إعدادات التطبيق ---
-flask_app = Flask(__name__)
-app = WsgiToAsgi(flask_app)
+app = Flask(__name__) # <-- تم التعديل: هذا هو تطبيق Flask الرئيسي
 client = OpenAI(api_key=OPENAI_API_KEY)
 logger.info("🚀 [APP] تم إعداد تطبيق Flask و OpenAI Client.")
 
@@ -170,7 +169,7 @@ def send_manychat_reply(subscriber_id, text_message):
         return
     url = "https://api.manychat.com/fb/sending/sendContent"
     headers = {"Authorization": f"Bearer {MANYCHAT_API_KEY}", "Content-Type": "application/json"}
-    payload = {"subscriber_id": str(subscriber_id ), "data": {"version": "v2", "content": {"messages": [{"type": "text", "text": text_message}]}}}
+    payload = {"subscriber_id": str(subscriber_id  ), "data": {"version": "v2", "content": {"messages": [{"type": "text", "text": text_message}]}}}
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=20)
         response.raise_for_status()
@@ -255,7 +254,7 @@ def add_to_processing_queue(session, text_content, **kwargs):
     timer.start()
 
 # --- ويب هوك ManyChat ---
-@app.route("/manychat_webhook", methods=["POST"])
+@app.route("/manychat_webhook", methods=["POST"]) # <-- تم التعديل: يستخدم كائن Flask `app`
 def manychat_webhook_handler():
     try:
         data = request.json
@@ -289,20 +288,21 @@ def manychat_webhook_handler():
         if message_type == "image":
             image_url = message_data.get("image", {}).get("url")
             logger.info(f"🖼 [WEBHOOK-MC] تم استلام صورة من {user_name}: {image_url}")
-            send_manychat_reply(subscriber_id, f"تم استلام الصورة ✅", platform=platform_source)
+            send_manychat_reply(subscriber_id, f"تم استلام الصورة ✅")
 
         elif message_type == "audio":
             audio_url = message_data.get("audio", {}).get("url")
             logger.info(f"🎧 [WEBHOOK-MC] تم استلام مقطع صوتي من {user_name}: {audio_url}")
-            send_manychat_reply(subscriber_id, f"تم استلام المقطع الصوتي 🎵", platform=platform_source)
+            send_manychat_reply(subscriber_id, f"تم استلام المقطع الصوتي 🎵")
 
         elif message_text:
             logger.info(f"🗨 [WEBHOOK-MC] تم استلام رسالة نصية من {user_name}: {message_text}")
-            process_user_message(subscriber_id, message_text, platform_source)
+            # ملاحظة: الدالة process_user_message غير موجودة في الكود الأصلي، لذا افترضت أنك تقصد add_to_processing_queue
+            add_to_processing_queue(session, message_text)
 
         else:
             logger.warning(f"⚠ [WEBHOOK-MC] لم يتم التعرف على نوع الرسالة من {user_name}")
-            send_manychat_reply(subscriber_id, "لم أفهم الرسالة دي، ممكن توضحلي أكتر؟ 🤔", platform=platform_source)
+            send_manychat_reply(subscriber_id, "لم أفهم الرسالة دي، ممكن توضحلي أكتر؟ 🤔")
 
         return jsonify({"status": "ok"}), 200
 
@@ -354,7 +354,7 @@ if TELEGRAM_BOT_TOKEN:
     telegram_app.add_handler(CommandHandler("start", start_command))
     telegram_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_telegram_message))
 
-    @flask_app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
+    @app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"]) # <-- تم التعديل: يستخدم كائن Flask `app`
     async def telegram_webhook_handler():
         data = request.get_json()
         update = telegram.Update.de_json(data, telegram_app.bot)
@@ -363,9 +363,17 @@ if TELEGRAM_BOT_TOKEN:
     logger.info("✅ [TELEGRAM] تم إعداد معالجات تليجرام والويب هوك بنجاح.")
 
 # --- نقطة الدخول الرئيسية ---
-@flask_app.route("/")
+@app.route("/") # <-- تم التعديل: يستخدم كائن Flask `app`
 def home():
     return "✅ Bot is running with Detailed Vision Logic (v10 - Full Integration)."
 
+# --- التحويل إلى ASGI ---
+# يتم إنشاء غلاف ASGI هنا بعد تعريف جميع مسارات Flask
+asgi_app = WsgiToAsgi(app)
+
 if __name__ == "__main__":
-    logger.info("🚀 التطبيق جاهز للتشغيل. يرجى استخدام خادم WSGI (مثل Gunicorn) لتشغيله في بيئة الإنتاج.")
+    logger.info("🚀 التطبيق جاهز للتشغيل. يرجى استخدام خادم WSGI/ASGI (مثل Gunicorn مع Uvicorn) لتشغيله في بيئة الإنتاج.")
+    # مثال للتشغيل المحلي للاختبار:
+    # import uvicorn
+    # uvicorn.run(asgi_app, host="0.0.0.0", port=8000)
+
