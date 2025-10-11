@@ -42,7 +42,8 @@ except Exception as e:
     exit()
 
 # --- إعدادات التطبيق ---
-app = Flask(__name__) # <-- تم التعديل: هذا هو تطبيق Flask الرئيسي
+flask_app = Flask(__name__)
+app = WsgiToAsgi(flask_app)
 client = OpenAI(api_key=OPENAI_API_KEY)
 logger.info("🚀 [APP] تم إعداد تطبيق Flask و OpenAI Client.")
 
@@ -169,7 +170,7 @@ def send_manychat_reply(subscriber_id, text_message):
         return
     url = "https://api.manychat.com/fb/sending/sendContent"
     headers = {"Authorization": f"Bearer {MANYCHAT_API_KEY}", "Content-Type": "application/json"}
-    payload = {"subscriber_id": str(subscriber_id  ), "data": {"version": "v2", "content": {"messages": [{"type": "text", "text": text_message}]}}}
+    payload = {"subscriber_id": str(subscriber_id ), "data": {"version": "v2", "content": {"messages": [{"type": "text", "text": text_message}]}}}
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=20)
         response.raise_for_status()
@@ -254,61 +255,59 @@ def add_to_processing_queue(session, text_content, **kwargs):
     timer.start()
 
 # --- ويب هوك ManyChat ---
-@app.route("/manychat_webhook", methods=["POST"]) # <-- تم التعديل: يستخدم كائن Flask `app`
+@flask_app.route("/manychat_webhook", methods=["POST"])
 def manychat_webhook_handler():
-    try:
-        data = request.json
-        logger.info(f"📞 [WEBHOOK-MC] تم استلام طلب جديد: {json.dumps(data, ensure_ascii=False)}")
+    logger.info("📞 [WEBHOOK-MC] تم استلام طلب جديد.")
+    auth_header = request.headers.get('Authorization')
+    if not MANYCHAT_SECRET_KEY or auth_header != f'Bearer {MANYCHAT_SECRET_KEY}':
+        logger.critical("🚨 [WEBHOOK-MC] محاولة وصول غير مصرح بها!")
+        return jsonify({"status": "error", "message": "Unauthorized"}), 403
+    
+    data = request.get_json()
+    full_contact = data.get("full_contact")
+    if not full_contact:
+        logger.error("❌ [WEBHOOK-MC] CRITICAL: 'full_contact' غير موجودة.")
+        return jsonify({"status": "error", "message": "'full_contact' data is required."}), 400
 
-        # استخراج بيانات المستخدم والرسالة
-        full_contact = data.get("contact", {})
-        subscriber_id = full_contact.get("id")
-        user_name = f"{full_contact.get('first_name', '')} {full_contact.get('last_name', '')}".strip()
-        message_data = data.get("message", {})
-        message_text = message_data.get("text", "")
-        message_type = message_data.get("type", "text")
+    session = get_or_create_session_from_contact(full_contact, "ManyChat")
+    if not session:
+        logger.error("❌ [WEBHOOK-MC] فشل في إنشاء أو الحصول على جلسة.")
+        return jsonify({"status": "error", "message": "Failed to create or get session"}), 500
 
-        # --- تحديد المنصة الفعلية (Facebook أو Instagram) ---
-        platform_source = "Facebook"
-        try:
-            if "ig_id" in full_contact or "instagram" in json.dumps(full_contact).lower():
-                platform_source = "Instagram"
-        except Exception as e:
-            logger.warning(f"⚠ [WEBHOOK-MC] فشل في تحديد المنصة تلقائيًا: {e}")
+    last_input = full_contact.get("last_text_input") or full_contact.get("last_input_text")
+    if not last_input:
+        logger.warning("[WEBHOOK-MC] لا يوجد إدخال نصي للمعالجة.")
+        return jsonify({"status": "received", "message": "No text input to process"}), 200
+    
+    logger.info(f"💬 [WEBHOOK-MC] الإدخال المستلم: \"{last_input}\"")
+    is_url = last_input.startswith(("http://", "https://" ))
+    is_media_url = is_url and ("cdn.fbsbx.com" in last_input or "scontent" in last_input)
 
-        logger.info(f"🌐 [WEBHOOK-MC] تم تحديد المنصة: {platform_source}")
+    def background_task():
+        if is_media_url:
+            logger.info("🖼️ [WEBHOOK-MC] تم اكتشاف رابط وسائط. بدء المعالجة في الخلفية.")
+            media_content = download_media_from_url(last_input)
+            if not media_content:
+                send_manychat_reply(session["_id"], "⚠️ عفوًا، لم أتمكن من تحميل الملف الذي أرسلته.")
+                return
 
-        # إنشاء أو استرجاع الجلسة الخاصة بالمستخدم
-        session = get_or_create_session_from_contact(full_contact, f"ManyChat-{platform_source}")
-
-        # طباعة لتتبع نوع الرسالة
-        logger.info(f"💬 [WEBHOOK-MC] نوع الرسالة: {message_type} - المحتوى: {message_text}")
-
-        # التعامل مع أنواع الرسائل المختلفة
-        if message_type == "image":
-            image_url = message_data.get("image", {}).get("url")
-            logger.info(f"🖼 [WEBHOOK-MC] تم استلام صورة من {user_name}: {image_url}")
-            send_manychat_reply(subscriber_id, f"تم استلام الصورة ✅")
-
-        elif message_type == "audio":
-            audio_url = message_data.get("audio", {}).get("url")
-            logger.info(f"🎧 [WEBHOOK-MC] تم استلام مقطع صوتي من {user_name}: {audio_url}")
-            send_manychat_reply(subscriber_id, f"تم استلام المقطع الصوتي 🎵")
-
-        elif message_text:
-            logger.info(f"🗨 [WEBHOOK-MC] تم استلام رسالة نصية من {user_name}: {message_text}")
-            # ملاحظة: الدالة process_user_message غير موجودة في الكود الأصلي، لذا افترضت أنك تقصد add_to_processing_queue
-            add_to_processing_queue(session, message_text)
-
+            is_audio = any(ext in last_input for ext in ['.mp4', '.mp3', '.ogg']) or "audioclip" in last_input
+            if is_audio:
+                transcribed_text = transcribe_audio(media_content, file_format="mp4")
+                if transcribed_text:
+                    content_for_assistant = f"[رسالة صوتية من العميل]: \"{transcribed_text}\""
+                    add_to_processing_queue(session, content_for_assistant)
+            else: # It's an image
+                description = asyncio.run(get_image_description_for_assistant(base64.b64encode(media_content).decode('utf-8')))
+                if description:
+                    content_for_assistant = f"[وصف صورة أرسلها العميل]: {description}"
+                    add_to_processing_queue(session, content_for_assistant)
         else:
-            logger.warning(f"⚠ [WEBHOOK-MC] لم يتم التعرف على نوع الرسالة من {user_name}")
-            send_manychat_reply(subscriber_id, "لم أفهم الرسالة دي، ممكن توضحلي أكتر؟ 🤔")
+            logger.info("📝 [WEBHOOK-MC] تم تحديد الإدخال كنص عادي.")
+            add_to_processing_queue(session, last_input)
 
-        return jsonify({"status": "ok"}), 200
-
-    except Exception as e:
-        logger.error(f"❌ [WEBHOOK-MC] خطأ أثناء معالجة الطلب: {e}", exc_info=True)
-        return jsonify({"error": str(e)}), 500
+    threading.Thread(target=background_task).start()
+    return jsonify({"status": "received"}), 200
 
 # --- منطق تيليجرام ---
 if TELEGRAM_BOT_TOKEN:
@@ -354,7 +353,7 @@ if TELEGRAM_BOT_TOKEN:
     telegram_app.add_handler(CommandHandler("start", start_command))
     telegram_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_telegram_message))
 
-    @app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"]) # <-- تم التعديل: يستخدم كائن Flask `app`
+    @flask_app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
     async def telegram_webhook_handler():
         data = request.get_json()
         update = telegram.Update.de_json(data, telegram_app.bot)
@@ -363,17 +362,10 @@ if TELEGRAM_BOT_TOKEN:
     logger.info("✅ [TELEGRAM] تم إعداد معالجات تليجرام والويب هوك بنجاح.")
 
 # --- نقطة الدخول الرئيسية ---
-@app.route("/") # <-- تم التعديل: يستخدم كائن Flask `app`
+@flask_app.route("/")
 def home():
     return "✅ Bot is running with Detailed Vision Logic (v10 - Full Integration)."
 
-# --- التحويل إلى ASGI ---
-# يتم إنشاء غلاف ASGI هنا بعد تعريف جميع مسارات Flask
-asgi_app = WsgiToAsgi(app)
-
 if __name__ == "__main__":
-    logger.info("🚀 التطبيق جاهز للتشغيل. يرجى استخدام خادم WSGI/ASGI (مثل Gunicorn مع Uvicorn) لتشغيله في بيئة الإنتاج.")
-    # مثال للتشغيل المحلي للاختبار:
-    # import uvicorn
-    # uvicorn.run(asgi_app, host="0.0.0.0", port=8000)
+    logger.info("🚀 التطبيق جاهز للتشغيل. يرجى استخدام خادم WSGI (مثل Gunicorn) لتشغيله في بيئة الإنتاج.")
 
