@@ -41,7 +41,7 @@ except Exception as e:
     exit()
 
 # --- إعدادات التطبيق ---
-app = Flask(__name__) # <-- تم التبسيط: هذا هو تطبيق Flask الرئيسي
+app = Flask(__name__)
 client = OpenAI(api_key=OPENAI_API_KEY)
 logger.info("🚀 [APP] تم إعداد تطبيق Flask و OpenAI Client.")
 
@@ -62,10 +62,17 @@ def get_or_create_session_from_contact(contact_data, platform):
     now_utc = datetime.now(timezone.utc)
     
     main_platform = "Unknown"
-    # تحديد المنصة بدقة أكبر
+    # --- تعديل مهم هنا ---
+    # الاعتماد على حقل "source" هو الطريقة الأكثر استقرارًا لتحديد المنصة
     if platform.startswith("ManyChat"):
-        # ManyChat يرسل `ig_id` للمستخدمين على انستغرام
-        main_platform = "Instagram" if "ig_id" in contact_data and contact_data["ig_id"] else "Facebook"
+        contact_source = contact_data.get("source", "").lower()
+        if "instagram" in contact_source:
+            main_platform = "Instagram"
+        elif "facebook" in contact_source:
+            main_platform = "Facebook"
+        else:
+            # كحل بديل إذا كان حقل المصدر فارغًا بشكل غير متوقع
+            main_platform = "Instagram" if "ig_id" in contact_data and contact_data.get("ig_id") else "Facebook"
     elif platform == "Telegram":
         main_platform = "Telegram"
 
@@ -145,21 +152,26 @@ async def get_assistant_reply(session, content):
         return "⚠️ عفوًا، حدث خطأ غير متوقع."
 
 # --- دوال الإرسال والوسائط ---
-def send_manychat_reply(subscriber_id, text_message, platform="Facebook"): # <-- تعديل: إضافة بارامتر المنصة
+def send_manychat_reply(subscriber_id, text_message, platform): # <-- تم إزالة القيمة الافتراضية
     logger.info(f"📤 [MANYCHAT] بدء إرسال رد إلى {subscriber_id} على منصة {platform}...")
     if not MANYCHAT_API_KEY:
         logger.error("❌ [MANYCHAT] مفتاح MANYCHAT_API_KEY غير موجود!")
         return
+    
+    # التحقق من أن المنصة هي إحدى القيمتين المتوقعتين
+    if platform not in ["Instagram", "Facebook"]:
+        logger.error(f"❌ [MANYCHAT] منصة غير مدعومة أو غير محددة: '{platform}'. لا يمكن إرسال الرد.")
+        return
+        
     url = "https://api.manychat.com/fb/sending/sendContent"
     headers = {"Authorization": f"Bearer {MANYCHAT_API_KEY}", "Content-Type": "application/json"}
     
-    # تحديد القناة (channel ) بناءً على المنصة لإرسال الرد للمكان الصحيح
     channel = "instagram" if platform == "Instagram" else "facebook"
     
     payload = {
-        "subscriber_id": str(subscriber_id),
+        "subscriber_id": str(subscriber_id ),
         "data": {"version": "v2", "content": {"messages": [{"type": "text", "text": text_message}]}},
-        "channel": channel  # <-- تعديل: إضافة حقل القناة للـ API
+        "channel": channel
     }
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=20)
@@ -218,7 +230,6 @@ def schedule_assistant_response(user_id):
         
         if reply_text:
             if platform in ["Instagram", "Facebook"]:
-                # تعديل: تمرير المنصة (platform) لضمان الإرسال للقناة الصحيحة
                 send_manychat_reply(user_id, reply_text, platform=platform)
             elif platform == "Telegram":
                 bot_instance = telegram_app.bot
@@ -250,6 +261,10 @@ def manychat_webhook_handler():
         return jsonify({"status": "error", "message": "Unauthorized"}), 403
     
     data = request.get_json()
+    if not data:
+        logger.error("❌ [WEBHOOK-MC] CRITICAL: لم يتم استلام بيانات JSON.")
+        return jsonify({"status": "error", "message": "Request body must be JSON."}), 400
+        
     full_contact = data.get("full_contact")
     if not full_contact:
         logger.error("❌ [WEBHOOK-MC] CRITICAL: 'full_contact' غير موجودة.")
@@ -266,7 +281,7 @@ def manychat_webhook_handler():
         return jsonify({"status": "received", "message": "No text input to process"}), 200
     
     logger.info(f"💬 [WEBHOOK-MC] الإدخال المستلم: \"{last_input}\"")
-    is_url = last_input.startswith(("http://", "https://"  ))
+    is_url = last_input.startswith(("http://", "https://" ))
     is_media_url = is_url and ("cdn.fbsbx.com" in last_input or "scontent" in last_input)
 
     def background_task():
@@ -350,7 +365,7 @@ if TELEGRAM_BOT_TOKEN:
 # --- نقطة الدخول الرئيسية ---
 @app.route("/")
 def home():
-    return "✅ Bot is running with Detailed Vision Logic (v10 - Full Integration)."
+    return "✅ Bot is running with Detailed Vision Logic (v10 - Full Integration - Patched)."
 
 if __name__ == "__main__":
     logger.info("🚀 التطبيق جاهز للتشغيل. يرجى استخدام خادم WSGI (مثل Gunicorn) لتشغيله في بيئة الإنتاج.")
