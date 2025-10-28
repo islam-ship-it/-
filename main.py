@@ -62,8 +62,6 @@ def get_or_create_session_from_contact(contact_data, platform):
     now_utc = datetime.now(timezone.utc)
     
     main_platform = "Unknown"
-    # --- تعديل مهم هنا ---
-    # الاعتماد على حقل "source" هو الطريقة الأكثر استقرارًا لتحديد المنصة
     if platform.startswith("ManyChat"):
         contact_source = contact_data.get("source", "").lower()
         if "instagram" in contact_source:
@@ -71,7 +69,6 @@ def get_or_create_session_from_contact(contact_data, platform):
         elif "facebook" in contact_source:
             main_platform = "Facebook"
         else:
-            # كحل بديل إذا كان حقل المصدر فارغًا بشكل غير متوقع
             main_platform = "Instagram" if "ig_id" in contact_data and contact_data.get("ig_id") else "Facebook"
     elif platform == "Telegram":
         main_platform = "Telegram"
@@ -152,13 +149,12 @@ async def get_assistant_reply(session, content):
         return "⚠️ عفوًا، حدث خطأ غير متوقع."
 
 # --- دوال الإرسال والوسائط ---
-def send_manychat_reply(subscriber_id, text_message, platform): # <-- تم إزالة القيمة الافتراضية
+def send_manychat_reply(subscriber_id, text_message, platform):
     logger.info(f"📤 [MANYCHAT] بدء إرسال رد إلى {subscriber_id} على منصة {platform}...")
     if not MANYCHAT_API_KEY:
         logger.error("❌ [MANYCHAT] مفتاح MANYCHAT_API_KEY غير موجود!")
         return
     
-    # التحقق من أن المنصة هي إحدى القيمتين المتوقعتين
     if platform not in ["Instagram", "Facebook"]:
         logger.error(f"❌ [MANYCHAT] منصة غير مدعومة أو غير محددة: '{platform}'. لا يمكن إرسال الرد.")
         return
@@ -168,17 +164,49 @@ def send_manychat_reply(subscriber_id, text_message, platform): # <-- تم إز�
     
     channel = "instagram" if platform == "Instagram" else "facebook"
     
+    # --- تعديل مهم هنا: تقسيم الرسالة إلى فقرات منفصلة لضمان التوافق ---
+    messages_to_send = []
+    # تقسيم النص إلى فقرات بناءً على الأسطر الفارغة أولاً
+    paragraphs = [p.strip( ) for p in text_message.split('\n\n') if p.strip()]
+
+    # إذا لم تكن هناك أسطر فارغة، قسّم حسب السطر الجديد العادي
+    if len(paragraphs) <= 1:
+        paragraphs = [p.strip() for p in text_message.split('\n') if p.strip()]
+
+    for paragraph in paragraphs:
+        messages_to_send.append({"type": "text", "text": paragraph})
+
+    # التأكد من عدم إرسال قائمة رسائل فارغة
+    if not messages_to_send:
+        logger.warning(f"⚠️ [MANYCHAT] لا يوجد محتوى لإرساله إلى {subscriber_id} بعد معالجة النص.")
+        return
+
     payload = {
-        "subscriber_id": str(subscriber_id ),
-        "data": {"version": "v2", "content": {"messages": [{"type": "text", "text": text_message}]}},
+        "subscriber_id": str(subscriber_id),
+        "data": {
+            "version": "v2",
+            "content": {
+                "messages": messages_to_send
+            }
+        },
         "channel": channel
     }
+    
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=20)
+        # استخدام data=json.dumps() لضمان تهيئة JSON بشكل صحيح
+        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=20)
         response.raise_for_status()
         logger.info(f"✅ [MANYCHAT] تم إرسال الرسالة بنجاح إلى {subscriber_id} عبر {channel}.")
     except requests.exceptions.RequestException as e:
-        logger.error(f"❌ [MANYCHAT] فشل إرسال الرسالة: {e.response.text if e.response else e}", exc_info=True)
+        # تحسين تسجيل الخطأ لعرض تفاصيل من ManyChat
+        error_details = "No response body"
+        if e.response is not None:
+            try:
+                error_details = e.response.json()
+            except json.JSONDecodeError:
+                error_details = e.response.text
+        logger.error(f"❌ [MANYCHAT] فشل إرسال الرسالة: {e}. تفاصيل الخطأ: {error_details}", exc_info=True)
+
 
 async def send_telegram_message(bot, chat_id, text, business_id=None):
     logger.info(f"📤 [TELEGRAM] بدء إرسال رسالة إلى {chat_id}...")
@@ -365,7 +393,7 @@ if TELEGRAM_BOT_TOKEN:
 # --- نقطة الدخول الرئيسية ---
 @app.route("/")
 def home():
-    return "✅ Bot is running with Detailed Vision Logic (v10 - Full Integration - Patched)."
+    return "✅ Bot is running with Detailed Vision Logic (v11 - Final Patch)."
 
 if __name__ == "__main__":
     logger.info("🚀 التطبيق جاهز للتشغيل. يرجى استخدام خادم WSGI (مثل Gunicorn) لتشغيله في بيئة الإنتاج.")
