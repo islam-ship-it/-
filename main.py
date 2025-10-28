@@ -149,63 +149,61 @@ async def get_assistant_reply(session, content):
         return "⚠️ عفوًا، حدث خطأ غير متوقع."
 
 # --- دوال الإرسال والوسائط ---
-def send_manychat_reply(subscriber_id, text_message, platform):
+def send_manychat_reply(subscriber_id, text_message, platform, retry=False):
     logger.info(f"📤 [MANYCHAT] بدء إرسال رد إلى {subscriber_id} على منصة {platform}...")
     if not MANYCHAT_API_KEY:
         logger.error("❌ [MANYCHAT] مفتاح MANYCHAT_API_KEY غير موجود!")
         return
-    
+
     if platform not in ["Instagram", "Facebook"]:
         logger.error(f"❌ [MANYCHAT] منصة غير مدعومة أو غير محددة: '{platform}'. لا يمكن إرسال الرد.")
         return
-        
+
     url = "https://api.manychat.com/fb/sending/sendContent"
     headers = {"Authorization": f"Bearer {MANYCHAT_API_KEY}", "Content-Type": "application/json"}
-    
     channel = "instagram" if platform == "Instagram" else "facebook"
-    
-    # --- تعديل مهم هنا: تقسيم الرسالة إلى فقرات منفصلة لضمان التوافق ---
-    messages_to_send = []
-    # تقسيم النص إلى فقرات بناءً على الأسطر الفارغة أولاً
-    paragraphs = [p.strip( ) for p in text_message.split('\n\n') if p.strip()]
 
-    # إذا لم تكن هناك أسطر فارغة، قسّم حسب السطر الجديد العادي
+    # تقسيم الرسالة لفقرات
+    paragraphs = [p.strip( ) for p in text_message.split("\n\n") if p.strip()]
     if len(paragraphs) <= 1:
-        paragraphs = [p.strip() for p in text_message.split('\n') if p.strip()]
+        paragraphs = [p.strip() for p in text_message.split("\n") if p.strip()]
+    messages_to_send = [{"type": "text", "text": p} for p in paragraphs] if paragraphs else []
 
-    for paragraph in paragraphs:
-        messages_to_send.append({"type": "text", "text": paragraph})
-
-    # التأكد من عدم إرسال قائمة رسائل فارغة
     if not messages_to_send:
         logger.warning(f"⚠️ [MANYCHAT] لا يوجد محتوى لإرساله إلى {subscriber_id} بعد معالجة النص.")
         return
 
     payload = {
         "subscriber_id": str(subscriber_id),
-        "data": {
-            "version": "v2",
-            "content": {
-                "messages": messages_to_send
-            }
-        },
-        "channel": channel
+        "data": {"version": "v2", "content": {"messages": messages_to_send}},
+        "channel": channel,
     }
-    
+
     try:
-        # استخدام data=json.dumps() لضمان تهيئة JSON بشكل صحيح
         response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=20)
         response.raise_for_status()
         logger.info(f"✅ [MANYCHAT] تم إرسال الرسالة بنجاح إلى {subscriber_id} عبر {channel}.")
-    except requests.exceptions.RequestException as e:
-        # تحسين تسجيل الخطأ لعرض تفاصيل من ManyChat
-        error_details = "No response body"
-        if e.response is not None:
-            try:
-                error_details = e.response.json()
-            except json.JSONDecodeError:
-                error_details = e.response.text
+
+    except requests.exceptions.HTTPError as e:
+        error_text = e.response.text if e.response is not None else str(e)
+        # التحقق من كود الخطأ 3011
+        if "3011" in error_text:
+            if not retry:
+                logger.warning(f"⚠️ [MANYCHAT] المستخدم {subscriber_id} خارج نافذة 24 ساعة أو لم يتم تحديث النشاط بعد. سيتم إعادة المحاولة بعد ثانيتين...")
+                time.sleep(2)
+                send_manychat_reply(subscriber_id, text_message, platform, retry=True)
+            else:
+                logger.error(f"❌ [MANYCHAT] فشل الإرسال للمستخدم {subscriber_id} حتى بعد إعادة المحاولة. تفاصيل الخطأ: {error_text}")
+            return
+        # أي خطأ آخر
+        try:
+            error_details = e.response.json()
+        except Exception:
+            error_details = error_text
         logger.error(f"❌ [MANYCHAT] فشل إرسال الرسالة: {e}. تفاصيل الخطأ: {error_details}", exc_info=True)
+
+    except Exception as e:
+        logger.error(f"❌ [MANYCHAT] خطأ غير متوقع أثناء الإرسال: {e}", exc_info=True)
 
 
 async def send_telegram_message(bot, chat_id, text, business_id=None):
@@ -393,7 +391,7 @@ if TELEGRAM_BOT_TOKEN:
 # --- نقطة الدخول الرئيسية ---
 @app.route("/")
 def home():
-    return "✅ Bot is running with Detailed Vision Logic (v11 - Final Patch)."
+    return "✅ Bot is running with Detailed Vision Logic (v12 - Retry Patch)."
 
 if __name__ == "__main__":
     logger.info("🚀 التطبيق جاهز للتشغيل. يرجى استخدام خادم WSGI (مثل Gunicorn) لتشغيله في بيئة الإنتاج.")
