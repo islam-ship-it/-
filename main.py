@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import os
 import time
 import json
@@ -12,8 +11,7 @@ from openai import OpenAI
 from pymongo import MongoClient
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-import telegram
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
+
 
 # --- الإعدادات ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler()])
@@ -25,9 +23,10 @@ logger.info("▶️ [START] تم تحميل إعدادات البيئة.")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ASSISTANT_ID_PREMIUM = os.getenv("ASSISTANT_ID_PREMIUM")
 MONGO_URI = os.getenv("MONGO_URI")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+
 MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
 MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
+META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN")
 logger.info("🔑 [CONFIG] تم تحميل مفاتيح API.")
 
 # --- قاعدة البيانات ---
@@ -70,8 +69,7 @@ def get_or_create_session_from_contact(contact_data, platform):
             main_platform = "Facebook"
         else:
             main_platform = "Instagram" if "ig_id" in contact_data and contact_data.get("ig_id") else "Facebook"
-    elif platform == "Telegram":
-        main_platform = "Telegram"
+
 
     if session:
         update_fields = {
@@ -206,16 +204,7 @@ def send_manychat_reply(subscriber_id, text_message, platform, retry=False):
         logger.error(f"❌ [MANYCHAT] خطأ غير متوقع أثناء الإرسال: {e}", exc_info=True)
 
 
-async def send_telegram_message(bot, chat_id, text, business_id=None):
-    logger.info(f"📤 [TELEGRAM] بدء إرسال رسالة إلى {chat_id}...")
-    try:
-        if business_id:
-            await bot.send_message(chat_id=chat_id, text=text, business_connection_id=business_id)
-        else:
-            await bot.send_message(chat_id=chat_id, text=text)
-        logger.info(f"✅ [TELEGRAM] تم إرسال الرسالة بنجاح إلى {chat_id}.")
-    except Exception as e:
-        logger.error(f"❌ [TELEGRAM] فشل إرسال الرسالة إلى {chat_id}: {e}", exc_info=True)
+
 
 def download_media_from_url(media_url):
     logger.info(f"⬇️ [MEDIA] محاولة تحميل وسائط من الرابط: {media_url}")
@@ -257,20 +246,17 @@ def schedule_assistant_response(user_id):
         if reply_text:
             if platform in ["Instagram", "Facebook"]:
                 send_manychat_reply(user_id, reply_text, platform=platform)
-            elif platform == "Telegram":
-                bot_instance = telegram_app.bot
-                business_id = user_data.get("business_id")
-                asyncio.run(send_telegram_message(bot_instance, user_id, reply_text, business_id))
+
 
         if user_id in pending_messages: del pending_messages[user_id]
         if user_id in message_timers: del message_timers[user_id]
         logger.info(f"🗑️ [BATCH] تم الانتهاء من المعالجة للمستخدم {user_id}.")
 
-def add_to_processing_queue(session, text_content, **kwargs):
+def add_to_processing_queue(session, text_content):
     user_id = session["_id"]
     if user_id in message_timers: message_timers[user_id].cancel()
     if user_id not in pending_messages:
-        pending_messages[user_id] = {"texts": [], "session": session, **kwargs}
+        pending_messages[user_id] = {"texts": [], "session": session}
     pending_messages[user_id]["texts"].append(text_content)
     logger.info(f"➕ [QUEUE] تمت إضافة محتوى إلى قائمة الانتظار للمستخدم {user_id}. حجم القائمة الآن: {len(pending_messages[user_id]['texts'])}")
     timer = threading.Timer(BATCH_WAIT_TIME, schedule_assistant_response, args=[user_id])
@@ -336,62 +322,49 @@ def manychat_webhook_handler():
     threading.Thread(target=background_task).start()
     return jsonify({"status": "received"}), 200
 
-# --- منطق تيليجرام ---
-if TELEGRAM_BOT_TOKEN:
-    logger.info("🔌 [TELEGRAM] تم العثور على توكن تليجرام. جاري إعداد البوت...")
-    telegram_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    
-    async def start_command(update, context):
-        await update.message.reply_text(f"أهلاً {update.effective_user.first_name}!")
 
-    async def handle_telegram_message(update, context):
-        message = update.message or update.business_message
-        if not message: return
-        
-        user_contact_data = {"id": message.from_user.id, "name": message.from_user.full_name, "first_name": message.from_user.first_name, "last_name": message.from_user.last_name}
-        session = get_or_create_session_from_contact(user_contact_data, "Telegram")
-        if not session: return
-
-        business_id = getattr(update.business_message, "business_connection_id", None) if hasattr(update, "business_message") and update.business_message else None
-        
-        def background_task():
-            content_for_assistant = None
-            if message.text:
-                content_for_assistant = message.text
-            elif message.voice:
-                voice_file = asyncio.run(message.voice.get_file())
-                voice_content = asyncio.run(voice_file.download_as_bytearray())
-                transcribed_text = transcribe_audio(bytes(voice_content), file_format="ogg")
-                if transcribed_text: content_for_assistant = f"[رسالة صوتية من العميل]: {transcribed_text}"
-            elif message.photo:
-                photo_file = asyncio.run(message.photo[-1].get_file())
-                photo_content = asyncio.run(photo_file.download_as_bytearray())
-                base64_image = base64.b64encode(bytes(photo_content)).decode('utf-8')
-                description = asyncio.run(get_image_description_for_assistant(base64_image))
-                if description:
-                    caption = message.caption or ""
-                    content_for_assistant = f"[وصف صورة أرسلها العميل]: {description}\n[تعليق العميل على الصورة]: {caption}"
-            
-            if content_for_assistant:
-                add_to_processing_queue(session, content_for_assistant, business_id=business_id)
-
-        threading.Thread(target=background_task).start()
-
-    telegram_app.add_handler(CommandHandler("start", start_command))
-    telegram_app.add_handler(MessageHandler(filters.ALL & ~filters.COMMAND, handle_telegram_message))
-
-    @app.route(f"/{TELEGRAM_BOT_TOKEN}", methods=["POST"])
-    async def telegram_webhook_handler():
-        data = request.get_json()
-        update = telegram.Update.de_json(data, telegram_app.bot)
-        await telegram_app.process_update(update)
-        return jsonify({"status": "ok"})
-    logger.info("✅ [TELEGRAM] تم إعداد معالجات تليجرام والويب هوك بنجاح.")
 
 # --- نقطة الدخول الرئيسية ---
 @app.route("/")
 def home():
     return "✅ Bot is running with Detailed Vision Logic (v12 - Retry Patch)."
+
+
+# --- ويب هوك Meta (Facebook/Instagram) ---
+@app.route("/meta_webhook", methods=["GET", "POST"])
+def meta_webhook_handler():
+    if request.method == "GET":
+        # التحقق من الويب هوك
+        mode = request.args.get("hub.mode")
+        token = request.args.get("hub.verify_token")
+        challenge = request.args.get("hub.challenge")
+
+        if mode == "subscribe" and token == META_VERIFY_TOKEN:
+            logger.info("✅ [WEBHOOK-META] تم التحقق من الويب هوك بنجاح.")
+            return challenge, 200
+        else:
+            logger.error("❌ [WEBHOOK-META] فشل التحقق من الويب هوك: رمز أو وضع غير صحيح.")
+            return "Verification token mismatch", 403
+
+    elif request.method == "POST":
+        logger.info("📞 [WEBHOOK-META] تم استلام طلب POST جديد (حدث).")
+        data = request.get_json()
+        
+        if not data:
+            logger.error("❌ [WEBHOOK-META] CRITICAL: لم يتم استلام بيانات JSON.")
+            return jsonify({"status": "error", "message": "Request body must be JSON."}), 400
+
+        # هنا يجب أن يتم تحليل بيانات الحدث (Event Data)
+        # نظرًا لتعقيد تنسيق رسائل Meta، سنقوم بتسجيل البيانات فقط في هذه المرحلة
+        # لتركيز المعالجة على ManyChat (الذي ما زال موجودًا)
+        logger.info(f"📝 [WEBHOOK-META] بيانات الحدث المستلمة: {json.dumps(data, indent=2)}")
+        
+        # يجب أن تقوم Meta بالتحقق من التوقيع (Signature Verification)
+        # لكن للتجربة السريعة، سنكتفي بالرد 200 لتجنب إعادة الإرسال المتكررة من Meta
+        
+        return jsonify({"status": "received", "message": "Event data received"}), 200
+
+    return jsonify({"status": "error", "message": "Method not allowed"}), 405
 
 if __name__ == "__main__":
     logger.info("🚀 التطبيق جاهز للتشغيل. يرجى استخدام خادم WSGI (مثل Gunicorn) لتشغيله في بيئة الإنتاج.")
