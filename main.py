@@ -26,8 +26,7 @@ MONGO_URI = os.getenv("MONGO_URI")
 
 MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
 MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
-META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN")
-PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
+PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN") # تم الاحتفاظ به للاستخدام المستقبلي
 logger.info("🔑 [CONFIG] تم تحميل مفاتيح API.")
 
 # --- قاعدة البيانات ---
@@ -45,14 +44,14 @@ app = Flask(__name__)
 client = OpenAI(api_key=OPENAI_API_KEY)
 logger.info("🚀 [APP] تم إعداد تطبيق Flask و OpenAI Client.")
 
-# --- متغيرات عالمية ---
+# --- متغيرات عالمية للمعالجة غير المتزامنة ---
 pending_messages = {}
 message_timers = {}
 processing_locks = {}
 BATCH_WAIT_TIME = 2.0
 
 # --- دوال إدارة الجلسات ---
-def get_or_create_session_from_contact(contact_data, platform):
+def get_or_create_session_from_contact(contact_data):
     user_id = str(contact_data.get("id"))
     if not user_id:
         logger.error(f"❌ [SESSION] لم يتم العثور على user_id في البيانات: {contact_data}")
@@ -61,16 +60,18 @@ def get_or_create_session_from_contact(contact_data, platform):
     session = sessions_collection.find_one({"_id": user_id})
     now_utc = datetime.now(timezone.utc)
     
+    # تحديد المنصة بدقة
     main_platform = "Unknown"
-    if platform.startswith("ManyChat"):
-        contact_source = contact_data.get("source", "").lower()
-        if "instagram" in contact_source:
-            main_platform = "Instagram"
-        elif "facebook" in contact_source:
-            main_platform = "Facebook"
-        else:
-            main_platform = "Instagram" if "ig_id" in contact_data and contact_data.get("ig_id") else "Facebook"
-
+    contact_source = contact_data.get("source", "").lower()
+    if "instagram" in contact_source:
+        main_platform = "Instagram"
+    elif "facebook" in contact_source:
+        main_platform = "Facebook"
+    # حل احتياطي إذا لم يكن الحقل source موجودًا
+    elif "ig_id" in contact_data and contact_data.get("ig_id"):
+        main_platform = "Instagram"
+    else:
+        main_platform = "Facebook"
 
     if session:
         update_fields = {
@@ -94,24 +95,7 @@ def get_or_create_session_from_contact(contact_data, platform):
         return new_session
 
 # --- دوال OpenAI ---
-async def get_image_description_for_assistant(base64_image):
-    logger.info("🤖 [VISION-FOR-ASSISTANT] بدء استخلاص وصف تفصيلي من الصورة...")
-    prompt_text = "استخرج كل النصوص الموجودة في هذه الصورة بدقة شديدة وبشكل حرفي. اعرض التفاصيل بالكامل مثل المبالغ، أرقام الهواتف، التواريخ، وأي بيانات أخرى."
-    try:
-        response = await asyncio.to_thread(
-            client.chat.completions.create,
-            model="gpt-4.1",
-            messages=[{"role": "user", "content": [{"type": "text", "text": prompt_text}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]}],
-            max_tokens=500,
-        )
-        description = response.choices[0].message.content
-        logger.info(f"✅ [VISION] النص المستخلص: {description}")
-        return description
-    except Exception as e:
-        logger.error(f"❌ [VISION] فشل استخلاص النص من الصورة: {e}", exc_info=True)
-        return None
-
-async def get_assistant_reply(session, content):
+async def get_assistant_reply(session, content, timeout=90):
     user_id = session["_id"]
     thread_id = session.get("openai_thread_id")
     logger.info(f"🤖 [ASSISTANT] بدء عملية الحصول على رد للمستخدم {user_id}.")
@@ -130,8 +114,8 @@ async def get_assistant_reply(session, content):
         run = await asyncio.to_thread(client.beta.threads.runs.create, thread_id=thread_id, assistant_id=ASSISTANT_ID_PREMIUM)
         start_time = time.time()
         while run.status in ["queued", "in_progress"]:
-            if time.time() - start_time > 90:
-                logger.error(f"⏰ [ASSISTANT] Timeout! استغرق الـ run {run.id} أكثر من 90 ثانية.")
+            if time.time() - start_time > timeout:
+                logger.error(f"⏰ [ASSISTANT] Timeout! استغرق الـ run {run.id} أكثر من {timeout} ثانية.")
                 return "⚠️ حدث تأخير في الرد، يرجى المحاولة مرة أخرى."
             await asyncio.sleep(1)
             run = await asyncio.to_thread(client.beta.threads.runs.retrieve, thread_id=thread_id, run_id=run.id)
@@ -147,124 +131,34 @@ async def get_assistant_reply(session, content):
         logger.error(f"❌ [ASSISTANT] حدث استثناء غير متوقع: {e}", exc_info=True)
         return "⚠️ عفوًا، حدث خطأ غير متوقع."
 
-# --- دوال الإرسال والوسائط ---
-def send_meta_reply(recipient_id, text_message, platform):
-    logger.info(f"📤 [META-API] بدء إرسال رد مباشر إلى {recipient_id} على منصة {platform}...")
-    if not PAGE_ACCESS_TOKEN:
-        logger.error("❌ [META-API] مفتاح PAGE_ACCESS_TOKEN غير موجود!")
-        return
-
-    if platform not in ["Instagram", "Facebook"]:
-        logger.error(f"❌ [META-API] منصة غير مدعومة للإرسال المباشر: '{platform}'.")
-        return
-
-    url = f"https://graph.facebook.com/v19.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
-    
-    if platform == "Instagram":
-        payload = {
-            "recipient": {"id": recipient_id},
-            "message": {"text": text_message},
-            "messaging_type": "RESPONSE",
-        }
-    else: # Facebook
-        payload = {
-            "recipient": {"id": recipient_id},
-            "message": {"text": text_message},
-            "messaging_type": "RESPONSE",
-        }
-
-    headers = {"Content-Type": "application/json"}
-
-    try:
-        response = requests.post(url, headers=headers, data=json.dumps(payload ), timeout=20)
-        response.raise_for_status()
-        logger.info(f"✅ [META-API] تم إرسال الرسالة بنجاح إلى {recipient_id} عبر {platform}.")
-
-    except requests.exceptions.HTTPError as e:
-        error_text = e.response.text if e.response is not None else str(e)
-        logger.error(f"❌ [META-API] فشل إرسال الرسالة: {e}. تفاصيل الخطأ: {error_text}", exc_info=True)
-
-    except Exception as e:
-        logger.error(f"❌ [META-API] خطأ غير متوقع أثناء الإرسال: {e}", exc_info=True)
-
-
-def send_manychat_reply(subscriber_id, text_message, platform, retry=False):
-    logger.info(f"📤 [MANYCHAT] بدء إرسال رد إلى {subscriber_id} على منصة {platform}...")
+# --- دوال المعالجة غير المتزامنة (للفيسبوك) ---
+def send_manychat_reply_async(subscriber_id, text_message, platform):
+    logger.info(f"📤 [MANYCHAT-ASYNC] بدء إرسال رد إلى {subscriber_id} على منصة {platform}...")
     if not MANYCHAT_API_KEY:
-        logger.error("❌ [MANYCHAT] مفتاح MANYCHAT_API_KEY غير موجود!")
-        return
-
-    if platform not in ["Instagram", "Facebook"]:
-        logger.error(f"❌ [MANYCHAT] منصة غير مدعومة أو غير محددة: '{platform}'. لا يمكن إرسال الرد.")
+        logger.error("❌ [MANYCHAT-ASYNC] مفتاح MANYCHAT_API_KEY غير موجود!")
         return
 
     url = "https://api.manychat.com/fb/sending/sendContent"
     headers = {"Authorization": f"Bearer {MANYCHAT_API_KEY}", "Content-Type": "application/json"}
     channel = "instagram" if platform == "Instagram" else "facebook"
 
-    # --- التعديل هنا ---
-    # إرسال الرسالة بأكملها ككتلة واحدة بدلاً من تقسيمها
-    messages_to_send = [{"type": "text", "text": text_message.strip( )}]
-    
-    if not text_message.strip():
-        logger.warning(f"⚠️ [MANYCHAT] لا يوجد محتوى لإرساله إلى {subscriber_id} بعد معالجة النص.")
-        return
-
     payload = {
-        "subscriber_id": str(subscriber_id),
-        "data": {"version": "v2", "content": {"messages": messages_to_send}},
+        "subscriber_id": str(subscriber_id ),
+        "data": {"version": "v2", "content": {"messages": [{"type": "text", "text": text_message.strip()}]}},
         "channel": channel,
     }
 
     try:
         response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=20)
         response.raise_for_status()
-        logger.info(f"✅ [MANYCHAT] تم إرسال الرسالة بنجاح إلى {subscriber_id} عبر {channel}.")
-
+        logger.info(f"✅ [MANYCHAT-ASYNC] تم إرسال الرسالة بنجاح إلى {subscriber_id} عبر {channel}.")
     except requests.exceptions.HTTPError as e:
+        # لا حاجة لإعادة المحاولة هنا لأن المسار غير المتزامن أقل حساسية لمشكلة 24 ساعة
         error_text = e.response.text if e.response is not None else str(e)
-        if "3011" in error_text:
-            if not retry:
-                logger.warning(f"⚠️ [MANYCHAT] المستخدم {subscriber_id} خارج نافذة 24 ساعة أو لم يتم تحديث النشاط بعد. سيتم إعادة المحاولة بعد 4 ثوانٍ...")
-                time.sleep(4) # تمت زيادة مدة الانتظار إلى 4 ثوانٍ كإجراء احترازي
-                send_manychat_reply(subscriber_id, text_message, platform, retry=True)
-            else:
-                logger.error(f"❌ [MANYCHAT] فشل الإرسال للمستخدم {subscriber_id} حتى بعد إعادة المحاولة. تفاصيل الخطأ: {error_text}")
-            return
-        try:
-            error_details = e.response.json()
-        except Exception:
-            error_details = error_text
-        logger.error(f"❌ [MANYCHAT] فشل إرسال الرسالة: {e}. تفاصيل الخطأ: {error_details}", exc_info=True)
-
+        logger.error(f"❌ [MANYCHAT-ASYNC] فشل إرسال الرسالة: {e}. تفاصيل الخطأ: {error_text}")
     except Exception as e:
-        logger.error(f"❌ [MANYCHAT] خطأ غير متوقع أثناء الإرسال: {e}", exc_info=True)
+        logger.error(f"❌ [MANYCHAT-ASYNC] خطأ غير متوقع أثناء الإرسال: {e}", exc_info=True)
 
-
-def download_media_from_url(media_url):
-    logger.info(f"⬇️ [MEDIA] محاولة تحميل وسائط من الرابط: {media_url}")
-    try:
-        media_response = requests.get(media_url, timeout=20)
-        media_response.raise_for_status()
-        return media_response.content
-    except requests.exceptions.RequestException as e:
-        logger.error(f"❌ [MEDIA] فشل تحميل الوسائط من {media_url}: {e}", exc_info=True)
-        return None
-
-def transcribe_audio(audio_content, file_format="mp4"):
-    logger.info(f"🎙️ [WHISPER] بدء تحويل مقطع صوتي (الصيغة: {file_format})...")
-    try:
-        temp_audio_file = f"temp_audio_{int(time.time())}.{file_format}"
-        with open(temp_audio_file, "wb") as f: f.write(audio_content)
-        with open(temp_audio_file, "rb") as audio_file:
-            transcription = client.audio.transcriptions.create(model="whisper-1", file=audio_file)
-        os.remove(temp_audio_file)
-        return transcription.text
-    except Exception as e:
-        logger.error(f"❌ [WHISPER] خطأ أثناء تحويل الصوت: {e}", exc_info=True)
-        return None
-
-# --- آلية المعالجة الموحدة ---
 def schedule_assistant_response(user_id):
     lock = processing_locks.setdefault(user_id, threading.Lock())
     with lock:
@@ -272,15 +166,13 @@ def schedule_assistant_response(user_id):
         
         user_data = pending_messages[user_id]
         session = user_data["session"]
-        platform = session["platform"]
         combined_content = "\n".join(user_data["texts"])
         
-        logger.info(f"⚙️ [BATCH] بدء معالجة المحتوى المجمع للمستخدم {user_id} على {platform}: '{combined_content}'")
+        logger.info(f"⚙️ [BATCH] بدء معالجة المحتوى المجمع للمستخدم {user_id} على {session['platform']}: '{combined_content}'")
         reply_text = asyncio.run(get_assistant_reply(session, combined_content))
         
         if reply_text:
-            if platform in ["Instagram", "Facebook"]:
-                send_manychat_reply(user_id, reply_text, platform=platform)
+            send_manychat_reply_async(user_id, reply_text, platform=session["platform"])
 
         if user_id in pending_messages: del pending_messages[user_id]
         if user_id in message_timers: del message_timers[user_id]
@@ -297,98 +189,76 @@ def add_to_processing_queue(session, text_content):
     message_timers[user_id] = timer
     timer.start()
 
-# --- ويب هوك ManyChat ---
+# --- ويب هوك ManyChat (النسخة الهجينة) ---
 @app.route("/manychat_webhook", methods=["POST"])
 def manychat_webhook_handler():
-    logger.info("📞 [WEBHOOK-MC] تم استلام طلب جديد.")
+    logger.info("📞 [WEBHOOK-MC-HYBRID] تم استلام طلب جديد.")
     auth_header = request.headers.get('Authorization')
     if not MANYCHAT_SECRET_KEY or auth_header != f'Bearer {MANYCHAT_SECRET_KEY}':
-        logger.critical("🚨 [WEBHOOK-MC] محاولة وصول غير مصرح بها!")
+        logger.critical("🚨 [WEBHOOK-MC-HYBRID] محاولة وصول غير مصرح بها!")
         return jsonify({"status": "error", "message": "Unauthorized"}), 403
     
     data = request.get_json()
-    if not data:
-        logger.error("❌ [WEBHOOK-MC] CRITICAL: لم يتم استلام بيانات JSON.")
-        return jsonify({"status": "error", "message": "Request body must be JSON."}), 400
-        
-    full_contact = data.get("full_contact")
-    if not full_contact:
-        logger.error("❌ [WEBHOOK-MC] CRITICAL: 'full_contact' غير موجودة.")
-        return jsonify({"status": "error", "message": "'full_contact' data is required."}), 400
+    if not data or not data.get("full_contact"):
+        logger.error("❌ [WEBHOOK-MC-HYBRID] CRITICAL: 'full_contact' غير موجودة.")
+        return jsonify({"status": "error", "message": "Invalid data"}), 400
 
-    session = get_or_create_session_from_contact(full_contact, "ManyChat")
+    session = get_or_create_session_from_contact(data["full_contact"])
     if not session:
-        logger.error("❌ [WEBHOOK-MC] فشل في إنشاء أو الحصول على جلسة.")
-        return jsonify({"status": "error", "message": "Failed to create or get session"}), 500
+        logger.error("❌ [WEBHOOK-MC-HYBRID] فشل في إنشاء أو الحصول على جلسة.")
+        return jsonify({"status": "error", "message": "Failed to create session"}), 500
 
-    last_input = full_contact.get("last_text_input") or full_contact.get("last_input_text")
+    last_input = data["full_contact"].get("last_text_input") or data["full_contact"].get("last_input_text")
     if not last_input:
-        logger.warning("[WEBHOOK-MC] لا يوجد إدخال نصي للمعالجة.")
-        return jsonify({"status": "received", "message": "No text input to process"}), 200
+        logger.warning("[WEBHOOK-MC-HYBRID] لا يوجد إدخال نصي للمعالجة.")
+        return jsonify({"version": "v2", "content": {}}) # رد فارغ لـ ManyChat
     
-    logger.info(f"💬 [WEBHOOK-MC] الإدخال المستلم: \"{last_input}\"")
-    is_url = last_input.startswith(("http://", "https://"  ))
-    is_media_url = is_url and ("cdn.fbsbx.com" in last_input or "scontent" in last_input)
+    # --- المنطق الهجين: التحقق من المنصة ---
+    platform = session.get("platform", "Facebook") # الافتراضي هو فيسبوك
+    logger.info(f" HYBRID] تم تحديد المنصة: {platform} للمستخدم {session['_id']}")
 
-    def background_task():
-        if is_media_url:
-            logger.info("🖼️ [WEBHOOK-MC] تم اكتشاف رابط وسائط. بدء المعالجة في الخلفية.")
-            media_content = download_media_from_url(last_input)
-            if not media_content:
-                send_manychat_reply(session["_id"], "⚠️ عفوًا، لم أتمكن من تحميل الملف الذي أرسلته.", platform=session["platform"])
-                return
-
-            is_audio = any(ext in last_input for ext in ['.mp4', '.mp3', '.ogg']) or "audioclip" in last_input
-            if is_audio:
-                transcribed_text = transcribe_audio(media_content, file_format="mp4")
-                if transcribed_text:
-                    content_for_assistant = f"[رسالة صوتية من العميل]: \"{transcribed_text}\""
-                    add_to_processing_queue(session, content_for_assistant)
-            else: # It's an image
-                description = asyncio.run(get_image_description_for_assistant(base64.b64encode(media_content).decode('utf-8')))
-                if description:
-                    content_for_assistant = f"[وصف صورة أرسلها العميل]: {description}"
-                    add_to_processing_queue(session, content_for_assistant)
-        else:
-            logger.info("📝 [WEBHOOK-MC] تم تحديد الإدخال كنص عادي.")
-            add_to_processing_queue(session, last_input)
-
-    threading.Thread(target=background_task).start()
-    return jsonify({"status": "received"}), 200
+    if platform == "Instagram":
+        # --- المسار المتزامن (للانستغرام) ---
+        logger.info(f"⚡ [HYBRID] تفعيل المسار المتزامن لـ Instagram.")
+        try:
+            # مهلة قصيرة لتناسب ManyChat (الحد الأقصى 30 ثانية)
+            reply_text = asyncio.run(get_assistant_reply(session, last_input, timeout=25))
+            
+            if not reply_text:
+                logger.warning("[HYBRID-SYNC] تم الحصول على رد فارغ من المساعد.")
+                return jsonify({"version": "v2", "content": {}})
+            
+            logger.info(f"✅ [HYBRID-SYNC] الرد جاهز للإرسال الفوري: \"{reply_text}\"")
+            response_payload = {
+                "version": "v2",
+                "content": {
+                    "messages": [{"type": "text", "text": reply_text}]
+                }
+            }
+            return jsonify(response_payload)
+        except Exception as e:
+            logger.error(f"❌ [HYBRID-SYNC] خطأ في المسار المتزامن: {e}", exc_info=True)
+            error_response = {
+                "version": "v2",
+                "content": {
+                    "messages": [{"type": "text", "text": "عفوًا، حدث خطأ فني. يرجى المحاولة مرة أخرى."}]
+                }
+            }
+            return jsonify(error_response)
+    else:
+        # --- المسار غير المتزامن (للفيسبوك والمنصات الأخرى) ---
+        logger.info(f"🔄 [HYBRID] تفعيل المسار غير المتزامن لـ {platform}.")
+        # نستخدم المعالج الخلفي القديم
+        add_to_processing_queue(session, last_input)
+        # نرد فورًا لتأكيد الاستلام
+        return jsonify({"status": "received"})
 
 # --- نقطة الدخول الرئيسية ---
 @app.route("/")
 def home():
-    return "✅ Bot is running with Detailed Vision Logic (v13 - Single Message Fix)."
+    return "✅ Bot is running in Hybrid Mode (v16 - Final)."
 
-# --- ويب هوك Meta (Facebook/Instagram) ---
-@app.route("/meta_webhook", methods=["GET", "POST"])
-def meta_webhook_handler():
-    if request.method == "GET":
-        mode = request.args.get("hub.mode")
-        token = request.args.get("hub.verify_token")
-        challenge = request.args.get("hub.challenge")
-
-        if mode == "subscribe" and token == META_VERIFY_TOKEN:
-            logger.info("✅ [WEBHOOK-META] تم التحقق من الويب هوك بنجاح.")
-            return challenge, 200
-        else:
-            logger.error("❌ [WEBHOOK-META] فشل التحقق من الويب هوك: رمز أو وضع غير صحيح.")
-            return "Verification token mismatch", 403
-
-    elif request.method == "POST":
-        logger.info("📞 [WEBHOOK-META] تم استلام طلب POST جديد (حدث).")
-        data = request.get_json()
-        
-        if not data:
-            logger.error("❌ [WEBHOOK-META] CRITICAL: لم يتم استلام بيانات JSON.")
-            return jsonify({"status": "error", "message": "Request body must be JSON."}), 400
-
-        logger.info(f"📝 [WEBHOOK-META] بيانات الحدث المستلمة: {json.dumps(data, indent=2)}")
-        
-        return jsonify({"status": "received", "message": "Event data received"}), 200
-
-    return jsonify({"status": "error", "message": "Method not allowed"}), 405
+# --- تم حذف ويب هوك Meta لأنه لم يعد ضروريًا مع ManyChat ---
 
 if __name__ == "__main__":
     logger.info("🚀 التطبيق جاهز للتشغيل. يرجى استخدام خادم WSGI (مثل Gunicorn) لتشغيله في بيئة الإنتاج.")
