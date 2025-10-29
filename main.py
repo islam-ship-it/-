@@ -158,14 +158,9 @@ def send_meta_reply(recipient_id, text_message, platform):
         logger.error(f"❌ [META-API] منصة غير مدعومة للإرسال المباشر: '{platform}'.")
         return
 
-    # نقطة نهاية الإرسال (Send API)
     url = f"https://graph.facebook.com/v19.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
     
-    # تحديد القناة المناسبة (Instagram أو Facebook Messenger)
     if platform == "Instagram":
-        # لإرسال رسائل Instagram Direct، يجب استخدام حقل `recipient` مع معرف المستخدم (PSID)
-        # أو معرف Instagram (IGSID) إذا كان التطبيق معدًا لذلك.
-        # هنا نفترض أن `recipient_id` هو PSID للمستخدم.
         payload = {
             "recipient": {"id": recipient_id},
             "message": {"text": text_message},
@@ -181,7 +176,7 @@ def send_meta_reply(recipient_id, text_message, platform):
     headers = {"Content-Type": "application/json"}
 
     try:
-        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=20)
+        response = requests.post(url, headers=headers, data=json.dumps(payload ), timeout=20)
         response.raise_for_status()
         logger.info(f"✅ [META-API] تم إرسال الرسالة بنجاح إلى {recipient_id} عبر {platform}.")
 
@@ -207,13 +202,11 @@ def send_manychat_reply(subscriber_id, text_message, platform, retry=False):
     headers = {"Authorization": f"Bearer {MANYCHAT_API_KEY}", "Content-Type": "application/json"}
     channel = "instagram" if platform == "Instagram" else "facebook"
 
-    # تقسيم الرسالة لفقرات
-    paragraphs = [p.strip( ) for p in text_message.split("\n\n") if p.strip()]
-    if len(paragraphs) <= 1:
-        paragraphs = [p.strip() for p in text_message.split("\n") if p.strip()]
-    messages_to_send = [{"type": "text", "text": p} for p in paragraphs] if paragraphs else []
-
-    if not messages_to_send:
+    # --- التعديل هنا ---
+    # إرسال الرسالة بأكملها ككتلة واحدة بدلاً من تقسيمها
+    messages_to_send = [{"type": "text", "text": text_message.strip( )}]
+    
+    if not text_message.strip():
         logger.warning(f"⚠️ [MANYCHAT] لا يوجد محتوى لإرساله إلى {subscriber_id} بعد معالجة النص.")
         return
 
@@ -230,16 +223,14 @@ def send_manychat_reply(subscriber_id, text_message, platform, retry=False):
 
     except requests.exceptions.HTTPError as e:
         error_text = e.response.text if e.response is not None else str(e)
-        # التحقق من كود الخطأ 3011
         if "3011" in error_text:
             if not retry:
-                logger.warning(f"⚠️ [MANYCHAT] المستخدم {subscriber_id} خارج نافذة 24 ساعة أو لم يتم تحديث النشاط بعد. سيتم إعادة المحاولة بعد ثانيتين...")
-                time.sleep(5)
+                logger.warning(f"⚠️ [MANYCHAT] المستخدم {subscriber_id} خارج نافذة 24 ساعة أو لم يتم تحديث النشاط بعد. سيتم إعادة المحاولة بعد 4 ثوانٍ...")
+                time.sleep(4) # تمت زيادة مدة الانتظار إلى 4 ثوانٍ كإجراء احترازي
                 send_manychat_reply(subscriber_id, text_message, platform, retry=True)
             else:
                 logger.error(f"❌ [MANYCHAT] فشل الإرسال للمستخدم {subscriber_id} حتى بعد إعادة المحاولة. تفاصيل الخطأ: {error_text}")
             return
-        # أي خطأ آخر
         try:
             error_details = e.response.json()
         except Exception:
@@ -248,8 +239,6 @@ def send_manychat_reply(subscriber_id, text_message, platform, retry=False):
 
     except Exception as e:
         logger.error(f"❌ [MANYCHAT] خطأ غير متوقع أثناء الإرسال: {e}", exc_info=True)
-
-
 
 
 def download_media_from_url(media_url):
@@ -292,7 +281,6 @@ def schedule_assistant_response(user_id):
         if reply_text:
             if platform in ["Instagram", "Facebook"]:
                 send_manychat_reply(user_id, reply_text, platform=platform)
-
 
         if user_id in pending_messages: del pending_messages[user_id]
         if user_id in message_timers: del message_timers[user_id]
@@ -339,7 +327,7 @@ def manychat_webhook_handler():
         return jsonify({"status": "received", "message": "No text input to process"}), 200
     
     logger.info(f"💬 [WEBHOOK-MC] الإدخال المستلم: \"{last_input}\"")
-    is_url = last_input.startswith(("http://", "https://" ))
+    is_url = last_input.startswith(("http://", "https://"  ))
     is_media_url = is_url and ("cdn.fbsbx.com" in last_input or "scontent" in last_input)
 
     def background_task():
@@ -368,19 +356,15 @@ def manychat_webhook_handler():
     threading.Thread(target=background_task).start()
     return jsonify({"status": "received"}), 200
 
-
-
 # --- نقطة الدخول الرئيسية ---
 @app.route("/")
 def home():
-    return "✅ Bot is running with Detailed Vision Logic (v12 - Retry Patch)."
-
+    return "✅ Bot is running with Detailed Vision Logic (v13 - Single Message Fix)."
 
 # --- ويب هوك Meta (Facebook/Instagram) ---
 @app.route("/meta_webhook", methods=["GET", "POST"])
 def meta_webhook_handler():
     if request.method == "GET":
-        # التحقق من الويب هوك
         mode = request.args.get("hub.mode")
         token = request.args.get("hub.verify_token")
         challenge = request.args.get("hub.challenge")
@@ -400,13 +384,7 @@ def meta_webhook_handler():
             logger.error("❌ [WEBHOOK-META] CRITICAL: لم يتم استلام بيانات JSON.")
             return jsonify({"status": "error", "message": "Request body must be JSON."}), 400
 
-        # هنا يجب أن يتم تحليل بيانات الحدث (Event Data)
-        # نظرًا لتعقيد تنسيق رسائل Meta، سنقوم بتسجيل البيانات فقط في هذه المرحلة
-        # لتركيز المعالجة على ManyChat (الذي ما زال موجودًا)
         logger.info(f"📝 [WEBHOOK-META] بيانات الحدث المستلمة: {json.dumps(data, indent=2)}")
-        
-        # يجب أن تقوم Meta بالتحقق من التوقيع (Signature Verification)
-        # لكن للتجربة السريعة، سنكتفي بالرد 200 لتجنب إعادة الإرسال المتكررة من Meta
         
         return jsonify({"status": "received", "message": "Event data received"}), 200
 
