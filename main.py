@@ -27,6 +27,7 @@ MONGO_URI = os.getenv("MONGO_URI")
 MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
 MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
 META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN")
+PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
 logger.info("🔑 [CONFIG] تم تحميل مفاتيح API.")
 
 # --- قاعدة البيانات ---
@@ -147,6 +148,51 @@ async def get_assistant_reply(session, content):
         return "⚠️ عفوًا، حدث خطأ غير متوقع."
 
 # --- دوال الإرسال والوسائط ---
+def send_meta_reply(recipient_id, text_message, platform):
+    logger.info(f"📤 [META-API] بدء إرسال رد مباشر إلى {recipient_id} على منصة {platform}...")
+    if not PAGE_ACCESS_TOKEN:
+        logger.error("❌ [META-API] مفتاح PAGE_ACCESS_TOKEN غير موجود!")
+        return
+
+    if platform not in ["Instagram", "Facebook"]:
+        logger.error(f"❌ [META-API] منصة غير مدعومة للإرسال المباشر: '{platform}'.")
+        return
+
+    # نقطة نهاية الإرسال (Send API)
+    url = f"https://graph.facebook.com/v19.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
+    
+    # تحديد القناة المناسبة (Instagram أو Facebook Messenger)
+    if platform == "Instagram":
+        # لإرسال رسائل Instagram Direct، يجب استخدام حقل `recipient` مع معرف المستخدم (PSID)
+        # أو معرف Instagram (IGSID) إذا كان التطبيق معدًا لذلك.
+        # هنا نفترض أن `recipient_id` هو PSID للمستخدم.
+        payload = {
+            "recipient": {"id": recipient_id},
+            "message": {"text": text_message},
+            "messaging_type": "RESPONSE",
+        }
+    else: # Facebook
+        payload = {
+            "recipient": {"id": recipient_id},
+            "message": {"text": text_message},
+            "messaging_type": "RESPONSE",
+        }
+
+    headers = {"Content-Type": "application/json"}
+
+    try:
+        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=20)
+        response.raise_for_status()
+        logger.info(f"✅ [META-API] تم إرسال الرسالة بنجاح إلى {recipient_id} عبر {platform}.")
+
+    except requests.exceptions.HTTPError as e:
+        error_text = e.response.text if e.response is not None else str(e)
+        logger.error(f"❌ [META-API] فشل إرسال الرسالة: {e}. تفاصيل الخطأ: {error_text}", exc_info=True)
+
+    except Exception as e:
+        logger.error(f"❌ [META-API] خطأ غير متوقع أثناء الإرسال: {e}", exc_info=True)
+
+
 def send_manychat_reply(subscriber_id, text_message, platform, retry=False):
     logger.info(f"📤 [MANYCHAT] بدء إرسال رد إلى {subscriber_id} على منصة {platform}...")
     if not MANYCHAT_API_KEY:
