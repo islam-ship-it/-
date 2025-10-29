@@ -234,7 +234,7 @@ def send_manychat_reply(subscriber_id, text_message, platform, retry=False):
         if "3011" in error_text:
             if not retry:
                 logger.warning(f"⚠️ [MANYCHAT] المستخدم {subscriber_id} خارج نافذة 24 ساعة أو لم يتم تحديث النشاط بعد. سيتم إعادة المحاولة بعد ثانيتين...")
-                time.sleep(2)
+                time.sleep(5)
                 send_manychat_reply(subscriber_id, text_message, platform, retry=True)
             else:
                 logger.error(f"❌ [MANYCHAT] فشل الإرسال للمستخدم {subscriber_id} حتى بعد إعادة المحاولة. تفاصيل الخطأ: {error_text}")
