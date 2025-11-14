@@ -44,7 +44,8 @@ logger.info("🚀 [APP] تم إعداد تطبيق Flask و OpenAI Client.")
 pending_messages = {}
 message_timers = {}
 processing_locks = {}
-BATCH_WAIT_TIME = 2.0
+# انتظر ثانيتين بعد آخر رسالة من المستخدم قبل معالجة الدفعة
+BATCH_WAIT_TIME = 2.0 
 
 # --- دوال إدارة الجلسات ---
 def get_or_create_session_from_contact(contact_data):
@@ -91,7 +92,7 @@ def get_or_create_session_from_contact(contact_data):
         sessions_collection.insert_one(new_session)
         return new_session
 
-# --- [جديد] دوال الذاكرة طويلة الأمد ---
+# --- دوال الذاكرة طويلة الأمد ---
 async def summarize_and_save_conversation(user_id, thread_id):
     logger.info(f"🧠 [MEMORY] بدء عملية تلخيص الذاكرة للمستخدم {user_id}.")
     try:
@@ -130,16 +131,15 @@ async def get_assistant_reply(session, content, timeout=90):
             logger.error(f"❌ [ASSISTANT] فشل في إنشاء thread جديد: {e}", exc_info=True)
             return "⚠️ عفوًا، حدث خطأ أثناء تهيئة المحادثة."
 
-    # [التعديل الرئيسي] إثراء الرسالة بملخص المحادثات السابقة
     enriched_content = content
     if summary:
         logger.info(f"🧠 [MEMORY] تم العثور على ذاكرة سابقة للمستخدم. سيتم استخدامها.")
-        enriched_content = f"For your context, here is a summary of my previous conversations with this user: '{summary}'. Now, please respond to the user's new message: '{content}'"
+        enriched_content = f"For your context, here is a summary of my previous conversations with this user: '{summary}'. Now, please respond to the user's new message(s): '{content}'"
     else:
         logger.info(f"🧠 [MEMORY] لا توجد ذاكرة سابقة للمستخدم.")
 
     try:
-        logger.info(f"💬 [ASSISTANT] إضافة رسالة إلى Thread {thread_id}: '{content}'") # نسجل الرسالة الأصلية فقط
+        logger.info(f"💬 [ASSISTANT] إضافة رسالة إلى Thread {thread_id}: '{content}'")
         await asyncio.to_thread(client.beta.threads.messages.create, thread_id=thread_id, role="user", content=enriched_content)
         
         logger.info(f"▶️ [ASSISTANT] بدء تشغيل المساعد (Run) على Thread {thread_id}.")
@@ -165,7 +165,7 @@ async def get_assistant_reply(session, content, timeout=90):
         logger.error(f"❌ [ASSISTANT] حدث استثناء غير متوقع: {e}", exc_info=True)
         return "⚠️ عفوًا، حدث خطأ غير متوقع."
 
-# --- دوال المعالجة غير المتزامنة (مُعدّلة لتستدعي التلخيص) ---
+# --- دوال المعالجة غير المتزامنة ---
 def send_manychat_reply_async(subscriber_id, text_message, platform):
     logger.info(f"📤 [SENDER] بدء إرسال رد إلى {subscriber_id} على منصة {platform}...")
     if not MANYCHAT_API_KEY:
@@ -199,15 +199,15 @@ def schedule_assistant_response(user_id):
         
         user_data = pending_messages[user_id]
         session = user_data["session"]
+        # دمج كل الرسائل المجمعة في نص واحد مع فواصل أسطر
         combined_content = "\n".join(user_data["texts"])
         
-        logger.info(f"⚙️ [PROCESSOR] بدء معالجة المحتوى للمستخدم {user_id} على {session['platform']}: '{combined_content}'")
+        logger.info(f"⚙️ [PROCESSOR] بدء معالجة المحتوى المجمع للمستخدم {user_id}: '{combined_content}'")
         reply_text = asyncio.run(get_assistant_reply(session, combined_content))
         
         if reply_text:
             send_manychat_reply_async(user_id, reply_text, platform=session["platform"])
             
-            # [الإضافة الجديدة] بعد إرسال الرد، قم بتلخيص المحادثة في الخلفية
             thread_id = session.get("openai_thread_id")
             if thread_id:
                 logger.info(f"🗓️ [MEMORY] جدولة عملية تلخيص الذاكرة للمستخدم {user_id}.")
@@ -220,11 +220,16 @@ def schedule_assistant_response(user_id):
 
 def add_to_processing_queue(session, text_content):
     user_id = session["_id"]
-    if user_id in message_timers: message_timers[user_id].cancel()
+    if user_id in message_timers:
+        message_timers[user_id].cancel()
+        logger.info(f"⏳ [DEBOUNCE] تم إلغاء المؤقت القديم للمستخدم {user_id} لأنه أرسل رسالة جديدة.")
+
     if user_id not in pending_messages:
         pending_messages[user_id] = {"texts": [], "session": session}
     pending_messages[user_id]["texts"].append(text_content)
-    logger.info(f"➕ [QUEUE] تمت إضافة محتوى إلى قائمة الانتظار للمستخدم {user_id}.")
+    logger.info(f"➕ [QUEUE] تمت إضافة محتوى إلى قائمة الانتظار للمستخدم {user_id}. حجم القائمة الآن: {len(pending_messages[user_id]['texts'])}")
+
+    logger.info(f"⏳ [DEBOUNCE] بدء مؤقت جديد لمدة {BATCH_WAIT_TIME} ثانية للمستخدم {user_id}.")
     timer = threading.Timer(BATCH_WAIT_TIME, schedule_assistant_response, args=[user_id])
     message_timers[user_id] = timer
     timer.start()
