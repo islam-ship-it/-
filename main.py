@@ -56,7 +56,6 @@ def get_or_create_session_from_contact(contact_data):
     session = sessions_collection.find_one({"_id": user_id})
     now_utc = datetime.now(timezone.utc)
     
-    # تحديد المنصة بدقة
     main_platform = "Unknown"
     contact_source = contact_data.get("source", "").lower()
     if "instagram" in contact_source:
@@ -68,7 +67,7 @@ def get_or_create_session_from_contact(contact_data):
     else:
         main_platform = "Facebook"
 
-    logger.info(f"ℹ️ [SESSION] تم تحديد المنصة '{main_platform}' للمستخدم {user_id} من المصدر '{contact_source}'.")
+    logger.info(f"ℹ️ [SESSION] تم تحديد المنصة '{main_platform}' للمستخدم {user_id}.")
 
     if session:
         update_fields = {
@@ -80,7 +79,7 @@ def get_or_create_session_from_contact(contact_data):
         logger.info(f"🔄 [SESSION] تم تحديث الجلسة الحالية للمستخدم {user_id}.")
         return sessions_collection.find_one({"_id": user_id})
     else:
-        logger.info(f"🆕 [SESSION] مستخدم جديد. جاري إنشاء جلسة شاملة له: {user_id} على منصة {main_platform}")
+        logger.info(f"🆕 [SESSION] مستخدم جديد. جاري إنشاء جلسة شاملة له: {user_id}")
         new_session = {
             "_id": user_id, "platform": main_platform,
             "profile": {"name": contact_data.get("name"), "first_name": contact_data.get("first_name"), "last_name": contact_data.get("last_name"), "profile_pic": contact_data.get("profile_pic")},
@@ -92,11 +91,34 @@ def get_or_create_session_from_contact(contact_data):
         sessions_collection.insert_one(new_session)
         return new_session
 
-# --- دوال OpenAI ---
+# --- [جديد] دوال الذاكرة طويلة الأمد ---
+async def summarize_and_save_conversation(user_id, thread_id):
+    logger.info(f"🧠 [MEMORY] بدء عملية تلخيص الذاكرة للمستخدم {user_id}.")
+    try:
+        messages = await asyncio.to_thread(client.beta.threads.messages.list, thread_id=thread_id, limit=20)
+        history = "\n".join([f"{msg.role}: {msg.content[0].text.value}" for msg in reversed(messages.data)])
+        
+        prompt = f"Please summarize the following conversation concisely in a few key points. This summary will be used as a memory for a chatbot. Focus on user needs, important details (like products they are interested in, their budget, contact info), and the last state of the conversation.\n\nConversation:\n{history}\n\nSummary:"
+
+        response = await asyncio.to_thread(
+            client.chat.completions.create,
+            model="gpt-4.1-mini",
+            messages=[{"role": "system", "content": prompt}]
+        )
+        summary = response.choices[0].message.content.strip()
+        
+        sessions_collection.update_one({"_id": user_id}, {"$set": {"conversation_summary": summary}})
+        logger.info(f"✅ [MEMORY] تم تلخيص وتحديث الذاكرة للمستخدم {user_id}.")
+    except Exception as e:
+        logger.error(f"❌ [MEMORY] فشل في تلخيص المحادثة للمستخدم {user_id}: {e}", exc_info=True)
+
+# --- دوال OpenAI (مُعدّلة لتستخدم الذاكرة) ---
 async def get_assistant_reply(session, content, timeout=90):
     user_id = session["_id"]
     thread_id = session.get("openai_thread_id")
+    summary = session.get("conversation_summary", "")
     logger.info(f"🤖 [ASSISTANT] بدء عملية الحصول على رد للمستخدم {user_id}.")
+
     if not thread_id:
         logger.warning(f"🧵 [ASSISTANT] لا يوجد thread للمستخدم {user_id}. سيتم إنشاء واحد جديد.")
         try:
@@ -107,9 +129,18 @@ async def get_assistant_reply(session, content, timeout=90):
         except Exception as e:
             logger.error(f"❌ [ASSISTANT] فشل في إنشاء thread جديد: {e}", exc_info=True)
             return "⚠️ عفوًا، حدث خطأ أثناء تهيئة المحادثة."
+
+    # [التعديل الرئيسي] إثراء الرسالة بملخص المحادثات السابقة
+    enriched_content = content
+    if summary:
+        logger.info(f"🧠 [MEMORY] تم العثور على ذاكرة سابقة للمستخدم. سيتم استخدامها.")
+        enriched_content = f"For your context, here is a summary of my previous conversations with this user: '{summary}'. Now, please respond to the user's new message: '{content}'"
+    else:
+        logger.info(f"🧠 [MEMORY] لا توجد ذاكرة سابقة للمستخدم.")
+
     try:
-        logger.info(f"💬 [ASSISTANT] إضافة رسالة إلى Thread {thread_id}: '{content}'")
-        await asyncio.to_thread(client.beta.threads.messages.create, thread_id=thread_id, role="user", content=content)
+        logger.info(f"💬 [ASSISTANT] إضافة رسالة إلى Thread {thread_id}: '{content}'") # نسجل الرسالة الأصلية فقط
+        await asyncio.to_thread(client.beta.threads.messages.create, thread_id=thread_id, role="user", content=enriched_content)
         
         logger.info(f"▶️ [ASSISTANT] بدء تشغيل المساعد (Run) على Thread {thread_id}.")
         run = await asyncio.to_thread(client.beta.threads.runs.create, thread_id=thread_id, assistant_id=ASSISTANT_ID_PREMIUM)
@@ -123,19 +154,18 @@ async def get_assistant_reply(session, content, timeout=90):
             run = await asyncio.to_thread(client.beta.threads.runs.retrieve, thread_id=thread_id, run_id=run.id)
         
         if run.status == "completed":
-            logger.info(f"✅ [ASSISTANT] اكتمل الـ Run بنجاح. جاري استرداد الرسائل...")
             messages = await asyncio.to_thread(client.beta.threads.messages.list, thread_id=thread_id, limit=1)
             reply = messages.data[0].content[0].text.value.strip()
             logger.info(f"🗣️ [ASSISTANT] الرد الذي تم الحصول عليه: \"{reply}\"")
             return reply
         else:
             logger.error(f"❌ [ASSISTANT] لم يكتمل الـ run. الحالة: {run.status}. الخطأ: {run.last_error}")
-            return "⚠️ عفوًا، حدث خطأ فني. فريقنا يعمل على إصلاحه."
+            return "⚠️ عفوًا، حدث خطأ فني."
     except Exception as e:
         logger.error(f"❌ [ASSISTANT] حدث استثناء غير متوقع: {e}", exc_info=True)
         return "⚠️ عفوًا، حدث خطأ غير متوقع."
 
-# --- دوال المعالجة غير المتزامنة ---
+# --- دوال المعالجة غير المتزامنة (مُعدّلة لتستدعي التلخيص) ---
 def send_manychat_reply_async(subscriber_id, text_message, platform):
     logger.info(f"📤 [SENDER] بدء إرسال رد إلى {subscriber_id} على منصة {platform}...")
     if not MANYCHAT_API_KEY:
@@ -144,8 +174,6 @@ def send_manychat_reply_async(subscriber_id, text_message, platform):
 
     url = "https://api.manychat.com/fb/sending/sendContent"
     headers = {"Authorization": f"Bearer {MANYCHAT_API_KEY}", "Content-Type": "application/json"}
-    
-    # تحديد القناة الصحيحة بناءً على المنصة المخزنة في جلسة المستخدم
     channel = "instagram" if platform == "Instagram" else "facebook"
 
     payload = {
@@ -173,12 +201,18 @@ def schedule_assistant_response(user_id):
         session = user_data["session"]
         combined_content = "\n".join(user_data["texts"])
         
-        logger.info(f"⚙️ [PROCESSOR] بدء معالجة المحتوى المجمع للمستخدم {user_id} على {session['platform']}: '{combined_content}'")
+        logger.info(f"⚙️ [PROCESSOR] بدء معالجة المحتوى للمستخدم {user_id} على {session['platform']}: '{combined_content}'")
         reply_text = asyncio.run(get_assistant_reply(session, combined_content))
         
         if reply_text:
-            # تمرير المنصة الصحيحة لضمان الإرسال للقناة الصحيحة
             send_manychat_reply_async(user_id, reply_text, platform=session["platform"])
+            
+            # [الإضافة الجديدة] بعد إرسال الرد، قم بتلخيص المحادثة في الخلفية
+            thread_id = session.get("openai_thread_id")
+            if thread_id:
+                logger.info(f"🗓️ [MEMORY] جدولة عملية تلخيص الذاكرة للمستخدم {user_id}.")
+                summary_thread = threading.Thread(target=lambda: asyncio.run(summarize_and_save_conversation(user_id, thread_id)))
+                summary_thread.start()
 
         if user_id in pending_messages: del pending_messages[user_id]
         if user_id in message_timers: del message_timers[user_id]
@@ -190,7 +224,7 @@ def add_to_processing_queue(session, text_content):
     if user_id not in pending_messages:
         pending_messages[user_id] = {"texts": [], "session": session}
     pending_messages[user_id]["texts"].append(text_content)
-    logger.info(f"➕ [QUEUE] تمت إضافة محتوى إلى قائمة الانتظار للمستخدم {user_id}. حجم القائمة الآن: {len(pending_messages[user_id]['texts'])}")
+    logger.info(f"➕ [QUEUE] تمت إضافة محتوى إلى قائمة الانتظار للمستخدم {user_id}.")
     timer = threading.Timer(BATCH_WAIT_TIME, schedule_assistant_response, args=[user_id])
     message_timers[user_id] = timer
     timer.start()
@@ -205,10 +239,8 @@ def manychat_webhook_handler():
         return jsonify({"status": "error", "message": "Unauthorized"}), 403
     
     data = request.get_json()
-    logger.info(f"📦 [WEBHOOK] البيانات المستلمة: {json.dumps(data, indent=2)}")
-
     if not data or not data.get("full_contact"):
-        logger.error("❌ [WEBHOOK] CRITICAL: 'full_contact' غير موجودة في البيانات.")
+        logger.error("❌ [WEBHOOK] CRITICAL: 'full_contact' غير موجودة.")
         return jsonify({"status": "error", "message": "Invalid data"}), 400
 
     session = get_or_create_session_from_contact(data["full_contact"])
@@ -219,28 +251,23 @@ def manychat_webhook_handler():
     contact_data = data.get("full_contact", {})
     last_input = contact_data.get("last_text_input") or contact_data.get("last_input_text") or data.get("last_input")
 
-    logger.info(f"🔍 [DIAGNOSE] مفاتيح 'full_contact' المتاحة: {list(contact_data.keys())}")
-    logger.info(f"📝 [DIAGNOSE] تم العثور على نص الرسالة: '{last_input}'")
-
     if not last_input:
-        logger.warning("[WEBHOOK] لم يتم العثور على إدخال نصي للمعالجة. سيتم تجاهل الطلب.")
+        logger.warning("[WEBHOOK] لم يتم العثور على إدخال نصي للمعالجة.")
         return jsonify({"status": "no_input_received"})
 
     platform = session.get("platform", "Unknown")
     logger.info(f"🚦 [UNIFIED] تم تحديد المنصة: {platform}. سيتم استخدام المسار الموحد.")
 
-    # --- [الحل] المسار الموحد غير المتزامن لجميع المنصات ---
     logger.info(f"🔄 [UNIFIED] تفعيل المسار غير المتزامن لـ {platform}.")
     add_to_processing_queue(session, last_input)
     
-    # نرد فورًا لتأكيد الاستلام لـ ManyChat
-    logger.info("✅ [WEBHOOK] تم إرسال الطلب للمعالجة في الخلفية. إرجاع تأكيد استلام فوري.")
+    logger.info("✅ [WEBHOOK] تم إرسال الطلب للمعالجة. إرجاع تأكيد استلام فوري.")
     return jsonify({"status": "received"})
 
 # --- نقطة الدخول الرئيسية ---
 @app.route("/")
 def home():
-    return "✅ Bot is running in Unified Mode (v18 - Final)."
+    return "✅ Bot is running in Unified Mode with Long-Term Memory (v19 - Final)."
 
 if __name__ == "__main__":
     logger.info("🚀 التطبيق جاهز للتشغيل. يرجى استخدام خادم WSGI (مثل Gunicorn) لتشغيله في بيئة الإنتاج.")
