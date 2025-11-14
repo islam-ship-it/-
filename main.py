@@ -5,7 +5,6 @@ import requests
 import threading
 import asyncio
 import logging
-import base64
 from flask import Flask, request, jsonify
 from openai import OpenAI
 from pymongo import MongoClient
@@ -13,7 +12,6 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 # --- الإعدادات ---
-# إعداد تسجيل مفصل مع طابع زمني لكل سجل
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler()])
 logger = logging.getLogger(__name__)
 load_dotenv()
@@ -25,7 +23,6 @@ ASSISTANT_ID_PREMIUM = os.getenv("ASSISTANT_ID_PREMIUM")
 MONGO_URI = os.getenv("MONGO_URI")
 MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
 MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
-PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN") # تم الاحتفاظ به للاستخدام المستقبلي
 logger.info("🔑 [CONFIG] تم تحميل مفاتيح API.")
 
 # --- قاعدة البيانات ---
@@ -69,7 +66,7 @@ def get_or_create_session_from_contact(contact_data):
     elif "ig_id" in contact_data and contact_data.get("ig_id"):
         main_platform = "Instagram"
     else:
-        main_platform = "Facebook" # افتراضي
+        main_platform = "Facebook"
 
     logger.info(f"ℹ️ [SESSION] تم تحديد المنصة '{main_platform}' للمستخدم {user_id} من المصدر '{contact_source}'.")
 
@@ -138,15 +135,17 @@ async def get_assistant_reply(session, content, timeout=90):
         logger.error(f"❌ [ASSISTANT] حدث استثناء غير متوقع: {e}", exc_info=True)
         return "⚠️ عفوًا، حدث خطأ غير متوقع."
 
-# --- دوال المعالجة غير المتزامنة (للفيسبوك) ---
+# --- دوال المعالجة غير المتزامنة ---
 def send_manychat_reply_async(subscriber_id, text_message, platform):
-    logger.info(f"📤 [MANYCHAT-ASYNC] بدء إرسال رد إلى {subscriber_id} على منصة {platform}...")
+    logger.info(f"📤 [SENDER] بدء إرسال رد إلى {subscriber_id} على منصة {platform}...")
     if not MANYCHAT_API_KEY:
-        logger.error("❌ [MANYCHAT-ASYNC] مفتاح MANYCHAT_API_KEY غير موجود!")
+        logger.error("❌ [SENDER] مفتاح MANYCHAT_API_KEY غير موجود!")
         return
 
     url = "https://api.manychat.com/fb/sending/sendContent"
     headers = {"Authorization": f"Bearer {MANYCHAT_API_KEY}", "Content-Type": "application/json"}
+    
+    # تحديد القناة الصحيحة بناءً على المنصة المخزنة في جلسة المستخدم
     channel = "instagram" if platform == "Instagram" else "facebook"
 
     payload = {
@@ -158,12 +157,12 @@ def send_manychat_reply_async(subscriber_id, text_message, platform):
     try:
         response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=20)
         response.raise_for_status()
-        logger.info(f"✅ [MANYCHAT-ASYNC] تم إرسال الرسالة بنجاح إلى {subscriber_id} عبر {channel}.")
+        logger.info(f"✅ [SENDER] تم إرسال الرسالة بنجاح إلى {subscriber_id} عبر {channel}.")
     except requests.exceptions.HTTPError as e:
         error_text = e.response.text if e.response is not None else str(e)
-        logger.error(f"❌ [MANYCHAT-ASYNC] فشل إرسال الرسالة: {e}. تفاصيل الخطأ: {error_text}")
+        logger.error(f"❌ [SENDER] فشل إرسال الرسالة: {e}. تفاصيل الخطأ: {error_text}")
     except Exception as e:
-        logger.error(f"❌ [MANYCHAT-ASYNC] خطأ غير متوقع أثناء الإرسال: {e}", exc_info=True)
+        logger.error(f"❌ [SENDER] خطأ غير متوقع أثناء الإرسال: {e}", exc_info=True)
 
 def schedule_assistant_response(user_id):
     lock = processing_locks.setdefault(user_id, threading.Lock())
@@ -174,15 +173,16 @@ def schedule_assistant_response(user_id):
         session = user_data["session"]
         combined_content = "\n".join(user_data["texts"])
         
-        logger.info(f"⚙️ [BATCH] بدء معالجة المحتوى المجمع للمستخدم {user_id} على {session['platform']}: '{combined_content}'")
+        logger.info(f"⚙️ [PROCESSOR] بدء معالجة المحتوى المجمع للمستخدم {user_id} على {session['platform']}: '{combined_content}'")
         reply_text = asyncio.run(get_assistant_reply(session, combined_content))
         
         if reply_text:
+            # تمرير المنصة الصحيحة لضمان الإرسال للقناة الصحيحة
             send_manychat_reply_async(user_id, reply_text, platform=session["platform"])
 
         if user_id in pending_messages: del pending_messages[user_id]
         if user_id in message_timers: del message_timers[user_id]
-        logger.info(f"🗑️ [BATCH] تم الانتهاء من المعالجة للمستخدم {user_id}.")
+        logger.info(f"🗑️ [PROCESSOR] تم الانتهاء من المعالجة للمستخدم {user_id}.")
 
 def add_to_processing_queue(session, text_content):
     user_id = session["_id"]
@@ -195,7 +195,7 @@ def add_to_processing_queue(session, text_content):
     message_timers[user_id] = timer
     timer.start()
 
-# --- ويب هوك ManyChat (النسخة الهجينة) ---
+# --- ويب هوك ManyChat (النسخة الموحدة) ---
 @app.route("/manychat_webhook", methods=["POST"])
 def manychat_webhook_handler():
     logger.info("📞 [WEBHOOK] تم استلام طلب جديد.")
@@ -216,55 +216,31 @@ def manychat_webhook_handler():
         logger.error("❌ [WEBHOOK] فشل في إنشاء أو الحصول على جلسة.")
         return jsonify({"status": "error", "message": "Failed to create session"}), 500
 
-    # --- [التصحيح الرئيسي] استخلاص الإدخال الأخير بطريقة أكثر قوة ---
     contact_data = data.get("full_contact", {})
-    last_input = contact_data.get("last_text_input") or \
-                 contact_data.get("last_input_text") or \
-                 data.get("last_input") # حقل احتياطي إضافي
+    last_input = contact_data.get("last_text_input") or contact_data.get("last_input_text") or data.get("last_input")
 
-    # --- تسجيلات إضافية للتشخيص ---
     logger.info(f"🔍 [DIAGNOSE] مفاتيح 'full_contact' المتاحة: {list(contact_data.keys())}")
     logger.info(f"📝 [DIAGNOSE] تم العثور على نص الرسالة: '{last_input}'")
 
     if not last_input:
-        logger.warning("[WEBHOOK] لم يتم العثور على إدخال نصي للمعالجة. سيتم إرجاع رد فارغ.")
-        return jsonify({"version": "v2", "content": {}})
-    
-    platform = session.get("platform", "Facebook")
-    logger.info(f"🚦 [HYBRID] تم تحديد المنصة: {platform}. سيتم توجيه الطلب للمسار المناسب.")
+        logger.warning("[WEBHOOK] لم يتم العثور على إدخال نصي للمعالجة. سيتم تجاهل الطلب.")
+        return jsonify({"status": "no_input_received"})
 
-    if platform == "Instagram":
-        logger.info(f"⚡ [HYBRID] تفعيل المسار المتزامن (الفوري) لـ Instagram.")
-        try:
-            reply_text = asyncio.run(get_assistant_reply(session, last_input, timeout=25))
-            
-            if not reply_text:
-                logger.warning("[HYBRID-SYNC] تم الحصول على رد فارغ من المساعد. سيتم إرسال رد فارغ.")
-                return jsonify({"version": "v2", "content": {}})
-            
-            logger.info(f"✅ [HYBRID-SYNC] الرد جاهز للإرسال الفوري: \"{reply_text}\"")
-            response_payload = {
-                "version": "v2",
-                "content": {"messages": [{"type": "text", "text": reply_text}]}
-            }
-            return jsonify(response_payload)
-        except Exception as e:
-            logger.error(f"❌ [HYBRID-SYNC] خطأ في المسار المتزامن: {e}", exc_info=True)
-            error_response = {
-                "version": "v2",
-                "content": {"messages": [{"type": "text", "text": "عفوًا، حدث خطأ فني. يرجى المحاولة مرة أخرى."}]}
-            }
-            return jsonify(error_response)
-    else:
-        logger.info(f"🔄 [HYBRID] تفعيل المسار غير المتزامن (الخلفي) لـ {platform}.")
-        add_to_processing_queue(session, last_input)
-        logger.info("[HYBRID-ASYNC] تم إرسال الرسالة إلى قائمة الانتظار. سيتم إرجاع تأكيد استلام فوري.")
-        return jsonify({"status": "received"})
+    platform = session.get("platform", "Unknown")
+    logger.info(f"🚦 [UNIFIED] تم تحديد المنصة: {platform}. سيتم استخدام المسار الموحد.")
+
+    # --- [الحل] المسار الموحد غير المتزامن لجميع المنصات ---
+    logger.info(f"🔄 [UNIFIED] تفعيل المسار غير المتزامن لـ {platform}.")
+    add_to_processing_queue(session, last_input)
+    
+    # نرد فورًا لتأكيد الاستلام لـ ManyChat
+    logger.info("✅ [WEBHOOK] تم إرسال الطلب للمعالجة في الخلفية. إرجاع تأكيد استلام فوري.")
+    return jsonify({"status": "received"})
 
 # --- نقطة الدخول الرئيسية ---
 @app.route("/")
 def home():
-    return "✅ Bot is running in Hybrid Mode (v17 - Enhanced Logging)."
+    return "✅ Bot is running in Unified Mode (v18 - Final)."
 
 if __name__ == "__main__":
     logger.info("🚀 التطبيق جاهز للتشغيل. يرجى استخدام خادم WSGI (مثل Gunicorn) لتشغيله في بيئة الإنتاج.")
