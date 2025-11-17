@@ -11,9 +11,6 @@ from pymongo import MongoClient
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
-# ---------------------------------------------------------------
-#  LOGGING
-# ---------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -24,9 +21,6 @@ logger.info("▶️ [START] Environment Loaded.")
 
 load_dotenv()
 
-# ---------------------------------------------------------------
-#  ENV VARS
-# ---------------------------------------------------------------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 WORKFLOW_ID = os.getenv("WORKFLOW_ID")
 WORKFLOW_VERSION = os.getenv("WORKFLOW_VERSION", "1")
@@ -34,9 +28,6 @@ MONGO_URI = os.getenv("MONGO_URI")
 MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
 MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
 
-# ---------------------------------------------------------------
-#  DATABASE
-# ---------------------------------------------------------------
 try:
     client_db = MongoClient(MONGO_URI)
     db = client_db["multi_platform_bot"]
@@ -46,23 +37,14 @@ except Exception as e:
     logger.critical(f"❌ [DB] Failed to connect: {e}", exc_info=True)
     exit()
 
-# ---------------------------------------------------------------
-#  APP + OPENAI CLIENT
-# ---------------------------------------------------------------
 app = Flask(__name__)
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ---------------------------------------------------------------
-#  MESSAGE QUEUE
-# ---------------------------------------------------------------
 pending_messages = {}
 message_timers = {}
 processing_locks = {}
 BATCH_WAIT_TIME = 2.0
 
-# ---------------------------------------------------------------
-#  SESSION HANDLER
-# ---------------------------------------------------------------
 def get_or_create_session(contact_data):
     user_id = str(contact_data.get("id"))
     if not user_id:
@@ -99,9 +81,6 @@ def get_or_create_session(contact_data):
     sessions_collection.insert_one(new_session)
     return new_session
 
-# ---------------------------------------------------------------
-#  SEND MANYCHAT MESSAGE
-# ---------------------------------------------------------------
 def send_manychat_reply(subscriber_id, text, platform):
     url = "https://api.manychat.com/fb/sending/sendContent"
     headers = {
@@ -129,24 +108,23 @@ def send_manychat_reply(subscriber_id, text, platform):
     except Exception as e:
         logger.error(f"❌ [SEND] Failed: {e}")
 
-# ---------------------------------------------------------------
-#  OPENAI WORKFLOW EXECUTION
-# ---------------------------------------------------------------
 async def run_agent_workflow(text, session):
     try:
         response = client.responses.create(
             model="gpt-4.1",
             input=text,
-            agent={"workflow": WORKFLOW_ID, "version": WORKFLOW_VERSION}
+            extra_body={
+                "agent": {
+                    "workflow": WORKFLOW_ID,
+                    "version": WORKFLOW_VERSION
+                }
+            }
         )
         return response.output_text
     except Exception as e:
         logger.error(f"❌ [AGENT] Error: {e}")
         return "⚠️ حدث خطأ أثناء معالجة طلبك."
 
-# ---------------------------------------------------------------
-#  PROCESSING QUEUE
-# ---------------------------------------------------------------
 def schedule_message_processing(user_id):
     lock = processing_locks.setdefault(user_id, threading.Lock())
     with lock:
@@ -182,9 +160,6 @@ def add_to_queue(session, text):
     message_timers[user_id] = timer
     timer.start()
 
-# ---------------------------------------------------------------
-#  MANYCHAT WEBHOOK
-# ---------------------------------------------------------------
 @app.route("/manychat_webhook", methods=["POST"])
 def webhook():
     auth = request.headers.get("Authorization")
@@ -212,14 +187,10 @@ def webhook():
 
     return jsonify({"status": "received"})
 
-# ---------------------------------------------------------------
 @app.route("/")
 def home():
     return "🚀 Bot Running — Render Version"
 
-# ---------------------------------------------------------------
-#  THE FIX FOR RENDER PORT  🔥
-# ---------------------------------------------------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
