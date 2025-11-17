@@ -1,10 +1,6 @@
-flask[async]
-openai
+flask
+openai>=1.30.0
 pymongo
-apscheduler
-requests
 python-dotenv
+requests
 gunicorn
-uvicorn
-asgiref
-python-telegram-bot
