@@ -1,3 +1,6 @@
+# main.py
+# --- Final Render-Ready Version (Mongo + Workflow + ManyChat) ---
+
 import os
 import time
 import json
@@ -11,273 +14,214 @@ from pymongo import MongoClient
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
-# ------------------ إعدادات وتهيئة ------------------
+# ---------------------------------------------------------------
+#  LOGGING
+# ---------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler()],
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
+logger.info("▶️ [START] Loaded environment.")
 
 load_dotenv()
-logger.info("▶️ [START] loaded environment")
 
-# ---- متغيرات البيئة ----
+# ---------------------------------------------------------------
+#  ENV VARS
+# ---------------------------------------------------------------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-WORKFLOW_ID = os.getenv("WORKFLOW_ID", "wf_691ac2e8aa388190a7b428f30a6ed0170545bfe7")
+WORKFLOW_ID = os.getenv("WORKFLOW_ID")
 WORKFLOW_VERSION = os.getenv("WORKFLOW_VERSION", "1")
 MONGO_URI = os.getenv("MONGO_URI")
 MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
 MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
 
-if not OPENAI_API_KEY:
-    logger.critical("❌ OPENAI_API_KEY غير موجود في .env")
-    raise SystemExit(1)
-
-# ---- اتصال MongoDB ----
+# ---------------------------------------------------------------
+#  DATABASE
+# ---------------------------------------------------------------
 try:
-    client_db = MongoClient(MONGO_URI) if MONGO_URI else None
-    db = client_db["multi_platform_bot"] if client_db else None
-    sessions_collection = db["sessions"] if db else None
-    if sessions_collection is None:
-        logger.warning("⚠️ لم يتم إعداد MongoDB - sessions_collection فارغ. تأكد من MONGO_URI إذا كنت تريد حفظ جلسات.")
-    else:
-        logger.info("✅ [DB] MongoDB متصل.")
+    client_db = MongoClient(MONGO_URI)
+    db = client_db["multi_platform_bot"]
+    sessions_collection = db["sessions"]
+    logger.info("✅ [DB] Connected to MongoDB successfully.")
 except Exception as e:
-    logger.critical(f"❌ فشل الاتصال بقاعدة البيانات: {e}", exc_info=True)
-    raise SystemExit(1)
+    logger.critical(f"❌ [DB] Failed to connect: {e}", exc_info=True)
+    exit()
 
-# ---- إعداد OpenAI و Flask ----
-client = OpenAI(api_key=OPENAI_API_KEY)
+# ---------------------------------------------------------------
+#  APP + OPENAI CLIENT
+# ---------------------------------------------------------------
 app = Flask(__name__)
-logger.info("🚀 Flask و OpenAI client جاهزين.")
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ------------------ إعداد debounce/queue ------------------
-pending_messages = {}   # user_id -> {"texts": [...], "session": session_doc}
-message_timers = {}     # user_id -> threading.Timer
-processing_locks = {}   # user_id -> threading.Lock
-BATCH_WAIT_TIME = 2.0   # seconds
+# ---------------------------------------------------------------
+#  MESSAGE QUEUE
+# ---------------------------------------------------------------
+pending_messages = {}
+message_timers = {}
+processing_locks = {}
+BATCH_WAIT_TIME = 2.0
 
-# ------------------ دوال الجلسات ------------------
-def get_or_create_session_from_contact(contact_data):
+# ---------------------------------------------------------------
+#  SESSION HANDLER
+# ---------------------------------------------------------------
+def get_or_create_session(contact_data):
     user_id = str(contact_data.get("id"))
     if not user_id:
-        logger.error(f"❌ لم أجد user id في contact_data: {contact_data}")
         return None
 
-    session = None
-    if sessions_collection:
-        session = sessions_collection.find_one({"_id": user_id})
+    session = sessions_collection.find_one({"_id": user_id})
+    now = datetime.now(timezone.utc)
 
-    now_utc = datetime.now(timezone.utc)
-    contact_source = (contact_data.get("source") or "").lower()
-    if "instagram" in contact_source or contact_data.get("ig_id"):
-        main_platform = "Instagram"
-    else:
-        main_platform = "Facebook"
+    platform = "Instagram" if "instagram" in str(contact_data.get("source", "")).lower() else "Facebook"
 
     if session:
-        update_fields = {
-            "last_contact_date": now_utc,
-            "platform": main_platform,
-            "profile.name": contact_data.get("name"),
-            "profile.profile_pic": contact_data.get("profile_pic"),
-            "status": "active",
-        }
-        try:
-            sessions_collection.update_one({"_id": user_id}, {"$set": {k: v for k, v in update_fields.items() if v is not None}})
-            session = sessions_collection.find_one({"_id": user_id})
-            logger.info(f"🔄 [SESSION] تم تحديث الجلسة للمستخدم {user_id}.")
-        except Exception as e:
-            logger.warning(f"⚠️ [DB] تعذر تحديث الجلسة: {e}")
-    else:
-        new_session = {
-            "_id": user_id,
-            "platform": main_platform,
-            "profile": {
-                "name": contact_data.get("name"),
-                "first_name": contact_data.get("first_name"),
-                "last_name": contact_data.get("last_name"),
-                "profile_pic": contact_data.get("profile_pic"),
-            },
-            "status": "active",
-            "first_contact_date": now_utc,
-            "last_contact_date": now_utc,
-        }
-        if sessions_collection:
-            try:
-                sessions_collection.insert_one(new_session)
-                session = sessions_collection.find_one({"_id": user_id})
-                logger.info(f"🆕 [SESSION] تم إنشاء جلسة جديدة للمستخدم {user_id}.")
-            except Exception as e:
-                logger.error(f"❌ [DB] خطأ عند إنشاء جلسة جديدة: {e}", exc_info=True)
-                return None
-        else:
-            # إذا Mongo غير معطّل، فقط أعد الـ dict المؤقت
-            session = new_session
-            logger.info(f"ℹ️ [SESSION] Mongo غير مفعل - إعادة جلسة مؤقتة للمستخدم {user_id}.")
+        sessions_collection.update_one(
+            {"_id": user_id},
+            {"$set": {
+                "last_contact_date": now,
+                "platform": platform,
+                "profile.name": contact_data.get("name"),
+                "profile.profile_pic": contact_data.get("profile_pic"),
+            }}
+        )
+        return sessions_collection.find_one({"_id": user_id})
 
-    return session
+    new_session = {
+        "_id": user_id,
+        "platform": platform,
+        "profile": {
+            "name": contact_data.get("name"),
+            "profile_pic": contact_data.get("profile_pic"),
+        },
+        "created": now,
+        "last_contact_date": now,
+    }
 
-# ------------------ دالة إرسال ManyChat ------------------
-def send_manychat_reply_async(subscriber_id, text_message, platform):
-    logger.info(f"📤 Sending to {subscriber_id} via {platform} ...")
-    if not MANYCHAT_API_KEY:
-        logger.error("❌ MANYCHAT_API_KEY غير موجود!")
-        return
+    sessions_collection.insert_one(new_session)
+    return new_session
 
+# ---------------------------------------------------------------
+#  SEND MANYCHAT MESSAGE
+# ---------------------------------------------------------------
+def send_manychat_reply(subscriber_id, text, platform):
     url = "https://api.manychat.com/fb/sending/sendContent"
-    headers = {"Authorization": f"Bearer {MANYCHAT_API_KEY}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {MANYCHAT_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
     channel = "instagram" if platform == "Instagram" else "facebook"
 
     payload = {
         "subscriber_id": str(subscriber_id),
-        "data": {"version": "v2", "content": {"messages": [{"type": "text", "text": text_message.strip()}] }},
-        "channel": channel,
+        "data": {
+            "version": "v2",
+            "content": {
+                "messages": [{"type": "text", "text": text.strip()}]
+            }
+        },
+        "channel": channel
     }
 
     try:
-        resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=20)
-        resp.raise_for_status()
-        logger.info(f"✅ ManyChat: message sent to {subscriber_id}.")
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"❌ ManyChat HTTPError: {e} - {getattr(e.response, 'text', '')}")
+        r = requests.post(url, json=payload, headers=headers, timeout=20)
+        r.raise_for_status()
+        logger.info(f"📤 [SEND] Message delivered → {subscriber_id}")
     except Exception as e:
-        logger.error(f"❌ ManyChat sending error: {e}", exc_info=True)
+        logger.error(f"❌ [SEND] Failed: {e}")
 
-# ------------------ دالة استدعاء Responses API للـ Workflow ------------------
-async def get_assistant_reply(session, content, timeout=90):
-    user_id = session["_id"]
-    logger.info(f"🤖 Requesting workflow reply for {user_id} ...")
-
-    # نجهز المدخلات: هنا نرسل الرسالة كمحتوى واحد (role user)
-    inputs = [{"role": "user", "content": content}]
-
+# ---------------------------------------------------------------
+#  OPENAI WORKFLOW EXECUTION
+# ---------------------------------------------------------------
+async def run_agent_workflow(text, session):
     try:
-        response = await asyncio.to_thread(
-            client.responses.create,
-            model=f"workflow:{WORKFLOW_ID}",
-            input=inputs,
-            version=WORKFLOW_VERSION,
-            # يمكنك إضافة: max_output_tokens=..., temperature=... إذا رغبت
+        response = client.responses.create(
+            model="gpt-4.1",
+            input=text,
+            agent={"workflow": WORKFLOW_ID, "version": WORKFLOW_VERSION}
         )
-        reply = getattr(response, "output_text", None)
-        if reply:
-            reply = reply.strip()
-            logger.info(f"🗣️ Assistant replied (preview): {reply[:200]}")
-            return reply
-        # fallback: محاولة استخراج مكونات النص من output
-        outputs = getattr(response, "output", None)
-        if outputs and isinstance(outputs, list):
-            accumulated = []
-            for item in outputs:
-                if isinstance(item, dict):
-                    for c in item.get("content", []):
-                        if c.get("type") == "output_text":
-                            accumulated.append(c.get("text", ""))
-            if accumulated:
-                return "\n".join(accumulated).strip()
-        logger.error("❌ No textual reply found in response.")
-        return "⚠️ عفوًا، لم نستطع الحصول على رد واضح الآن."
+        reply = response.output_text
+        return reply
     except Exception as e:
-        logger.error(f"❌ Error calling Responses API: {e}", exc_info=True)
-        return "⚠️ عفوًا، حدث خطأ أثناء توليد الرد."
+        logger.error(f"❌ [AGENT] Error: {e}")
+        return "⚠️ حدث خطأ أثناء معالجة طلبك."
 
-# ------------------ معالجة الـ debounce وتجمّع الرسائل ------------------
-def schedule_assistant_response(user_id):
+# ---------------------------------------------------------------
+#  PROCESSING QUEUE
+# ---------------------------------------------------------------
+def schedule_message_processing(user_id):
     lock = processing_locks.setdefault(user_id, threading.Lock())
     with lock:
-        user_data = pending_messages.get(user_id)
-        if not user_data:
+        if user_id not in pending_messages:
             return
-        session = user_data["session"]
-        combined_content = "\n".join(user_data["texts"])
-        logger.info(f"⚙️ Processing combined content for {user_id}: '{combined_content}'")
-        try:
-            reply_text = asyncio.run(get_assistant_reply(session, combined_content))
-        except Exception as e:
-            logger.error(f"❌ Exception while getting reply: {e}", exc_info=True)
-            reply_text = "⚠️ عفوًا، تعذّر الحصول على رد الآن."
 
-        if reply_text:
-            send_manychat_reply_async(user_id, reply_text, platform=session.get("platform", "Facebook"))
+        data = pending_messages[user_id]
+        session = data["session"]
 
-        # تنظيف
-        pending_messages.pop(user_id, None)
-        timer = message_timers.pop(user_id, None)
-        if timer:
-            try:
-                timer.cancel()
-            except Exception:
-                pass
-        logger.info(f"🗑️ Finished processing for {user_id}.")
+        combined = "\n".join(data["texts"])
+        logger.info(f"🔍 [PROCESS] Final combined text: {combined}")
 
-def add_to_processing_queue(session, text_content):
+        reply = asyncio.run(run_agent_workflow(combined, session))
+
+        send_manychat_reply(user_id, reply, session["platform"])
+
+        del pending_messages[user_id]
+        if user_id in message_timers:
+            del message_timers[user_id]
+
+
+def add_to_queue(session, text):
     user_id = session["_id"]
-    # حدّث last_contact_date في Mongo
-    try:
-        if sessions_collection:
-            sessions_collection.update_one({"_id": user_id}, {"$set": {"last_contact_date": datetime.now(timezone.utc)}})
-    except Exception as e:
-        logger.warning(f"⚠️ Failed to update last_contact_date: {e}")
 
-    # أضف للنطاق المؤقت
     if user_id in message_timers:
-        try:
-            message_timers[user_id].cancel()
-            logger.info(f"⏳ Cancelled old timer for {user_id}.")
-        except Exception:
-            pass
+        message_timers[user_id].cancel()
 
     if user_id not in pending_messages:
         pending_messages[user_id] = {"texts": [], "session": session}
-    pending_messages[user_id]["texts"].append(text_content)
-    logger.info(f"➕ Queued message for {user_id}. queue_size={len(pending_messages[user_id]['texts'])}")
 
-    timer = threading.Timer(BATCH_WAIT_TIME, schedule_assistant_response, args=[user_id])
+    pending_messages[user_id]["texts"].append(text)
+
+    timer = threading.Timer(BATCH_WAIT_TIME, schedule_message_processing, args=[user_id])
     message_timers[user_id] = timer
     timer.start()
-    logger.info(f"⏳ Started debounce timer ({BATCH_WAIT_TIME}s) for {user_id}.")
 
-# ------------------ Webhook ManyChat ------------------
+# ---------------------------------------------------------------
+#  MANYCHAT WEBHOOK
+# ---------------------------------------------------------------
 @app.route("/manychat_webhook", methods=["POST"])
-def manychat_webhook_handler():
-    logger.info("📞 Received webhook request.")
-    auth_header = request.headers.get("Authorization")
-    if not MANYCHAT_SECRET_KEY or auth_header != f"Bearer {MANYCHAT_SECRET_KEY}":
-        logger.critical("🚨 Unauthorized webhook call!")
-        return jsonify({"status": "error", "message": "Unauthorized"}), 403
+def webhook():
+    auth = request.headers.get("Authorization")
 
-    data = request.get_json(silent=True)
-    if not data or not data.get("full_contact"):
-        logger.error("❌ Invalid webhook payload: missing full_contact")
-        return jsonify({"status": "error", "message": "Invalid data"}), 400
+    if auth != f"Bearer {MANYCHAT_SECRET_KEY}":
+        return jsonify({"error": "Unauthorized"}), 403
 
-    session = get_or_create_session_from_contact(data["full_contact"])
+    data = request.get_json(force=True)
+    contact = data.get("full_contact", {})
+
+    session = get_or_create_session(contact)
     if not session:
-        return jsonify({"status": "error", "message": "Failed to create/get session"}), 500
+        return jsonify({"error": "session-failed"}), 500
 
-    contact_data = data.get("full_contact", {})
-    last_input = contact_data.get("last_text_input") or contact_data.get("last_input_text") or data.get("last_input")
+    last_input = (
+        contact.get("last_text_input") or
+        contact.get("last_input_text") or
+        data.get("last_input")
+    )
+
     if not last_input:
-        logger.warning("⚠️ No text input found in webhook.")
-        return jsonify({"status": "no_input_received"})
+        return jsonify({"status": "no_input"})
 
-    platform = session.get("platform", "Unknown")
-    logger.info(f"🚦 Platform detected: {platform}")
-
-    # أضف إلى قائمة المعالجة
-    add_to_processing_queue(session, last_input)
+    add_to_queue(session, last_input)
 
     return jsonify({"status": "received"})
 
-# ------------------ Homepage ------------------
+# ---------------------------------------------------------------
 @app.route("/")
 def home():
-    return "✅ Bot is running (Workflow Integration - Unified Mode)."
+    return "🚀 Bot Running — Render Version"
 
-# ------------------ Run server (local) ------------------
-if __name__ == "__main__":
-    logger.info("🚀 Starting local server...")
-    port = int(os.getenv("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+# ---------------------------------------------------------------
+#  END
+# ---------------------------------------------------------------
