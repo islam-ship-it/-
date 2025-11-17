@@ -1,6 +1,6 @@
-flask
-openai==1.37.0
-pymongo
-python-dotenv
-requests
-gunicorn
+flask==3.1.2
+openai==1.35.1
+pymongo==4.6.3
+python-dotenv==1.0.1
+requests==2.32.3
+gunicorn==22.0.0
