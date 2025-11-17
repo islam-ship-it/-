@@ -1,6 +1,3 @@
-# main.py
-# --- Final Render-Ready Version (Mongo + Workflow + ManyChat) ---
-
 import os
 import time
 import json
@@ -23,7 +20,7 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
-logger.info("▶️ [START] Loaded environment.")
+logger.info("▶️ [START] Environment Loaded.")
 
 load_dotenv()
 
@@ -142,8 +139,7 @@ async def run_agent_workflow(text, session):
             input=text,
             agent={"workflow": WORKFLOW_ID, "version": WORKFLOW_VERSION}
         )
-        reply = response.output_text
-        return reply
+        return response.output_text
     except Exception as e:
         logger.error(f"❌ [AGENT] Error: {e}")
         return "⚠️ حدث خطأ أثناء معالجة طلبك."
@@ -161,7 +157,7 @@ def schedule_message_processing(user_id):
         session = data["session"]
 
         combined = "\n".join(data["texts"])
-        logger.info(f"🔍 [PROCESS] Final combined text: {combined}")
+        logger.info(f"🔍 [PROCESS] Combined text: {combined}")
 
         reply = asyncio.run(run_agent_workflow(combined, session))
 
@@ -170,7 +166,6 @@ def schedule_message_processing(user_id):
         del pending_messages[user_id]
         if user_id in message_timers:
             del message_timers[user_id]
-
 
 def add_to_queue(session, text):
     user_id = session["_id"]
@@ -223,5 +218,8 @@ def home():
     return "🚀 Bot Running — Render Version"
 
 # ---------------------------------------------------------------
-#  END
+#  THE FIX FOR RENDER PORT  🔥
 # ---------------------------------------------------------------
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
