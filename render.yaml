@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: manychat-openai-bot
+    env: python
+    plan: starter
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "gunicorn main:app -w 2 -b 0.0.0.0:$PORT"
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: WORKFLOW_ID
+        sync: false
+      - key: WORKFLOW_VERSION
+        sync: false
+      - key: MONGO_URI
+        sync: false
+      - key: MANYCHAT_API_KEY
+        sync: false
+      - key: MANYCHAT_SECRET_KEY
+        sync: false
+      - key: PORT
+        value: "10000"
