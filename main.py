@@ -104,6 +104,8 @@ def send_manychat_reply(subscriber_id, text, platform):
         "channel": channel
     }
 
+    logger.info(f"🔍 [SEND] Sending message to {subscriber_id} on {channel}: {text.strip()}")
+
     try:
         r = requests.post(url, json=payload, headers=headers, timeout=20)
         r.raise_for_status()
@@ -113,14 +115,16 @@ def send_manychat_reply(subscriber_id, text, platform):
 
 async def run_agent_workflow(text, session):
     try:
-        # استخدام واجهة completions الجديدة في openai SDK 1.0.0 أو أعلى
+        logger.info(f"🔍 [AGENT] Sending prompt: {text}")
         response = openai.completions.create(
             model="gpt-5.1",  # تأكد من استخدام GPT-5.1
             prompt=text,
             max_tokens=1000,
             temperature=0.7
         )
-        return response.choices[0].text.strip()  # الحصول على النص الناتج من الرد
+        result_text = response.choices[0].text.strip()
+        logger.info(f"🔍 [AGENT] Received response: {result_text}")
+        return result_text
     except Exception as e:
         logger.error(f"❌ [AGENT] Error: {e}")
         return "⚠️ حدث خطأ أثناء معالجة طلبك."
@@ -129,6 +133,7 @@ def schedule_message_processing(user_id):
     lock = processing_locks.setdefault(user_id, threading.Lock())
     with lock:
         if user_id not in pending_messages:
+            logger.warning(f"⚠️ [PROCESS] No pending messages for user {user_id}")
             return
 
         data = pending_messages[user_id]
@@ -138,6 +143,8 @@ def schedule_message_processing(user_id):
         logger.info(f"🔍 [PROCESS] Combined text: {combined}")
 
         reply = asyncio.run(run_agent_workflow(combined, session))
+
+        logger.info(f"🔍 [PROCESS] Reply from agent: {reply}")
 
         send_manychat_reply(user_id, reply, session["platform"])
 
@@ -156,6 +163,8 @@ def add_to_queue(session, text):
 
     pending_messages[user_id]["texts"].append(text)
 
+    logger.info(f"🔍 [QUEUE] Added message to user {user_id}: {text.strip()}")
+
     timer = threading.Timer(BATCH_WAIT_TIME, schedule_message_processing, args=[user_id])
     message_timers[user_id] = timer
     timer.start()
@@ -165,13 +174,17 @@ def webhook():
     auth = request.headers.get("Authorization")
 
     if auth != f"Bearer {MANYCHAT_SECRET_KEY}":
+        logger.error("❌ [AUTH] Unauthorized request")
         return jsonify({"error": "Unauthorized"}), 403
 
     data = request.get_json(force=True)
+    logger.info(f"🔍 [WEBHOOK] Received data: {json.dumps(data, indent=2)}")
+
     contact = data.get("full_contact", {})
 
     session = get_or_create_session(contact)
     if not session:
+        logger.error(f"❌ [SESSION] Failed to create or fetch session for user: {contact}")
         return jsonify({"error": "session-failed"}), 500
 
     last_input = (
@@ -181,8 +194,10 @@ def webhook():
     )
 
     if not last_input:
+        logger.warning(f"⚠️ [WEBHOOK] No input text received for user: {contact}")
         return jsonify({"status": "no_input"})
 
+    logger.info(f"🔍 [WEBHOOK] Last input: {last_input}")
     add_to_queue(session, last_input)
 
     return jsonify({"status": "received"})
