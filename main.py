@@ -5,10 +5,9 @@ import requests
 import threading
 import asyncio
 import openai
-print("OPENAI VERSION:", openai.__version__)
+print("OPENAI VERSION:", openai.__version__)  # تأكد من النسخة الصحيحة
 import logging
 from flask import Flask, request, jsonify
-from openai import OpenAI
 from pymongo import MongoClient
 from datetime import datetime, timezone
 from dotenv import load_dotenv
@@ -40,7 +39,9 @@ except Exception as e:
     exit()
 
 app = Flask(__name__)
-client = OpenAI(api_key=OPENAI_API_KEY)
+
+# Set the OpenAI API key
+openai.api_key = OPENAI_API_KEY
 
 pending_messages = {}
 message_timers = {}
@@ -112,17 +113,14 @@ def send_manychat_reply(subscriber_id, text, platform):
 
 async def run_agent_workflow(text, session):
     try:
-        response = client.responses.create(
-            model="gpt-4.1",
-            input=text,
-            extra_body={
-                "agent": {
-                    "workflow": WORKFLOW_ID,
-                    "version": WORKFLOW_VERSION
-                }
-            }
+        # استخدام واجهة completions الجديدة في openai SDK 1.0.0 أو أعلى
+        response = openai.completions.create(
+            model="gpt-5.1",  # تأكد من استخدام GPT-5.1
+            prompt=text,
+            max_tokens=1000,
+            temperature=0.7
         )
-        return response.output_text
+        return response.choices[0].text.strip()  # الحصول على النص الناتج من الرد
     except Exception as e:
         logger.error(f"❌ [AGENT] Error: {e}")
         return "⚠️ حدث خطأ أثناء معالجة طلبك."
