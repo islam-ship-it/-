@@ -113,14 +113,14 @@ def send_manychat_reply(subscriber_id, text, platform):
 
 async def run_agent_workflow(text, session):
     try:
-        # Use the correct OpenAI API call for 5.1
-        response = openai.Completion.create(
-            model="gpt-5.1",  # Use GPT-5.1 model instead of 4.1
-            prompt=text,
+        # استخدام واجهة ChatCompletion الجديدة في openai SDK 1.0.0 أو أعلى
+        response = openai.ChatCompletion.create(
+            model="gpt-5.1",  # تأكد من استخدام GPT-5.1
+            messages=[{"role": "user", "content": text}],
             max_tokens=1000,
             temperature=0.7
         )
-        return response.choices[0].text.strip()  # Adjusted to get the text output properly
+        return response.choices[0].message["content"].strip()  # الحصول على النص الناتج من الرد
     except Exception as e:
         logger.error(f"❌ [AGENT] Error: {e}")
         return "⚠️ حدث خطأ أثناء معالجة طلبك."
