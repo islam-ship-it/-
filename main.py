@@ -5,7 +5,7 @@ import requests
 import threading
 import asyncio
 import openai
-print("OPENAI VERSION:", openai.__version__)
+print("OPENAI VERSION:", openai.__version__)  # تأكد من النسخة الصحيحة
 import logging
 from flask import Flask, request, jsonify
 from pymongo import MongoClient
@@ -113,14 +113,14 @@ def send_manychat_reply(subscriber_id, text, platform):
 
 async def run_agent_workflow(text, session):
     try:
-        # استخدام واجهة ChatCompletion الجديدة في openai SDK 1.0.0 أو أعلى
-        response = openai.ChatCompletion.create(
+        # استخدام واجهة completions الجديدة في openai SDK 1.0.0 أو أعلى
+        response = openai.completions.create(
             model="gpt-5.1",  # تأكد من استخدام GPT-5.1
-            messages=[{"role": "user", "content": text}],
+            prompt=text,
             max_tokens=1000,
             temperature=0.7
         )
-        return response.choices[0].message["content"].strip()  # الحصول على النص الناتج من الرد
+        return response.choices[0].text.strip()  # الحصول على النص الناتج من الرد
     except Exception as e:
         logger.error(f"❌ [AGENT] Error: {e}")
         return "⚠️ حدث خطأ أثناء معالجة طلبك."
