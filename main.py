@@ -144,7 +144,7 @@ async def run_agent_workflow(text, session):
 
         # توليد النص عبر OpenAI API باستخدام الطريقة الحديثة chat.Completion.create مع نموذج GPT-4.1 Mini
         response = openai.chat.Completion.create(
-            model="gpt-4.1-mini",  # تحديد النموذج GPT-4.1 Mini
+            model="gpt-4.1-mini",  # تأكد من استخدام النموذج GPT-4.1 Mini
             messages=[{"role": "user", "content": text}]  # إرسال النص كـ message
         )
 
