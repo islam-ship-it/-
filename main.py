@@ -1,16 +1,14 @@
 import os
-import time
-import json
-import requests
-import threading
-import asyncio
-import openai
 import logging
+import openai
 from flask import Flask, request, jsonify
 from pymongo import MongoClient
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 import re
+import asyncio
+import threading
+import requests
 
 logging.basicConfig(
     level=logging.INFO,
@@ -20,11 +18,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 logger.info("▶️ [START] Environment Loaded.")
 
+# تحميل إعدادات البيئة
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-WORKFLOW_ID = os.getenv("WORKFLOW_ID")
-WORKFLOW_VERSION = os.getenv("WORKFLOW_VERSION")
 MONGO_URI = os.getenv("MONGO_URI")
 MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
 MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
@@ -139,9 +136,7 @@ async def run_agent_workflow(text, session):
         # توليد النص عبر OpenAI API باستخدام الطريقة الحديثة chat.Completion.create مع نموذج GPT-4.1 Mini
         response = openai.chat.Completion.create(
             model="gpt-4.1-mini",  # تحديد النموذج GPT-4.1 Mini
-            messages=[{"role": "user", "content": text}],  # إرسال النص كـ message
-            max_tokens=1000,
-            temperature=0.7
+            messages=[{"role": "user", "content": text}]  # إرسال النص كـ message
         )
 
         # طباعة النص الذي تم إرجاعه من الوكيل
