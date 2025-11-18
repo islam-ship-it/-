@@ -1,27 +1,31 @@
 import os
-import logging
+import time
+import json
+import requests
+import threading
+import asyncio
 import openai
+print("OPENAI VERSION:", openai.__version__)
+import logging
 from flask import Flask, request, jsonify
+from openai import OpenAI
 from pymongo import MongoClient
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-import re
-import asyncio
-import threading
-import requests
 
 logging.basicConfig(
-    level=logging.DEBUG,  # استخدم DEBUG لعرض جميع التفاصيل
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 logger.info("▶️ [START] Environment Loaded.")
 
-# تحميل إعدادات البيئة
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+WORKFLOW_ID = os.getenv("WORKFLOW_ID")
+WORKFLOW_VERSION = os.getenv("WORKFLOW_VERSION")
 MONGO_URI = os.getenv("MONGO_URI")
 MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
 MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
@@ -36,51 +40,35 @@ except Exception as e:
     exit()
 
 app = Flask(__name__)
-
-# Set the OpenAI API key
-openai.api_key = OPENAI_API_KEY
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 pending_messages = {}
 message_timers = {}
 processing_locks = {}
 BATCH_WAIT_TIME = 2.0
 
-def clean_text_for_messaging(text):
-    """
-    دالة لتنظيف النصوص من الرموز الغريبة أو غير الصالحة
-    """
-    cleaned_text = re.sub(r'[^\x00-\x7F\u0600-\u06FFa-zA-Z0-9\s]', '', text)  # يسمح فقط بالأحرف اللاتينية والعربية والأرقام
-    cleaned_text = cleaned_text.strip()  # إزالة المسافات الزائدة
-    logger.debug(f"Cleaned text: {cleaned_text}")
-    return cleaned_text
-
 def get_or_create_session(contact_data):
     user_id = str(contact_data.get("id"))
     if not user_id:
-        logger.error("❌ [SESSION] User ID is missing.")
         return None
 
     session = sessions_collection.find_one({"_id": user_id})
     now = datetime.now(timezone.utc)
 
-    # تحديد المنصة التي يتواصل منها المستخدم
     platform = "Instagram" if "instagram" in str(contact_data.get("source", "")).lower() else "Facebook"
-    logger.debug(f"Detected platform: {platform}")
 
     if session:
         sessions_collection.update_one(
             {"_id": user_id},
             {"$set": {
                 "last_contact_date": now,
-                "platform": platform,  # تحديث المنصة إذا كانت مختلفة
+                "platform": platform,
                 "profile.name": contact_data.get("name"),
                 "profile.profile_pic": contact_data.get("profile_pic"),
             }}
         )
-        logger.info(f"Session found and updated for user: {user_id}")
         return sessions_collection.find_one({"_id": user_id})
 
-    # إنشاء جلسة جديدة للمستخدم بناءً على المنصة
     new_session = {
         "_id": user_id,
         "platform": platform,
@@ -93,65 +81,48 @@ def get_or_create_session(contact_data):
     }
 
     sessions_collection.insert_one(new_session)
-    logger.info(f"New session created for user: {user_id}")
     return new_session
 
 def send_manychat_reply(subscriber_id, text, platform):
-    if not subscriber_id:
-        logger.error("❌ [SEND] Subscriber ID is missing.")
-        return
-
     url = "https://api.manychat.com/fb/sending/sendContent"
     headers = {
         "Authorization": f"Bearer {MANYCHAT_API_KEY}",
         "Content-Type": "application/json"
     }
 
-    # تحديد القناة بناءً على المنصة
-    channel = "instagram" if platform.lower() == "instagram" else "facebook"
-    logger.debug(f"Sending message to channel: {channel}")
+    channel = "instagram" if platform == "Instagram" else "facebook"
 
-    # تنظيف النص قبل إرساله
-    clean_text = clean_text_for_messaging(text)
-
-    # تغليف النص في هيكلية JSON
-    json_response = {
-        "version": "v2",
-        "content": {
-            "messages": [
-                {
-                    "type": "text",
-                    "text": clean_text
-                }
-            ]
+    payload = {
+        "subscriber_id": str(subscriber_id),
+        "data": {
+            "version": "v2",
+            "content": {
+                "messages": [{"type": "text", "text": text.strip()}]
+            }
         },
         "channel": channel
     }
 
     try:
-        r = requests.post(url, json=json_response, headers=headers, timeout=20)
-        r.raise_for_status()  # تحقق من أن الطلب تم بنجاح
-        logger.info(f"📤 [SEND] Message delivered → {subscriber_id} on {channel}")
-    except requests.exceptions.HTTPError as e:
-        logger.error(f"❌ [SEND] Failed: {e.response.text}")  # سجل تفاصيل الخطأ
+        r = requests.post(url, json=payload, headers=headers, timeout=20)
+        r.raise_for_status()
+        logger.info(f"📤 [SEND] Message delivered → {subscriber_id}")
     except Exception as e:
         logger.error(f"❌ [SEND] Failed: {e}")
 
 async def run_agent_workflow(text, session):
     try:
-        # طباعة النص المرسل إلى الوكيل (OpenAI)
-        logger.info(f"📤 [SEND TO AGENT] Text: {text}")
-
-        # توليد النص عبر OpenAI API باستخدام الطريقة الحديثة chat.Completion.create مع نموذج GPT-4.1 Mini
-        response = openai.chat.Completion.create(
-            model="gpt-4.1-mini",  # تأكد من استخدام النموذج GPT-4.1 Mini
-            messages=[{"role": "user", "content": text}]  # إرسال النص كـ message
+        response = client.responses.create(
+            model="gpt-4.1",
+            input=text,
+            extra_body={
+                "agent": {
+                    "workflow": WORKFLOW_ID,
+                    "version": WORKFLOW_VERSION
+                }
+            }
         )
-
-        # طباعة النص الذي تم إرجاعه من الوكيل
-        logger.info(f"📥 [RESPONSE FROM AGENT] Response: {response['choices'][0]['message']['content'].strip()}")
-
-        return response['choices'][0]['message']['content'].strip()  # الحصول على النص الناتج من الرد
+        return response.output_text
     except Exception as e:
         logger.error(f"❌ [AGENT] Error: {e}")
         return "⚠️ حدث خطأ أثناء معالجة طلبك."
@@ -166,7 +137,7 @@ def schedule_message_processing(user_id):
         session = data["session"]
 
         combined = "\n".join(data["texts"])
-        logger.debug(f"🔍 [PROCESS] Combined text: {combined}")
+        logger.info(f"🔍 [PROCESS] Combined text: {combined}")
 
         reply = asyncio.run(run_agent_workflow(combined, session))
 
@@ -196,7 +167,6 @@ def webhook():
     auth = request.headers.get("Authorization")
 
     if auth != f"Bearer {MANYCHAT_SECRET_KEY}":
-        logger.error("❌ [WEBHOOK] Unauthorized request.")
         return jsonify({"error": "Unauthorized"}), 403
 
     data = request.get_json(force=True)
@@ -204,7 +174,6 @@ def webhook():
 
     session = get_or_create_session(contact)
     if not session:
-        logger.error("❌ [SESSION] Failed to create or find session.")
         return jsonify({"error": "session-failed"}), 500
 
     last_input = (
@@ -214,10 +183,8 @@ def webhook():
     )
 
     if not last_input:
-        logger.error("❌ [WEBHOOK] No user input received.")
         return jsonify({"status": "no_input"})
 
-    logger.debug(f"Received input: {last_input}")
     add_to_queue(session, last_input)
 
     return jsonify({"status": "received"})
