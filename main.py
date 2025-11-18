@@ -97,12 +97,15 @@ def send_manychat_reply(subscriber_id, text, platform):
     else:
         channel = "facebook"
 
+    # التأكد من أن النص المرسل إلى ManyChat لا يحتوي على رموز غير صالحة أو تنسيق خاطئ
+    clean_text = text.strip()  # إزالة أي مسافات غير ضرورية
+
     payload = {
         "subscriber_id": str(subscriber_id),
         "data": {
             "version": "v2",
             "content": {
-                "messages": [{"type": "text", "text": text.strip()}]
+                "messages": [{"type": "text", "text": clean_text}]  # إرسال النص فقط
             }
         },
         "channel": channel
