@@ -3,8 +3,7 @@ import time
 import json
 import requests
 import threading
-# تم إزالة 'asyncio' واستخدام العميل المتزامن
-import openai
+import openai # تم إبقاؤها للتحقق من النسخة، لكن لن تُستخدم لاستدعاء الدردشة
 import logging
 from flask import Flask, request, jsonify
 from pymongo import MongoClient
@@ -13,7 +12,6 @@ from dotenv import load_dotenv
 
 # --- الإعداد والتهيئة ---
 
-# تهيئة نظام التسجيل (Logging)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -22,16 +20,22 @@ logging.basicConfig(
 logger = logging.getLogger(__name__) 
 logger.info("▶️ [START] Environment and Flask App Initializing...")
 
-# تحميل المتغيرات البيئية
 load_dotenv()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+# متغيرات OpenAI العامة لم تعد تستخدم للدردشة، لكن تم الاحتفاظ بها
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") 
 MONGO_URI = os.getenv("MONGO_URI")
 MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
 MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
 
+# ❗❗ المتغيرات الحيوية للـ Agent المخصص ❗❗
+WORKFLOW_ID = os.getenv("WORKFLOW_ID") 
+WORKFLOW_VERSION = os.getenv("WORKFLOW_VERSION")
+# ستحتاج إلى تحديد هذا في ملف .env:
+CUSTOM_AGENT_API_URL = os.getenv("CUSTOM_AGENT_API_URL", "https://api.your-agent-platform.com/v1/workflow/run") 
+
 # التحقق من المتغيرات الضرورية
-if not all([OPENAI_API_KEY, MONGO_URI, MANYCHAT_API_KEY, MANYCHAT_SECRET_KEY]):
-    logger.critical("❌ [ENV] Missing one or more required environment variables (OPENAI_API_KEY, MONGO_URI, MANYCHAT_API_KEY, MANYCHAT_SECRET_KEY).")
+if not all([MONGO_URI, MANYCHAT_API_KEY, MANYCHAT_SECRET_KEY, WORKFLOW_ID, WORKFLOW_VERSION]):
+    logger.critical("❌ [ENV] Missing critical environment variables (MONGO_URI, MANYCHAT_API_KEY, MANYCHAT_SECRET_KEY, WORKFLOW_ID, WORKFLOW_VERSION).")
     exit()
 
 # --- إعداد قاعدة البيانات ---
@@ -48,8 +52,6 @@ except Exception as e:
 # --- تطبيق Flask والحالة العامة ---
 
 app = Flask(__name__)
-# تهيئة عميل OpenAI الجديد
-openai_client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
 # حالة تجميع الرسائل
 pending_messages = {}
@@ -112,7 +114,7 @@ def send_manychat_reply(subscriber_id, text, platform):
 
     channel = "instagram" if platform == "Instagram" else "facebook"
 
-    # ❗❗ التصحيح هنا: قص النص لضمان عدم تجاوز حد 2000 رمز ❗❗
+    # قص النص لضمان عدم تجاوز حد 2000 رمز
     reply_text = text.strip()[:2000]
 
     payload = {
@@ -140,44 +142,57 @@ def send_manychat_reply(subscriber_id, text, platform):
         logger.error(f"❌ [SEND] Failed to send message to {subscriber_id}: {e}")
 
 def run_agent_workflow(text, session):
-    """استدعاء واجهة برمجة تطبيقات OpenAI Chat API لتوليد استجابة."""
+    """
+    ❗❗ استدعاء سير العمل المخصص (Custom Workflow Agent) ❗❗
+    يتطلب هذا استخدام API الـ Agent الخاص بك بدلاً من واجهة OpenAI العامة.
+    """
+    
+    # يجب أن تحصل على مفتاح API الخاص بسير العمل من منصتك (قد يكون هو نفسه OpenAI_API_KEY أو مفتاح مختلف)
+    # سيتم استخدام OPENAI_API_KEY لغرض التوضيح
+    api_key_for_agent = OPENAI_API_KEY 
+    
+    headers = {
+        "Authorization": f"Bearer {api_key_for_agent}",
+        "Content-Type": "application/json"
+    }
+
+    # الحمولة يجب أن تتضمن الـ Workflow ID، الـ Version، والنص المدخل
+    # ملاحظة: تنسيق الحمولة يعتمد على منصة الـ Agent الخاصة بك (تم افتراض تنسيق شائع)
+    payload = {
+        "workflow_id": WORKFLOW_ID,
+        "version": WORKFLOW_VERSION,
+        "inputs": {
+            "user_input": text,
+            "user_id": session["_id"],
+            "platform": session["platform"]
+        }
+    }
+    
+    logger.info(f"🚀 [AGENT] Attempting to run custom workflow: {WORKFLOW_ID} (v{WORKFLOW_VERSION})")
+
     try:
-        # تعليمات النظام لضبط شخصية البوت
-        system_instruction = (
-            "You are a helpful and friendly AI assistant integrated with a ManyChat flow. "
-            "The user might send multiple messages quickly, which have been combined into the following prompt. "
-            "Please respond concisely to all the user's combined messages. "
-            f"The user's name is {session['profile']['name']} and they are on {session['platform']}."
-        )
-
-        response = openai_client.chat.completions.create(
-            model="gpt-4o", # النموذج الموصى به
-            messages=[
-                {"role": "system", "content": system_instruction},
-                {"role": "user", "content": text},
-            ],
-            max_tokens=1000,
-            temperature=0.7
-        )
+        r = requests.post(CUSTOM_AGENT_API_URL, json=payload, headers=headers, timeout=30)
+        r.raise_for_status()
         
-        # استخراج نص الاستجابة
-        if response.choices and response.choices[0].message and response.choices[0].message.content:
-            return response.choices[0].message.content.strip()
+        response_data = r.json()
         
-        logger.warning("⚠️ [AGENT] OpenAI response was empty or malformed.")
-        return "⚠️ حدث خطأ أثناء معالجة طلبك: استجابة غير صالحة من AI."
+        # ❗❗ هام: يجب تعديل هذا الجزء لاستخراج نص الرد الفعلي من استجابة API سير العمل الخاص بك ❗❗
+        # نفترض أن نص الرد موجود في حقل يسمى 'reply_text' أو 'output'
+        reply_text = response_data.get("output", "⚠️ الوكيل لم يرجع نصًا صالحًا. يرجى مراجعة إعدادات API.")
 
-    except openai.APIError as e:
-        logger.error(f"❌ [AGENT] OpenAI API Error: {e}")
-        return "⚠️ حدث خطأ في الاتصال بخدمة OpenAI. يرجى المحاولة لاحقًا."
+        return reply_text.strip()
+
+    except requests.exceptions.HTTPError as err:
+        logger.error(f"❌ [AGENT] HTTPError running workflow: {err}")
+        logger.error(f"❌ [AGENT] Response: {r.text}")
+        return "⚠️ فشل الاتصال بوكيل سير العمل. (خطأ HTTP)"
     except Exception as e:
         logger.error(f"❌ [AGENT] Unknown Error: {e}")
-        return "⚠️ حدث خطأ غير متوقع أثناء معالجة طلبك."
+        return "⚠️ حدث خطأ غير متوقع أثناء تشغيل الوكيل المخصص."
 
 def schedule_message_processing(user_id):
     """الدالة التي يتم تنفيذها بواسطة المؤقت لمعالجة الرسائل المجمعة."""
     lock = processing_locks.setdefault(user_id, threading.Lock())
-    # ضمان معالجة رسائل هذا المستخدم بواسطة خيط واحد فقط في كل مرة
     with lock:
         if user_id not in pending_messages:
             return
@@ -187,9 +202,9 @@ def schedule_message_processing(user_id):
 
         # دمج جميع الرسائل المستلمة في موجه واحد
         combined = "\n".join(data["texts"])
-        logger.info(f"📦 [PROCESS] Processing batch for {user_id} on {session['platform']}. Combined text: '{combined[:100]}...'")
+        logger.info(f"📦 [PROCESS] Processing batch for {user_id}. Combined text: '{combined[:100]}...'")
 
-        # تشغيل سير عمل الوكيل المتزامن
+        # تشغيل سير عمل الوكيل المخصص
         reply = run_agent_workflow(combined, session)
 
         # إرسال الرد النهائي
