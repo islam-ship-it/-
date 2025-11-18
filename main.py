@@ -91,7 +91,11 @@ def send_manychat_reply(subscriber_id, text, platform):
         "Content-Type": "application/json"
     }
 
-    channel = "instagram" if platform == "Instagram" else "facebook"
+    # التأكد من أن platform يتم تحديده بشكل صحيح
+    if platform.lower() == "instagram":
+        channel = "instagram"
+    else:
+        channel = "facebook"
 
     payload = {
         "subscriber_id": str(subscriber_id),
@@ -106,17 +110,19 @@ def send_manychat_reply(subscriber_id, text, platform):
 
     try:
         r = requests.post(url, json=payload, headers=headers, timeout=20)
-        r.raise_for_status()
+        r.raise_for_status()  # تحقق من أن الطلب تم بنجاح
         logger.info(f"📤 [SEND] Message delivered → {subscriber_id}")
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"❌ [SEND] Failed: {e.response.text}")  # سجل تفاصيل الخطأ
     except Exception as e:
         logger.error(f"❌ [SEND] Failed: {e}")
 
 async def run_agent_workflow(text, session):
     try:
-        # استخدام واجهة completions الجديدة في openai SDK 1.0.0 أو أعلى
+        # استخدم openai.completions.create في الإصدار 1.0.0 أو أعلى
         response = openai.completions.create(
             model="gpt-5.1",  # تأكد من استخدام GPT-5.1
-            prompt=text,
+            prompt=text,  # يتم استخدام "prompt" بدلاً من "messages"
             max_tokens=1000,
             temperature=0.7
         )
