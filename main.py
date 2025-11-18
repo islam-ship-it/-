@@ -139,8 +139,8 @@ async def run_agent_workflow(text, session):
         logger.info(f"📤 [SEND TO AGENT] Text: {text}")
 
         # توليد النص عبر OpenAI API مع التأكد من أن النص سيكون بسيطًا
-        response = openai.completions.create(
-            model="gpt-5.1",  # تأكد من استخدام GPT-5.1
+        response = openai.Completion.create(
+            model="gpt-4.1",  # تأكد من استخدام GPT-4.1
             prompt=text,  # يتم استخدام "prompt" بدلاً من "messages"
             max_tokens=1000,
             temperature=0.7
