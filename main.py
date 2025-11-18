@@ -5,7 +5,6 @@ import requests
 import threading
 import asyncio
 import openai
-print("OPENAI VERSION:", openai.__version__)  # تأكد من النسخة الصحيحة
 import logging
 from flask import Flask, request, jsonify
 from pymongo import MongoClient
@@ -139,17 +138,17 @@ async def run_agent_workflow(text, session):
         logger.info(f"📤 [SEND TO AGENT] Text: {text}")
 
         # توليد النص عبر OpenAI API مع التأكد من أن النص سيكون بسيطًا
-        response = openai.Completion.create(
+        response = openai.chat.Completion.create(
             model="gpt-4.1",  # تأكد من استخدام GPT-4.1
-            prompt=text,  # يتم استخدام "prompt" بدلاً من "messages"
+            messages=[{"role": "user", "content": text}],
             max_tokens=1000,
             temperature=0.7
         )
 
         # طباعة النص الذي تم إرجاعه من الوكيل
-        logger.info(f"📥 [RESPONSE FROM AGENT] Response: {response.choices[0].text.strip()}")
+        logger.info(f"📥 [RESPONSE FROM AGENT] Response: {response['choices'][0]['message']['content'].strip()}")
 
-        return response.choices[0].text.strip()  # الحصول على النص الناتج من الرد
+        return response['choices'][0]['message']['content'].strip()  # الحصول على النص الناتج من الرد
     except Exception as e:
         logger.error(f"❌ [AGENT] Error: {e}")
         return "⚠️ حدث خطأ أثناء معالجة طلبك."
