@@ -4,6 +4,8 @@ import json
 import requests
 import threading
 import asyncio
+import openai
+print("OPENAI VERSION:", openai.__version__)
 import logging
 from flask import Flask, request, jsonify
 from openai import OpenAI
