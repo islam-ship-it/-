@@ -61,6 +61,7 @@ def get_or_create_session(contact_data):
     session = sessions_collection.find_one({"_id": user_id})
     now = datetime.now(timezone.utc)
 
+    # تحديد المنصة التي يتواصل منها المستخدم
     platform = "Instagram" if "instagram" in str(contact_data.get("source", "")).lower() else "Facebook"
 
     if session:
@@ -68,13 +69,14 @@ def get_or_create_session(contact_data):
             {"_id": user_id},
             {"$set": {
                 "last_contact_date": now,
-                "platform": platform,
+                "platform": platform,  # تحديث المنصة إذا كانت مختلفة
                 "profile.name": contact_data.get("name"),
                 "profile.profile_pic": contact_data.get("profile_pic"),
             }}
         )
         return sessions_collection.find_one({"_id": user_id})
 
+    # إنشاء جلسة جديدة للمستخدم بناءً على المنصة
     new_session = {
         "_id": user_id,
         "platform": platform,
@@ -96,7 +98,7 @@ def send_manychat_reply(subscriber_id, text, platform):
         "Content-Type": "application/json"
     }
 
-    # التأكد من أن platform يتم تحديده بشكل صحيح
+    # تحديد القناة بناءً على المنصة
     if platform.lower() == "instagram":
         channel = "instagram"
     else:
@@ -105,24 +107,25 @@ def send_manychat_reply(subscriber_id, text, platform):
     # تنظيف النص قبل إرساله
     clean_text = clean_text_for_messaging(text)
 
-    # طباعة النص قبل إرساله إلى ManyChat
-    logger.info(f"📤 [SEND TO MANYCHAT] Message: {clean_text}")
-
-    payload = {
-        "subscriber_id": str(subscriber_id),
-        "data": {
-            "version": "v2",
-            "content": {
-                "messages": [{"type": "text", "text": clean_text}]  # إرسال النص فقط بعد تنظيفه
-            }
+    # تغليف النص في هيكلية JSON
+    json_response = {
+        "version": "v2",
+        "content": {
+            "messages": [
+                {
+                    "type": "text",
+                    "text": clean_text
+                }
+            ]
         },
         "channel": channel
     }
 
+    # إرسال الرد إلى ManyChat
     try:
-        r = requests.post(url, json=payload, headers=headers, timeout=20)
+        r = requests.post(url, json=json_response, headers=headers, timeout=20)
         r.raise_for_status()  # تحقق من أن الطلب تم بنجاح
-        logger.info(f"📤 [SEND] Message delivered → {subscriber_id}")
+        logger.info(f"📤 [SEND] Message delivered → {subscriber_id} on {channel}")
     except requests.exceptions.HTTPError as e:
         logger.error(f"❌ [SEND] Failed: {e.response.text}")  # سجل تفاصيل الخطأ
     except Exception as e:
