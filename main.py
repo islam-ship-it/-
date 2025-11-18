@@ -52,7 +52,6 @@ def clean_text_for_messaging(text):
     """
     دالة لتنظيف النصوص من الرموز الغريبة أو غير الصالحة
     """
-    # إزالة أي رموز غير صالحة
     cleaned_text = re.sub(r'[^\x00-\x7F\u0600-\u06FFa-zA-Z0-9\s]', '', text)  # يسمح فقط بالأحرف اللاتينية والعربية والأرقام
     cleaned_text = cleaned_text.strip()  # إزالة المسافات الزائدة
     return cleaned_text
@@ -137,10 +136,10 @@ async def run_agent_workflow(text, session):
         # طباعة النص المرسل إلى الوكيل (OpenAI)
         logger.info(f"📤 [SEND TO AGENT] Text: {text}")
 
-        # توليد النص عبر OpenAI API مع التأكد من أن النص سيكون بسيطًا
+        # توليد النص عبر OpenAI API باستخدام الطريقة الحديثة chat.Completion.create مع نموذج GPT-4.1 Mini
         response = openai.chat.Completion.create(
-            model="gpt-4.1",  # تأكد من استخدام GPT-4.1
-            messages=[{"role": "user", "content": text}],
+            model="gpt-4.1-mini",  # تحديد النموذج GPT-4.1 Mini
+            messages=[{"role": "user", "content": text}],  # إرسال النص كـ message
             max_tokens=1000,
             temperature=0.7
         )
