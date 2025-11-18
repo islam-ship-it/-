@@ -11,6 +11,7 @@ from flask import Flask, request, jsonify
 from pymongo import MongoClient
 from datetime import datetime, timezone
 from dotenv import load_dotenv
+import re
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,6 +48,15 @@ pending_messages = {}
 message_timers = {}
 processing_locks = {}
 BATCH_WAIT_TIME = 2.0
+
+def clean_text_for_messaging(text):
+    """
+    دالة لتنظيف النصوص من الرموز الغريبة أو غير الصالحة
+    """
+    # إزالة أي رموز غير صالحة
+    cleaned_text = re.sub(r'[^\x00-\x7F\u0600-\u06FFa-zA-Z0-9\s]', '', text)  # يسمح فقط بالأحرف اللاتينية والعربية والأرقام
+    cleaned_text = cleaned_text.strip()  # إزالة المسافات الزائدة
+    return cleaned_text
 
 def get_or_create_session(contact_data):
     user_id = str(contact_data.get("id"))
@@ -97,15 +107,15 @@ def send_manychat_reply(subscriber_id, text, platform):
     else:
         channel = "facebook"
 
-    # التأكد من أن النص المرسل إلى ManyChat لا يحتوي على رموز غير صالحة أو تنسيق خاطئ
-    clean_text = text.strip()  # إزالة أي مسافات غير ضرورية
+    # تنظيف النص قبل إرساله
+    clean_text = clean_text_for_messaging(text)
 
     payload = {
         "subscriber_id": str(subscriber_id),
         "data": {
             "version": "v2",
             "content": {
-                "messages": [{"type": "text", "text": clean_text}]  # إرسال النص فقط
+                "messages": [{"type": "text", "text": clean_text}]  # إرسال النص فقط بعد تنظيفه
             }
         },
         "channel": channel
@@ -122,7 +132,7 @@ def send_manychat_reply(subscriber_id, text, platform):
 
 async def run_agent_workflow(text, session):
     try:
-        # استخدم openai.completions.create في الإصدار 1.0.0 أو أعلى
+        # توليد النص عبر OpenAI API مع التأكد من أن النص سيكون بسيطًا
         response = openai.completions.create(
             model="gpt-5.1",  # تأكد من استخدام GPT-5.1
             prompt=text,  # يتم استخدام "prompt" بدلاً من "messages"
