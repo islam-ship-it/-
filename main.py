@@ -110,6 +110,9 @@ def send_manychat_reply(subscriber_id, text, platform):
     # تنظيف النص قبل إرساله
     clean_text = clean_text_for_messaging(text)
 
+    # طباعة النص قبل إرساله إلى ManyChat
+    logger.info(f"📤 [SEND TO MANYCHAT] Message: {clean_text}")
+
     payload = {
         "subscriber_id": str(subscriber_id),
         "data": {
@@ -132,6 +135,9 @@ def send_manychat_reply(subscriber_id, text, platform):
 
 async def run_agent_workflow(text, session):
     try:
+        # طباعة النص المرسل إلى الوكيل (OpenAI)
+        logger.info(f"📤 [SEND TO AGENT] Text: {text}")
+
         # توليد النص عبر OpenAI API مع التأكد من أن النص سيكون بسيطًا
         response = openai.completions.create(
             model="gpt-5.1",  # تأكد من استخدام GPT-5.1
@@ -139,6 +145,10 @@ async def run_agent_workflow(text, session):
             max_tokens=1000,
             temperature=0.7
         )
+
+        # طباعة النص الذي تم إرجاعه من الوكيل
+        logger.info(f"📥 [RESPONSE FROM AGENT] Response: {response.choices[0].text.strip()}")
+
         return response.choices[0].text.strip()  # الحصول على النص الناتج من الرد
     except Exception as e:
         logger.error(f"❌ [AGENT] Error: {e}")
