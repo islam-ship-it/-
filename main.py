@@ -11,7 +11,7 @@ import threading
 import requests
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # استخدم DEBUG لعرض جميع التفاصيل
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler()]
 )
@@ -51,11 +51,13 @@ def clean_text_for_messaging(text):
     """
     cleaned_text = re.sub(r'[^\x00-\x7F\u0600-\u06FFa-zA-Z0-9\s]', '', text)  # يسمح فقط بالأحرف اللاتينية والعربية والأرقام
     cleaned_text = cleaned_text.strip()  # إزالة المسافات الزائدة
+    logger.debug(f"Cleaned text: {cleaned_text}")
     return cleaned_text
 
 def get_or_create_session(contact_data):
     user_id = str(contact_data.get("id"))
     if not user_id:
+        logger.error("❌ [SESSION] User ID is missing.")
         return None
 
     session = sessions_collection.find_one({"_id": user_id})
@@ -63,6 +65,7 @@ def get_or_create_session(contact_data):
 
     # تحديد المنصة التي يتواصل منها المستخدم
     platform = "Instagram" if "instagram" in str(contact_data.get("source", "")).lower() else "Facebook"
+    logger.debug(f"Detected platform: {platform}")
 
     if session:
         sessions_collection.update_one(
@@ -74,6 +77,7 @@ def get_or_create_session(contact_data):
                 "profile.profile_pic": contact_data.get("profile_pic"),
             }}
         )
+        logger.info(f"Session found and updated for user: {user_id}")
         return sessions_collection.find_one({"_id": user_id})
 
     # إنشاء جلسة جديدة للمستخدم بناءً على المنصة
@@ -89,9 +93,14 @@ def get_or_create_session(contact_data):
     }
 
     sessions_collection.insert_one(new_session)
+    logger.info(f"New session created for user: {user_id}")
     return new_session
 
 def send_manychat_reply(subscriber_id, text, platform):
+    if not subscriber_id:
+        logger.error("❌ [SEND] Subscriber ID is missing.")
+        return
+
     url = "https://api.manychat.com/fb/sending/sendContent"
     headers = {
         "Authorization": f"Bearer {MANYCHAT_API_KEY}",
@@ -99,10 +108,8 @@ def send_manychat_reply(subscriber_id, text, platform):
     }
 
     # تحديد القناة بناءً على المنصة
-    if platform.lower() == "instagram":
-        channel = "instagram"
-    else:
-        channel = "facebook"
+    channel = "instagram" if platform.lower() == "instagram" else "facebook"
+    logger.debug(f"Sending message to channel: {channel}")
 
     # تنظيف النص قبل إرساله
     clean_text = clean_text_for_messaging(text)
@@ -121,7 +128,6 @@ def send_manychat_reply(subscriber_id, text, platform):
         "channel": channel
     }
 
-    # إرسال الرد إلى ManyChat
     try:
         r = requests.post(url, json=json_response, headers=headers, timeout=20)
         r.raise_for_status()  # تحقق من أن الطلب تم بنجاح
@@ -160,7 +166,7 @@ def schedule_message_processing(user_id):
         session = data["session"]
 
         combined = "\n".join(data["texts"])
-        logger.info(f"🔍 [PROCESS] Combined text: {combined}")
+        logger.debug(f"🔍 [PROCESS] Combined text: {combined}")
 
         reply = asyncio.run(run_agent_workflow(combined, session))
 
@@ -190,6 +196,7 @@ def webhook():
     auth = request.headers.get("Authorization")
 
     if auth != f"Bearer {MANYCHAT_SECRET_KEY}":
+        logger.error("❌ [WEBHOOK] Unauthorized request.")
         return jsonify({"error": "Unauthorized"}), 403
 
     data = request.get_json(force=True)
@@ -197,6 +204,7 @@ def webhook():
 
     session = get_or_create_session(contact)
     if not session:
+        logger.error("❌ [SESSION] Failed to create or find session.")
         return jsonify({"error": "session-failed"}), 500
 
     last_input = (
@@ -206,8 +214,10 @@ def webhook():
     )
 
     if not last_input:
+        logger.error("❌ [WEBHOOK] No user input received.")
         return jsonify({"status": "no_input"})
 
+    logger.debug(f"Received input: {last_input}")
     add_to_queue(session, last_input)
 
     return jsonify({"status": "received"})
