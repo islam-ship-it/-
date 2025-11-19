@@ -9,7 +9,7 @@ from typing import Optional, List
 import requests
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
-from openai import OpenAI
+import openai
 from pymongo import MongoClient, ASCENDING
 
 # -------------------------
@@ -37,7 +37,7 @@ if not (OPENAI_API_KEY and ASSISTANT_ID and MANYCHAT_API_KEY and MANYCHAT_SECRET
 # -------------------------
 # OpenAI Client (OLD API)
 # -------------------------
-client = OpenAI(api_key=OPENAI_API_KEY)
+openai.api_key = OPENAI_API_KEY
 
 # -------------------------
 # MongoDB
@@ -63,8 +63,12 @@ def get_or_create_thread(user_id):
     if session and session.get("thread_id"):
         return session["thread_id"]
 
-    thread = client.beta.threads.create()
-    thread_id = thread.id
+    thread = openai.ChatCompletion.create(
+        model="gpt-3.5-turbo",
+        messages=[]
+    )
+
+    thread_id = thread["id"]
 
     sessions_col.update_one(
         {"user_id": user_id},
@@ -76,36 +80,48 @@ def get_or_create_thread(user_id):
 
 
 def send_to_assistant(thread_id, text):
-    client.beta.threads.messages.create(
-        thread_id=thread_id,
-        role="user",
-        content=text
-    )
+    try:
+        openai.Threads = openai.beta.threads
 
-    run = client.beta.threads.runs.create(
-        thread_id=thread_id,
-        assistant_id=ASSISTANT_ID
-    )
+        openai.Threads.messages.create(
+            thread_id=thread_id,
+            role="user",
+            content=text
+        )
 
-    while True:
-        run_status = client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
-        if run_status.status in ["completed", "failed"]:
-            break
-        time.sleep(0.5)
+        run = openai.Threads.runs.create(
+            thread_id=thread_id,
+            assistant_id=ASSISTANT_ID
+        )
 
-    if run_status.status == "failed":
-        return "❌ حدث خطأ."
+        while True:
+            run_status = openai.Threads.runs.retrieve(
+                thread_id=thread_id,
+                run_id=run.id
+            )
+            if run_status.status in ["completed", "failed"]:
+                break
+            time.sleep(0.5)
 
-    msgs = client.beta.threads.messages.list(thread_id=thread_id)
-    for m in reversed(msgs.data):
-        if m.role == "assistant":
-            return m.content[0].text.value
+        if run_status.status == "failed":
+            return "❌ حدث خطأ أثناء تشغيل المساعد."
 
-    return "❌ لم يتم العثور على رد."
+        msgs = openai.Threads.messages.list(thread_id=thread_id)
+
+        for m in reversed(msgs.data):
+            if m.role == "assistant":
+                return m.content[0].text.value
+
+        return "❌ لم يتم توليد رد."
+
+    except Exception as e:
+        log.exception("Assistant error: %s", e)
+        return "❌ حدث خطأ في معالجة الرسالة."
 
 
 def send_manychat_reply(sub_id, text, platform):
     url = "https://api.manychat.com/fb/sending/sendContent"
+
     headers = {
         "Authorization": f"Bearer {MANYCHAT_API_KEY}",
         "Content-Type": "application/json"
@@ -116,13 +132,14 @@ def send_manychat_reply(sub_id, text, platform):
         "channel": "instagram" if platform == "instagram" else "facebook",
         "data": {
             "version": "v2",
-            "content": {
-                "messages": [{"type": "text", "text": text}]
-            }
+            "content": {"messages": [{"type": "text", "text": text}]}
         }
     }
 
-    requests.post(url, headers=headers, json=payload)
+    try:
+        requests.post(url, headers=headers, json=payload)
+    except Exception:
+        log.exception("Failed to send reply to ManyChat.")
 
 
 @app.route("/manychat_webhook", methods=["POST"])
