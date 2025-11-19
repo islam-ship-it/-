@@ -1,6 +1,5 @@
 import os
 import time
-import json
 import threading
 import logging
 from datetime import datetime, timezone
@@ -11,28 +10,29 @@ from pymongo import MongoClient
 from openai import OpenAI
 import requests
 
-# ------------------------------------------------
+# -------------------------
 # Logging
-# ------------------------------------------------
+# -------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
+# -------------------------
+# Load env
+# -------------------------
 load_dotenv()
 
-# ------------------------------------------------
-# ENV
-# ------------------------------------------------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-WORKFLOW_ID = os.getenv("WORKFLOW_ID")         # ← wf_xxxxxx
-WORKFLOW_VERSION = os.getenv("WORKFLOW_VERSION")   # ← "5"
+WORKFLOW_ID = os.getenv("WORKFLOW_ID")
+WORKFLOW_VERSION = os.getenv("WORKFLOW_VERSION")
 MONGO_URI = os.getenv("MONGO_URI")
 MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
 MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
-BATCH_WAIT = float(os.getenv("BATCH_WAIT_TIME", 2.0))
+BATCH_WAIT_TIME = float(os.getenv("BATCH_WAIT_TIME", 2.0))
 
+# Check required vars
 required = {
     "OPENAI_API_KEY": OPENAI_API_KEY,
     "WORKFLOW_ID": WORKFLOW_ID,
@@ -41,64 +41,63 @@ required = {
     "MANYCHAT_API_KEY": MANYCHAT_API_KEY,
     "MANYCHAT_SECRET_KEY": MANYCHAT_SECRET_KEY
 }
-
 missing = [k for k, v in required.items() if not v]
 if missing:
-    logger.critical(f"Missing env vars: {missing}")
+    logger.critical(f"Missing environment variables: {missing}")
     raise SystemExit(1)
 
-# ------------------------------------------------
+# -------------------------
 # MongoDB
-# ------------------------------------------------
-mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-db = mongo_client.get_database("multi_platform_bot")
-sessions_col = db.sessions
-messages_col = db.messages
+# -------------------------
+client_db = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+db = client_db.get_database("workflow_bot")
+sessions_col = db.get_collection("sessions")
+messages_col = db.get_collection("messages")
 
 try:
-    mongo_client.admin.command("ping")
+    client_db.admin.command("ping")
     logger.info("Connected to MongoDB")
-except Exception:
-    logger.exception("Mongo connection failed")
+except:
+    logger.exception("MongoDB connection failed")
     raise
 
-# ------------------------------------------------
+# -------------------------
 # OpenAI Client
-# ------------------------------------------------
+# -------------------------
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ------------------------------------------------
-# Flask
-# ------------------------------------------------
+# -------------------------
+# Flask App
+# -------------------------
 app = Flask(__name__)
 
-# ------------------------------------------------
-# Batching buffers
-# ------------------------------------------------
-pending = {}        # user_id → {texts: [...], session}
-timers = {}
-locks = {}
+# -------------------------
+# Batching State
+# -------------------------
+pending_messages = {}
+message_timers = {}
+processing_locks = {}
 
-# ------------------------------------------------
-# Helpers
-# ------------------------------------------------
+# -------------------------
+# Session Management
+# -------------------------
 def get_or_create_session(contact):
-    user_id = str(contact["id"])
+    user_id = str(contact.get("id"))
+
     now = datetime.now(timezone.utc)
+    source = str(contact.get("source", "")).lower()
+    platform = "Instagram" if "instagram" in source else "Facebook"
 
     doc = sessions_col.find_one({"_id": user_id})
-    platform = "Instagram" if "instagram" in str(contact.get("source", "")).lower() else "Facebook"
-
     if doc:
-        sessions_col.update_one(
-            {"_id": user_id},
-            {"$set": {
-                "last_contact": now,
+        sessions_col.update_one({"_id": user_id}, {
+            "$set": {
+                "last_contact_date": now,
                 "platform": platform,
                 "profile.name": contact.get("name"),
-                "profile.pic": contact.get("profile_pic"),
-            }}
-        )
+                "profile.profile_pic": contact.get("profile_pic"),
+            }
+        })
         return sessions_col.find_one({"_id": user_id})
 
     new_doc = {
@@ -106,16 +105,17 @@ def get_or_create_session(contact):
         "platform": platform,
         "profile": {
             "name": contact.get("name"),
-            "pic": contact.get("profile_pic")
+            "profile_pic": contact.get("profile_pic"),
         },
-        "thread_id": None,
         "created": now,
-        "last_contact": now,
+        "last_contact_date": now
     }
     sessions_col.insert_one(new_doc)
     return new_doc
 
-
+# -------------------------
+# Save Message
+# -------------------------
 def save_message(user_id, role, text):
     try:
         messages_col.insert_one({
@@ -127,155 +127,129 @@ def save_message(user_id, role, text):
     except:
         logger.exception("Failed to save message")
 
-
-# ------------------------------------------------
-# ManyChat Send
-# ------------------------------------------------
-def send_manychat_reply(user_id, text, platform):
+# -------------------------
+# ManyChat Sender
+# -------------------------
+def send_manychat_reply(subscriber_id, text, platform):
     url = "https://api.manychat.com/fb/sending/sendContent"
     headers = {
         "Authorization": f"Bearer {MANYCHAT_API_KEY}",
         "Content-Type": "application/json"
     }
-
     channel = "instagram" if platform == "Instagram" else "facebook"
 
     payload = {
-        "subscriber_id": str(user_id),
+        "subscriber_id": str(subscriber_id),
         "data": {
             "version": "v2",
-            "content": {
-                "messages": [
-                    {"type": "text", "text": text}
-                ]
-            }
+            "content": {"messages": [{"type": "text", "text": text.strip()}]}
         },
         "channel": channel
     }
 
     try:
-        r = requests.post(url, json=payload, headers=headers)
+        r = requests.post(url, headers=headers, json=payload, timeout=15)
         r.raise_for_status()
-        logger.info(f"Reply sent to {user_id}")
+        logger.info(f"Sent ManyChat reply to {subscriber_id}")
     except:
         logger.exception("ManyChat send failed")
 
+# -------------------------
+# Call Workflow
+# -------------------------
+def call_workflow(text):
+    try:
+        run = client.workflows.runs.create(
+            workflow_id=WORKFLOW_ID,
+            version=WORKFLOW_VERSION,
+            input={"user_message": text}
+        )
 
-# ------------------------------------------------
-# Workflow Engine (Threads + Runs)
-# ------------------------------------------------
-def ensure_thread(session_doc):
-    """
-    Creates an OpenAI thread once per user.
-    """
-    if session_doc.get("thread_id"):
-        return session_doc["thread_id"]
+        # Poll until completed
+        while True:
+            status = client.workflows.runs.get(
+                workflow_id=WORKFLOW_ID,
+                run_id=run.id
+            )
+            if status.status == "completed":
+                break
+            time.sleep(0.5)
 
-    thread = client.threads.create()
-    thread_id = thread.id
-
-    sessions_col.update_one(
-        {"_id": session_doc["_id"]},
-        {"$set": {"thread_id": thread_id}}
-    )
-    return thread_id
-
-
-def run_workflow(thread_id, text):
-    """
-    Executes OpenAI Workflow with Tools (File Search)
-    """
-
-    # Add message
-    client.threads.messages.create(
-        thread_id=thread_id,
-        role="user",
-        content=text
-    )
-
-    # Run workflow
-    run = client.threads.runs.create(
-        thread_id=thread_id,
-        workflow_id=WORKFLOW_ID,
-        version=WORKFLOW_VERSION
-    )
-
-    # Poll for completion
-    while True:
-        state = client.threads.runs.retrieve(
-            thread_id=thread_id,
+        # Get messages
+        messages = client.workflows.messages.list(
+            workflow_id=WORKFLOW_ID,
             run_id=run.id
         )
-        if state.status == "completed":
-            break
-        time.sleep(0.4)
 
-    # Fetch assistant reply
-    msgs = client.threads.messages.list(thread_id=thread_id)
-    for msg in reversed(msgs.data):
-        if msg.role == "assistant":
-            try:
+        for msg in messages.data:
+            if msg.role == "assistant":
                 return msg.content[0].text.value
-            except:
-                return str(msg)
 
-    return "⚠️ مشكلة في استخراج الرد"
+        return "لم أجد ردًا من الوكيل."
 
+    except:
+        logger.exception("Workflow call failed")
+        return "⚠️ حدث خطأ أثناء تشغيل الوكيل."
 
-# ------------------------------------------------
-# Batching
-# ------------------------------------------------
+# -------------------------
+# Processing Batches
+# -------------------------
 def process_user(user_id):
-    lock = locks.setdefault(user_id, threading.Lock())
+    lock = processing_locks.setdefault(user_id, threading.Lock())
 
     with lock:
-        data = pending.get(user_id)
-        if not data:
+        if user_id not in pending_messages:
             return
 
+        data = pending_messages.pop(user_id)
         session = data["session"]
         texts = data["texts"]
-
-        combined = "\n".join(texts)
+        combined = "\n".join(texts).strip()
 
         save_message(user_id, "user", combined)
 
-        thread_id = ensure_thread(session)
-        reply = run_workflow(thread_id, combined)
+        reply = call_workflow(combined)
 
         save_message(user_id, "assistant", reply)
-        send_manychat_reply(user_id, reply, session["platform"])
+        send_manychat_reply(user_id, reply, session.get("platform"))
 
-        pending.pop(user_id, None)
-        timers.pop(user_id, None)
+        if user_id in message_timers:
+            try:
+                message_timers[user_id].cancel()
+            except:
+                pass
 
+# -------------------------
+# Queue
+# -------------------------
+def add_to_queue(session_doc, text):
+    user_id = session_doc["_id"]
 
-def add_to_batch(session_doc, msg):
-    uid = session_doc["_id"]
+    if user_id not in pending_messages:
+        pending_messages[user_id] = {"texts": [], "session": session_doc}
 
-    if uid in timers:
-        timers[uid].cancel()
+    pending_messages[user_id]["texts"].append(text)
 
-    if uid not in pending:
-        pending[uid] = {"texts": [], "session": session_doc}
+    if user_id in message_timers:
+        try:
+            message_timers[user_id].cancel()
+        except:
+            pass
 
-    pending[uid]["texts"].append(msg)
+    timer = threading.Timer(BATCH_WAIT_TIME, process_user, args=[user_id])
+    message_timers[user_id] = timer
+    timer.start()
 
-    t = threading.Timer(BATCH_WAIT, process_user, args=[uid])
-    timers[uid] = t
-    t.start()
-
-
-# ------------------------------------------------
-# ManyChat Webhook
-# ------------------------------------------------
+# -------------------------
+# Webhook
+# -------------------------
 @app.route("/manychat_webhook", methods=["POST"])
 def webhook():
     auth = request.headers.get("Authorization")
     if auth != f"Bearer {MANYCHAT_SECRET_KEY}":
-        return jsonify({"error": "unauthorized"}), 403
+        return jsonify({"error": "Unauthorized"}), 403
 
-    data = request.get_json(force=True)
+    data = request.get_json()
     contact = data.get("full_contact")
 
     if not contact:
@@ -283,32 +257,24 @@ def webhook():
 
     session_doc = get_or_create_session(contact)
 
-    last_text = (
-        contact.get("last_text_input")
-        or contact.get("last_input_text")
-        or data.get("last_input")
-    )
+    last_input = contact.get("last_text_input") or contact.get("last_input_text")
+    if not last_input:
+        return jsonify({"status": "no_input"})
 
-    if not last_text:
-        return jsonify({"status": "no_text"})
-
-    add_to_batch(session_doc, last_text)
-
+    add_to_queue(session_doc, last_input)
     return jsonify({"status": "received"})
 
-
-# ------------------------------------------------
+# -------------------------
 # Health
-# ------------------------------------------------
+# -------------------------
 @app.route("/")
 def home():
     return "Workflow Bot Running"
 
-
-# ------------------------------------------------
-# Run
-# ------------------------------------------------
+# -------------------------
+# Run Server
+# -------------------------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
-    logger.info(f"Running on :{port}")
+    logger.info(f"Starting on port {port}")
     app.run(host="0.0.0.0", port=port)
