@@ -3,6 +3,7 @@ import os
 import json
 import logging
 import time
+import uuid
 from datetime import datetime
 from typing import Optional, List, Dict
 
@@ -34,7 +35,7 @@ MAX_MEMORY_MESSAGES = int(os.getenv("MAX_MEMORY_MESSAGES", 100))
 
 # Check env
 if not (OPENAI_API_KEY and PROMPT_ID and MANYCHAT_API_KEY and MANYCHAT_SECRET_KEY and MONGO_URI):
-    log.critical("Missing required env vars.")
+    log.critical("Missing required environment variables")
     raise SystemExit(1)
 
 # -------------------------
@@ -46,7 +47,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # MongoDB Setup
 # -------------------------
 mongo = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-db = mongo[MONGO_DB]     # <<— FIXED (database always defined)
+db = mongo[MONGO_DB]
 
 sessions_col = db.get_collection("bot_sessions")
 messages_col = db.get_collection("bot_messages")
@@ -63,22 +64,23 @@ attachments_col.create_index([("user_id", ASCENDING), ("created_at", ASCENDING)]
 # -------------------------
 app = Flask(__name__)
 
+# -------------------------
 # Helpers
+# -------------------------
 def now_ts():
     return int(time.time())
 
 def create_conversation_for_user(user_id: str) -> Optional[str]:
-    """Prevent race conditions using DuplicateKeyError handler."""
+    """
+    Instead of using OpenAI Conversations API (removed from SDK),
+    we generate a local conversation_id and store it in Mongo.
+    """
     sess = sessions_col.find_one({"user_id": user_id})
     if sess and sess.get("conversation_id"):
         return sess["conversation_id"]
 
-    try:
-        conv = client.conversations.create()
-        conv_id = conv.id
-    except Exception as e:
-        log.exception("Failed to create conversation for %s: %s", user_id, e)
-        return None
+    # generate local conversation id
+    conv_id = str(uuid.uuid4())
 
     doc = {
         "user_id": user_id,
@@ -92,19 +94,19 @@ def create_conversation_for_user(user_id: str) -> Optional[str]:
     except DuplicateKeyError:
         sess = sessions_col.find_one({"user_id": user_id})
         return sess.get("conversation_id")
+
     return conv_id
 
 
 def store_message(user_id: str, role: str, content: str, raw=None, response_id=None):
-    doc = {
+    messages_col.insert_one({
         "user_id": user_id,
         "role": role,
         "content": content,
         "raw": raw or {},
         "response_id": response_id,
         "created_at": datetime.utcnow()
-    }
-    messages_col.insert_one(doc)
+    })
 
 
 def store_attachment(user_id: str, url: str, kind="image", meta=None):
@@ -140,10 +142,9 @@ def build_input_items(text, attachments):
 def call_responses_api(prompt_id: str, conv_id: Optional[str], input_items: List[dict]) -> dict:
     payload = {
         "prompt": {"id": prompt_id},
-        "input": input_items
+        "input": input_items,
+        "conversation": conv_id
     }
-    if conv_id:
-        payload["conversation"] = conv_id
 
     try:
         resp = client.responses.create(**payload)
@@ -189,7 +190,7 @@ def send_manychat_reply(sub_id, text, platform):
         log.exception("ManyChat send failed for %s", sub_id)
 
 # -------------------------
-# Webhook
+# Webhook Endpoint
 # -------------------------
 @app.route("/manychat_webhook", methods=["POST"])
 def manychat_webhook():
