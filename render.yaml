@@ -1,24 +1,19 @@
 services:
   - type: web
-    name: manychat-openai-bot
+    name: manychat-assistant-old
     env: python
-    runtime: python3.11
-    plan: starter
     buildCommand: "pip install -r requirements.txt"
     startCommand: "gunicorn main:app -w 2 -b 0.0.0.0:$PORT"
-
     envVars:
       - key: OPENAI_API_KEY
         sync: false
-      - key: PROMPT_ID
+      - key: ASSISTANT_ID
         sync: false
-      - key: MONGO_URI
-        sync: false
-      - key: MONGO_DB
-        value: "manychatdb"
       - key: MANYCHAT_API_KEY
         sync: false
       - key: MANYCHAT_SECRET_KEY
+        sync: false
+      - key: MONGO_URI
         sync: false
       - key: PORT
         value: "10000"
