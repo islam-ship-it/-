@@ -11,6 +11,7 @@ from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 from openai import OpenAI
 from pymongo import MongoClient, ASCENDING
+from pymongo.errors import DuplicateKeyError
 
 # -------------------------
 # Logging
@@ -27,11 +28,13 @@ PROMPT_ID = os.getenv("PROMPT_ID")
 MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
 MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
 MONGO_URI = os.getenv("MONGO_URI")
-PORT = int(os.getenv("PORT", 5000))
+MONGO_DB = os.getenv("MONGO_DB", "manychatdb")
+PORT = int(os.getenv("PORT", "10000"))
 MAX_MEMORY_MESSAGES = int(os.getenv("MAX_MEMORY_MESSAGES", 100))
 
+# Check env
 if not (OPENAI_API_KEY and PROMPT_ID and MANYCHAT_API_KEY and MANYCHAT_SECRET_KEY and MONGO_URI):
-    log.critical("Missing required env vars. Please set OPENAI_API_KEY, PROMPT_ID, MANYCHAT_API_KEY, MANYCHAT_SECRET_KEY, MONGO_URI")
+    log.critical("Missing required env vars.")
     raise SystemExit(1)
 
 # -------------------------
@@ -43,10 +46,11 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # MongoDB Setup
 # -------------------------
 mongo = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-db = mongo.get_database()
-sessions_col = db.get_collection("bot_sessions")       # { user_id, conversation_id, created_at, updated_at }
-messages_col = db.get_collection("bot_messages")       # { user_id, role, content, raw, created_at, response_id(optional) }
-attachments_col = db.get_collection("bot_attachments") # { user_id, url, kind, meta, created_at }
+db = mongo[MONGO_DB]     # <<— FIXED (database always defined)
+
+sessions_col = db.get_collection("bot_sessions")
+messages_col = db.get_collection("bot_messages")
+attachments_col = db.get_collection("bot_attachments")
 logs_col = db.get_collection("bot_logs")
 
 # indexes
@@ -59,38 +63,39 @@ attachments_col.create_index([("user_id", ASCENDING), ("created_at", ASCENDING)]
 # -------------------------
 app = Flask(__name__)
 
-# -------------------------
 # Helpers
-# -------------------------
 def now_ts():
     return int(time.time())
 
 def create_conversation_for_user(user_id: str) -> Optional[str]:
-    """
-    Create a conversation via OpenAI and store it persistently for the user.
-    If already exists, return existing conversation_id.
-    """
+    """Prevent race conditions using DuplicateKeyError handler."""
     sess = sessions_col.find_one({"user_id": user_id})
     if sess and sess.get("conversation_id"):
         return sess["conversation_id"]
+
     try:
         conv = client.conversations.create()
-        conv_id = conv.get("id") if isinstance(conv, dict) else getattr(conv, "id", None)
-        if not conv_id:
-            raise ValueError("No conversation id returned")
+        conv_id = conv.id
     except Exception as e:
         log.exception("Failed to create conversation for %s: %s", user_id, e)
         return None
+
     doc = {
         "user_id": user_id,
         "conversation_id": conv_id,
         "created_at": now_ts(),
         "updated_at": now_ts()
     }
-    sessions_col.update_one({"user_id": user_id}, {"$set": doc}, upsert=True)
+
+    try:
+        sessions_col.insert_one(doc)
+    except DuplicateKeyError:
+        sess = sessions_col.find_one({"user_id": user_id})
+        return sess.get("conversation_id")
     return conv_id
 
-def store_message(user_id: str, role: str, content: str, raw=None, response_id: Optional[str]=None):
+
+def store_message(user_id: str, role: str, content: str, raw=None, response_id=None):
     doc = {
         "user_id": user_id,
         "role": role,
@@ -99,93 +104,87 @@ def store_message(user_id: str, role: str, content: str, raw=None, response_id: 
         "response_id": response_id,
         "created_at": datetime.utcnow()
     }
-    res = messages_col.insert_one(doc)
-    return str(res.inserted_id)
+    messages_col.insert_one(doc)
 
-def store_attachment(user_id: str, url: str, kind: str = "image", meta: dict = None):
-    doc = {
+
+def store_attachment(user_id: str, url: str, kind="image", meta=None):
+    attachments_col.insert_one({
         "user_id": user_id,
         "url": url,
         "kind": kind,
         "meta": meta or {},
         "created_at": datetime.utcnow()
-    }
-    res = attachments_col.insert_one(doc)
-    return str(res.inserted_id)
+    })
 
-def get_recent_user_items(user_id: str, limit: int = 50) -> List[dict]:
+
+def get_recent_user_items(user_id: str, limit=50) -> List[dict]:
     cursor = messages_col.find({"user_id": user_id}).sort("created_at", -1).limit(limit)
     return list(reversed(list(cursor)))
 
-def build_input_items(user_text: str, attachment_urls: List[Dict]) -> List[dict]:
+
+def build_input_items(text, attachments):
     items = []
-    if user_text:
-        items.append({"role": "user", "content": user_text})
-    for a in attachment_urls:
-        kind = a.get("type", "image")
+    if text:
+        items.append({"role": "user", "content": text})
+
+    for a in attachments:
         url = a.get("url")
+        t = a.get("type", "image")
         if not url:
             continue
-        if kind == "image":
-            items.append({"role": "user", "content": f"[image] {url}"})
-        elif kind == "audio":
-            items.append({"role": "user", "content": f"[audio] {url}"})
-        else:
-            items.append({"role": "user", "content": f"[attachment:{kind}] {url}"})
+        items.append({"role": "user", "content": f"[{t}] {url}"})
+
     return items
 
-def call_responses_api(prompt_id: str, conversation_id: Optional[str], input_items: List[dict]) -> dict:
-    kwargs = {"prompt": {"id": prompt_id}, "input": input_items}
-    if conversation_id:
-        kwargs["conversation"] = conversation_id
+
+def call_responses_api(prompt_id: str, conv_id: Optional[str], input_items: List[dict]) -> dict:
+    payload = {
+        "prompt": {"id": prompt_id},
+        "input": input_items
+    }
+    if conv_id:
+        payload["conversation"] = conv_id
+
     try:
-        resp = client.responses.create(**kwargs)
-        # ensure dict
-        return resp if isinstance(resp, dict) else resp.to_dict()
+        resp = client.responses.create(**payload)
+        return resp.to_dict()
     except Exception as e:
         log.exception("OpenAI responses.create error: %s", e)
         return {"__error": True, "error": str(e)}
 
-def extract_reply_text(resp: dict) -> str:
-    if not isinstance(resp, dict):
-        return str(resp)
-    if "output_text" in resp and resp["output_text"]:
-        return resp["output_text"]
-    out = resp.get("output") or resp.get("outputs") or resp.get("items") or []
-    if isinstance(out, list):
-        for o in out:
-            try:
-                if isinstance(o, dict):
-                    role = o.get("role")
-                    content = o.get("content")
-                    if isinstance(content, list):
-                        for part in content:
-                            if isinstance(part, dict) and part.get("text"):
-                                return part.get("text")
-                    if isinstance(content, str):
-                        return content
-                    if o.get("text"):
-                        return o.get("text")
-            except Exception:
-                continue
-    try:
-        return json.dumps(resp)[:2000]
-    except:
-        return str(resp)
 
-def send_manychat_reply(sub_id: str, text: str, platform: str):
+def extract_reply_text(resp):
+    if not resp:
+        return "⚠ خطأ في استخراج الرد."
+
+    if resp.get("output_text"):
+        return resp["output_text"]
+
+    for item in resp.get("output", []):
+        for part in item.get("content", []):
+            if part.get("text"):
+                return part["text"]
+
+    return "⚠ لم يتم توليد رد."
+
+
+def send_manychat_reply(sub_id, text, platform):
     url = "https://api.manychat.com/fb/sending/sendContent"
     headers = {"Authorization": f"Bearer {MANYCHAT_API_KEY}", "Content-Type": "application/json"}
     channel = "instagram" if platform.lower() == "instagram" else "facebook"
-    payload = {
+
+    data = {
         "subscriber_id": str(sub_id),
         "channel": channel,
-        "data": {"version": "v2", "content": {"messages": [{"type": "text", "text": text}]}}
+        "data": {
+            "version": "v2",
+            "content": {"messages": [{"type": "text", "text": text}]}
+        }
     }
+
     try:
-        r = requests.post(url, headers=headers, json=payload, timeout=30)
+        r = requests.post(url, headers=headers, json=data, timeout=30)
         r.raise_for_status()
-        log.info("Sent ManyChat reply to %s", sub_id)
     except Exception:
         log.exception("ManyChat send failed for %s", sub_id)
 
@@ -200,105 +199,53 @@ def manychat_webhook():
 
     data = request.get_json(force=True)
     contact = data.get("full_contact") or {}
-    if not contact:
-        return jsonify({"error": "invalid_payload"}), 400
 
-    user_id = str(contact.get("id") or contact.get("subscriber_id") or data.get("subscriber_id") or "unknown")
+    user_id = str(contact.get("id") or contact.get("subscriber_id") or "unknown")
+    last_text = (contact.get("last_text_input") or "").strip()
     platform = "Instagram" if "instagram" in str(contact.get("source", "")).lower() else "Facebook"
-    last_text = (contact.get("last_text_input") or contact.get("last_input_text") or data.get("last_input") or "").strip()
 
+    # attachments
     attachments = []
-    mc_attachments = contact.get("last_attachments") or contact.get("attachments") or contact.get("media") or []
-    if isinstance(mc_attachments, list):
-        for a in mc_attachments:
-            if isinstance(a, dict):
-                url = a.get("url") or a.get("image_url") or a.get("file_url")
-                kind = a.get("type") or ("image" if url and url.lower().endswith((".jpg",".png",".jpeg")) else "file")
-                if url:
-                    attachments.append({"url": url, "type": kind})
-            elif isinstance(a, str):
-                url = a
-                kind = "image" if url.lower().endswith((".jpg",".jpeg",".png",".webp")) else "file"
-                attachments.append({"url": url, "type": kind})
+    for a in contact.get("last_attachments", []):
+        url = a.get("url") or a.get("image_url")
+        if url:
+            attachments.append({"url": url, "type": a.get("type", "image")})
 
-    last_message = contact.get("last_message") or {}
-    if isinstance(last_message, dict):
-        for key in ("image_url","file_url","audio_url","url"):
-            url = last_message.get(key)
-            if url:
-                kind = "audio" if "audio" in key else ("image" if "image" in key else "file")
-                attachments.append({"url": url, "type": kind})
-
-    # persist incoming
     store_message(user_id, "user", last_text or "[no text]", raw=contact)
     for a in attachments:
-        store_attachment(user_id, a.get("url"), kind=a.get("type"))
+        store_attachment(user_id, a["url"], kind=a["type"])
 
-    log.info("Incoming from %s (text len=%d, attachments=%d)", user_id, len(last_text), len(attachments))
-
-    # ensure conversation exists (persistent)
     conv_id = create_conversation_for_user(user_id)
     if not conv_id:
-        send_manychat_reply(user_id, "⚠ حدث خطأ بإنشاء الجلسة، حاول مره أخرى لاحقاً.", platform)
-        logs_col.insert_one({"type":"session_error", "user_id": user_id, "payload": contact, "ts": datetime.utcnow()})
-        return jsonify({"status": "error", "reason": "conv_create_failed"}), 500
+        send_manychat_reply(user_id, "⚠ حدث خطأ بإنشاء الجلسة.", platform)
+        return jsonify({"error": "conv_failed"}), 500
 
-    # build items
     input_items = build_input_items(last_text, attachments)
 
-    # optional: include recent local context summary if many messages
-    recent_msgs = get_recent_user_items(user_id, limit=MAX_MEMORY_MESSAGES)
-    if len(recent_msgs) > 20:
-        # build a compact summary string (very simple)
-        last_texts = [m["content"] for m in recent_msgs if m.get("role") == "user"][-10:]
-        summary = "ملخص سريع للمستخدم: " + " | ".join(last_texts)
+    # optional summary
+    msgs = get_recent_user_items(user_id, MAX_MEMORY_MESSAGES)
+    if len(msgs) > 20:
+        summary = "ملخص سريع: " + " | ".join(m["content"] for m in msgs[-10:] if m["role"] == "user")
         input_items.insert(0, {"role": "system", "content": summary})
 
-    # call OpenAI Responses
     resp = call_responses_api(PROMPT_ID, conv_id, input_items)
     if resp.get("__error"):
-        log.error("OpenAI error for %s: %s", user_id, resp.get("error"))
-        logs_col.insert_one({"type":"openai_error", "user_id": user_id, "error": resp.get("error"), "raw": resp, "ts": datetime.utcnow()})
-        send_manychat_reply(user_id, "⚠ حدث خطأ أثناء معالجة طلبك. حاول مرة أخرى لاحقاً.", platform)
-        return jsonify({"status": "error", "reason": "openai_failed"}), 500
+        send_manychat_reply(user_id, "⚠ حدث خطأ أثناء المعالجة.", platform)
+        return jsonify({"error": "openai_error"}), 500
 
-    assistant_text = extract_reply_text(resp) or "⚠ لم يتم توليد رد."
-    # persist assistant reply
-    store_message(user_id, "assistant", assistant_text, raw=resp, response_id=resp.get("id"))
-
-    # try to detect and store any urls in outputs
-    out_items = resp.get("output") or resp.get("outputs") or resp.get("items") or []
-    if isinstance(out_items, list):
-        for o in out_items:
-            try:
-                if isinstance(o, dict):
-                    c = o.get("content") or []
-                    if isinstance(c, list):
-                        for part in c:
-                            if isinstance(part, dict):
-                                text_val = part.get("text") or ""
-                                if isinstance(text_val, str) and ("http://" in text_val or "https://" in text_val):
-                                    words = text_val.split()
-                                    for w in words:
-                                        if w.startswith("http://") or w.startswith("https://"):
-                                            store_attachment(user_id, w, kind="output_link", meta={"source_part": part})
-            except Exception:
-                continue
-
-    # send to ManyChat
-    send_manychat_reply(user_id, assistant_text, platform)
-    # update session timestamp
-    sessions_col.update_one({"user_id": user_id}, {"$set": {"updated_at": now_ts()}}, upsert=False)
+    reply = extract_reply_text(resp)
+    store_message(user_id, "assistant", reply, raw=resp, response_id=resp.get("id"))
+    send_manychat_reply(user_id, reply, platform)
+    sessions_col.update_one({"user_id": user_id}, {"$set": {"updated_at": now_ts()}})
 
     return jsonify({"status": "ok"}), 200
 
-# -------------------------
-# Health
-# -------------------------
+
 @app.route("/")
 def home():
-    return "🔥 ManyChat ↔ Responses API proxy – persistent memory (Mongo)"
+    return "🔥 ManyChat ↔ OpenAI Responses Proxy – Mongo Persistent Memory"
+
 
 if __name__ == "__main__":
-    log.info("Starting ManyChat-Responses proxy (persistent memory)...")
+    log.info("Starting service...")
     app.run(host="0.0.0.0", port=PORT)
