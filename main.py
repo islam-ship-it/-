@@ -16,7 +16,7 @@ from pymongo import MongoClient, ASCENDING
 # Logging
 # -------------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-log = logging.getLogger("manychat-responses-mongo")
+log = logging.getLogger("manychat-responses-mongo-persistent")
 
 # -------------------------
 # Load env
@@ -28,8 +28,7 @@ MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
 MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
 MONGO_URI = os.getenv("MONGO_URI")
 PORT = int(os.getenv("PORT", 5000))
-SESSION_TTL = int(os.getenv("SESSION_TTL", 3600))  # seconds to reuse conversation
-MAX_MEMORY_MESSAGES = int(os.getenv("MAX_MEMORY_MESSAGES", 20))  # how many past messages to keep
+MAX_MEMORY_MESSAGES = int(os.getenv("MAX_MEMORY_MESSAGES", 100))
 
 if not (OPENAI_API_KEY and PROMPT_ID and MANYCHAT_API_KEY and MANYCHAT_SECRET_KEY and MONGO_URI):
     log.critical("Missing required env vars. Please set OPENAI_API_KEY, PROMPT_ID, MANYCHAT_API_KEY, MANYCHAT_SECRET_KEY, MONGO_URI")
@@ -44,10 +43,10 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # MongoDB Setup
 # -------------------------
 mongo = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-db = mongo.get_database()  # uses DB from connection string or default
-sessions_col = db.get_collection("bot_sessions")       # store mapping user_id -> conversation_id, last_seen
-messages_col = db.get_collection("bot_messages")       # store each message (user/assistant)
-attachments_col = db.get_collection("bot_attachments") # optional attachment records
+db = mongo.get_database()
+sessions_col = db.get_collection("bot_sessions")       # { user_id, conversation_id, created_at, updated_at }
+messages_col = db.get_collection("bot_messages")       # { user_id, role, content, raw, created_at, response_id(optional) }
+attachments_col = db.get_collection("bot_attachments") # { user_id, url, kind, meta, created_at }
 logs_col = db.get_collection("bot_logs")
 
 # indexes
@@ -61,34 +60,27 @@ attachments_col.create_index([("user_id", ASCENDING), ("created_at", ASCENDING)]
 app = Flask(__name__)
 
 # -------------------------
-# Helpers: Mongo session management
+# Helpers
 # -------------------------
 def now_ts():
     return int(time.time())
 
-def get_session_doc(user_id: str) -> Optional[dict]:
-    return sessions_col.find_one({"user_id": user_id})
-
-def create_or_refresh_session(user_id: str) -> dict:
+def create_conversation_for_user(user_id: str) -> Optional[str]:
     """
-    Ensure we have a conversation id for this user.
-    Reuse if not expired; otherwise create a new conversation via OpenAI Conversations API.
+    Create a conversation via OpenAI and store it persistently for the user.
+    If already exists, return existing conversation_id.
     """
-    entry = sessions_col.find_one({"user_id": user_id})
-    if entry:
-        age = now_ts() - int(entry.get("created_at", 0))
-        if age < SESSION_TTL and entry.get("conversation_id"):
-            return entry
-        # expired -> we'll create new
-    # Create new conversation via OpenAI Conversations API
+    sess = sessions_col.find_one({"user_id": user_id})
+    if sess and sess.get("conversation_id"):
+        return sess["conversation_id"]
     try:
         conv = client.conversations.create()
         conv_id = conv.get("id") if isinstance(conv, dict) else getattr(conv, "id", None)
         if not conv_id:
             raise ValueError("No conversation id returned")
     except Exception as e:
-        log.exception("Failed to create conversation with OpenAI: %s", e)
-        return {"__error": True, "error": str(e)}
+        log.exception("Failed to create conversation for %s: %s", user_id, e)
+        return None
     doc = {
         "user_id": user_id,
         "conversation_id": conv_id,
@@ -96,17 +88,15 @@ def create_or_refresh_session(user_id: str) -> dict:
         "updated_at": now_ts()
     }
     sessions_col.update_one({"user_id": user_id}, {"$set": doc}, upsert=True)
-    return doc
+    return conv_id
 
-# -------------------------
-# Helpers: storing messages / attachments
-# -------------------------
-def store_message(user_id: str, role: str, content: str, raw=None):
+def store_message(user_id: str, role: str, content: str, raw=None, response_id: Optional[str]=None):
     doc = {
         "user_id": user_id,
         "role": role,
         "content": content,
         "raw": raw or {},
+        "response_id": response_id,
         "created_at": datetime.utcnow()
     }
     res = messages_col.insert_one(doc)
@@ -123,27 +113,20 @@ def store_attachment(user_id: str, url: str, kind: str = "image", meta: dict = N
     res = attachments_col.insert_one(doc)
     return str(res.inserted_id)
 
-# -------------------------
-# Helpers: build input items for Responses API (include attachments when possible)
-# -------------------------
+def get_recent_user_items(user_id: str, limit: int = 50) -> List[dict]:
+    cursor = messages_col.find({"user_id": user_id}).sort("created_at", -1).limit(limit)
+    return list(reversed(list(cursor)))
+
 def build_input_items(user_text: str, attachment_urls: List[Dict]) -> List[dict]:
-    """
-    Returns list of input items for responses.create.
-    attachment_urls: list of dicts like {"url": "...", "type": "image"|"audio"}
-    We'll put user text as input_text and append image items separately.
-    """
     items = []
     if user_text:
         items.append({"role": "user", "content": user_text})
-    # For attachments, Responses API can accept items via conversation or specialized fields.
-    # We'll include them as content objects referencing the URL (many backends accept input_image)
     for a in attachment_urls:
         kind = a.get("type", "image")
         url = a.get("url")
         if not url:
             continue
         if kind == "image":
-            # Represent as an additional input item (some SDKs accept structured items)
             items.append({"role": "user", "content": f"[image] {url}"})
         elif kind == "audio":
             items.append({"role": "user", "content": f"[audio] {url}"})
@@ -151,72 +134,45 @@ def build_input_items(user_text: str, attachment_urls: List[Dict]) -> List[dict]
             items.append({"role": "user", "content": f"[attachment:{kind}] {url}"})
     return items
 
-# -------------------------
-# Helpers: call Responses API
-# -------------------------
 def call_responses_api(prompt_id: str, conversation_id: Optional[str], input_items: List[dict]) -> dict:
-    """
-    Use client.responses.create with prompt and conversation when available.
-    Returns response dict or error dict.
-    """
     kwargs = {"prompt": {"id": prompt_id}, "input": input_items}
     if conversation_id:
         kwargs["conversation"] = conversation_id
     try:
         resp = client.responses.create(**kwargs)
-        # make sure resp is a dict
+        # ensure dict
         return resp if isinstance(resp, dict) else resp.to_dict()
     except Exception as e:
         log.exception("OpenAI responses.create error: %s", e)
         return {"__error": True, "error": str(e)}
 
-# -------------------------
-# Helpers: extract assistant reply text from response object
-# -------------------------
 def extract_reply_text(resp: dict) -> str:
     if not isinstance(resp, dict):
-        try:
-            return str(resp)
-        except:
-            return ""
-    # prefer 'output_text' or 'output' with text
-    text = ""
+        return str(resp)
     if "output_text" in resp and resp["output_text"]:
         return resp["output_text"]
-    # else, try to parse output array
-    out = resp.get("output") or resp.get("outputs") or resp.get("items") or resp.get("result") or []
+    out = resp.get("output") or resp.get("outputs") or resp.get("items") or []
     if isinstance(out, list):
-        # find first assistant message
         for o in out:
             try:
-                # many formats: o -> { "id":..., "content":[{"text": "..." }, ...], "role": "assistant"}
                 if isinstance(o, dict):
-                    # some objects include 'role'
                     role = o.get("role")
-                    if role and role != "assistant":
-                        continue
-                    content = o.get("content") or o.get("content_text") or o.get("text")
+                    content = o.get("content")
                     if isinstance(content, list):
-                        # find first item with text
-                        for c in content:
-                            if isinstance(c, dict) and c.get("text"):
-                                return c.get("text")
+                        for part in content:
+                            if isinstance(part, dict) and part.get("text"):
+                                return part.get("text")
                     if isinstance(content, str):
                         return content
-                    # fallback to 'text' inside object
                     if o.get("text"):
                         return o.get("text")
             except Exception:
                 continue
-    # fallback to stringifying
     try:
         return json.dumps(resp)[:2000]
     except:
         return str(resp)
 
-# -------------------------
-# ManyChat send function
-# -------------------------
 def send_manychat_reply(sub_id: str, text: str, platform: str):
     url = "https://api.manychat.com/fb/sending/sendContent"
     headers = {"Authorization": f"Bearer {MANYCHAT_API_KEY}", "Content-Type": "application/json"}
@@ -234,11 +190,10 @@ def send_manychat_reply(sub_id: str, text: str, platform: str):
         log.exception("ManyChat send failed for %s", sub_id)
 
 # -------------------------
-# Main webhook endpoint
+# Webhook
 # -------------------------
 @app.route("/manychat_webhook", methods=["POST"])
 def manychat_webhook():
-    # auth
     auth = request.headers.get("Authorization", "")
     if auth != f"Bearer {MANYCHAT_SECRET_KEY}":
         return jsonify({"error": "unauthorized"}), 403
@@ -252,13 +207,10 @@ def manychat_webhook():
     platform = "Instagram" if "instagram" in str(contact.get("source", "")).lower() else "Facebook"
     last_text = (contact.get("last_text_input") or contact.get("last_input_text") or data.get("last_input") or "").strip()
 
-    # collect attachments if any (manychat uses last_attachments or custom fields)
     attachments = []
-    # try common ManyChat fields
     mc_attachments = contact.get("last_attachments") or contact.get("attachments") or contact.get("media") or []
     if isinstance(mc_attachments, list):
         for a in mc_attachments:
-            # each item may be url or dict
             if isinstance(a, dict):
                 url = a.get("url") or a.get("image_url") or a.get("file_url")
                 kind = a.get("type") or ("image" if url and url.lower().endswith((".jpg",".png",".jpeg")) else "file")
@@ -269,7 +221,6 @@ def manychat_webhook():
                 kind = "image" if url.lower().endswith((".jpg",".jpeg",".png",".webp")) else "file"
                 attachments.append({"url": url, "type": kind})
 
-    # fallback: sometimes ManyChat includes last_message with attachments
     last_message = contact.get("last_message") or {}
     if isinstance(last_message, dict):
         for key in ("image_url","file_url","audio_url","url"):
@@ -278,70 +229,55 @@ def manychat_webhook():
                 kind = "audio" if "audio" in key else ("image" if "image" in key else "file")
                 attachments.append({"url": url, "type": kind})
 
-    # store incoming user data
+    # persist incoming
     store_message(user_id, "user", last_text or "[no text]", raw=contact)
     for a in attachments:
         store_attachment(user_id, a.get("url"), kind=a.get("type"))
 
-    log.info("Queued incoming from %s (text len=%d, attachments=%d)", user_id, len(last_text), len(attachments))
+    log.info("Incoming from %s (text len=%d, attachments=%d)", user_id, len(last_text), len(attachments))
 
-    # create or reuse conversation
-    sess = create_or_refresh_session(user_id)
-    if sess is None or sess.get("__error"):
-        err = sess.get("error") if isinstance(sess, dict) else "unknown"
-        log.error("Failed creating session for %s: %s", user_id, err)
-        send_manychat_reply(user_id, "⚠ حدث خطأ أثناء إنشاء الجلسة. حاول مرة أخرى لاحقًا.", platform)
-        return jsonify({"status": "error", "reason": "session_failed"}), 500
+    # ensure conversation exists (persistent)
+    conv_id = create_conversation_for_user(user_id)
+    if not conv_id:
+        send_manychat_reply(user_id, "⚠ حدث خطأ بإنشاء الجلسة، حاول مره أخرى لاحقاً.", platform)
+        logs_col.insert_one({"type":"session_error", "user_id": user_id, "payload": contact, "ts": datetime.utcnow()})
+        return jsonify({"status": "error", "reason": "conv_create_failed"}), 500
 
-    conversation_id = sess.get("conversation_id")
-
-    # build input items (text + attachments)
+    # build items
     input_items = build_input_items(last_text, attachments)
 
-    # to keep memory small, optionally load last N messages from DB and include as context (if you prefer)
-    recent_msgs_cursor = messages_col.find({"user_id": user_id}).sort("created_at", -1).limit(MAX_MEMORY_MESSAGES)
-    recent_msgs = list(reversed(list(recent_msgs_cursor)))
-    # we won't inject them directly here because we're using conversation object — but you may choose to prepend a summary
-    # Optionally: create a short memory summary and include as system message
-    # Build a summary if too many messages (simple heuristic)
-    if len(recent_msgs) > 8:
-        # create simple summary of last few user messages
-        summary_texts = [m["content"] for m in recent_msgs[-6:] if m.get("role") == "user"]
-        summary = "ملخص سريع لآخر تفاعلات المستخدم: " + " | ".join(summary_texts)
-        # include as initial system input if you want
+    # optional: include recent local context summary if many messages
+    recent_msgs = get_recent_user_items(user_id, limit=MAX_MEMORY_MESSAGES)
+    if len(recent_msgs) > 20:
+        # build a compact summary string (very simple)
+        last_texts = [m["content"] for m in recent_msgs if m.get("role") == "user"][-10:]
+        summary = "ملخص سريع للمستخدم: " + " | ".join(last_texts)
         input_items.insert(0, {"role": "system", "content": summary})
 
-    # call Responses API
-    resp = call_responses_api(PROMPT_ID, conversation_id, input_items)
-
+    # call OpenAI Responses
+    resp = call_responses_api(PROMPT_ID, conv_id, input_items)
     if resp.get("__error"):
-        log.error("OpenAI returned error for %s: %s", user_id, resp.get("error"))
-        send_manychat_reply(user_id, "⚠ حدث خطأ أثناء معالجة الطلب. سيعمل فريقنا على إصلاحه.", platform)
-        logs_col.insert_one({"type": "openai_error", "user_id": user_id, "error": resp.get("error"), "raw": resp, "ts": datetime.utcnow()})
-        return jsonify({"status": "error", "reason": "openai_error"}), 500
+        log.error("OpenAI error for %s: %s", user_id, resp.get("error"))
+        logs_col.insert_one({"type":"openai_error", "user_id": user_id, "error": resp.get("error"), "raw": resp, "ts": datetime.utcnow()})
+        send_manychat_reply(user_id, "⚠ حدث خطأ أثناء معالجة طلبك. حاول مرة أخرى لاحقاً.", platform)
+        return jsonify({"status": "error", "reason": "openai_failed"}), 500
 
-    # extract assistant reply text
     assistant_text = extract_reply_text(resp) or "⚠ لم يتم توليد رد."
+    # persist assistant reply
+    store_message(user_id, "assistant", assistant_text, raw=resp, response_id=resp.get("id"))
 
-    # store assistant reply in DB
-    store_message(user_id, "assistant", assistant_text, raw=resp)
-
-    # if response contains attachments/tool outputs, try to detect them and store
-    # e.g., resp.get("output") may contain items with URLs
+    # try to detect and store any urls in outputs
     out_items = resp.get("output") or resp.get("outputs") or resp.get("items") or []
     if isinstance(out_items, list):
         for o in out_items:
             try:
                 if isinstance(o, dict):
-                    # try to find URLs in nested content
                     c = o.get("content") or []
                     if isinstance(c, list):
                         for part in c:
                             if isinstance(part, dict):
                                 text_val = part.get("text") or ""
-                                # naive URL extraction
                                 if isinstance(text_val, str) and ("http://" in text_val or "https://" in text_val):
-                                    # find urls
                                     words = text_val.split()
                                     for w in words:
                                         if w.startswith("http://") or w.startswith("https://"):
@@ -349,21 +285,20 @@ def manychat_webhook():
             except Exception:
                 continue
 
-    # send reply to ManyChat
+    # send to ManyChat
     send_manychat_reply(user_id, assistant_text, platform)
-
     # update session timestamp
-    sessions_col.update_one({"user_id": user_id}, {"$set": {"updated_at": now_ts()}})
+    sessions_col.update_one({"user_id": user_id}, {"$set": {"updated_at": now_ts()}}, upsert=False)
 
     return jsonify({"status": "ok"}), 200
 
 # -------------------------
-# Health endpoint
+# Health
 # -------------------------
 @app.route("/")
 def home():
-    return "🔥 ManyChat ↔ Responses API proxy – with Mongo Memory"
+    return "🔥 ManyChat ↔ Responses API proxy – persistent memory (Mongo)"
 
 if __name__ == "__main__":
-    log.info("Starting ManyChat-Responses proxy...")
+    log.info("Starting ManyChat-Responses proxy (persistent memory)...")
     app.run(host="0.0.0.0", port=PORT)
