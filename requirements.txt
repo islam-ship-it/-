@@ -5,7 +5,8 @@ pymongo==4.15.4
 requests==2.32.5
 
 # مهم جداً — النسخة اللي بدون مشاكل مع Responses API
-openai==1.55.3
+
 
 # لضمان التوافق مع Python 3.11
 httpx==0.28.1
+openai==1.59.6
