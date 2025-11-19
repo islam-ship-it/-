@@ -46,7 +46,7 @@ if MONGO_URI:
         use_mongo = False
 
 # --------- app ----------
-app = Flask(_name_)
+app = Flask(__name__)
 
 # --------- batching state ----------
 pending_messages = {}   # user_id -> {"texts": [], "session": session_doc}
@@ -221,6 +221,6 @@ def manychat_webhook():
 def home():
     return "✅ Workflow proxy running"
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     logger.info("Starting app")
     app.run(host="0.0.0.0", port=PORT)
