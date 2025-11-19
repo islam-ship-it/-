@@ -8,21 +8,30 @@ from datetime import datetime, timezone
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 
-# --------- logging ----------
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# ------------------------------------------------------
+# LOGGING
+# ------------------------------------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger("chatkit-proxy")
 
-# --------- env ----------
+# ------------------------------------------------------
+# ENV
+# ------------------------------------------------------
 load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-WORKFLOW_ID = os.getenv("WORKFLOW_ID")   # wf_xxx
+WORKFLOW_ID = os.getenv("WORKFLOW_ID")   # wf_....
 MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
 MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
 PORT = int(os.getenv("PORT", 5000))
 BATCH_WAIT_TIME = float(os.getenv("BATCH_WAIT_TIME", 2.0))
 
-# sanity
-missing = [k for k in ("OPENAI_API_KEY", "WORKFLOW_ID", "MANYCHAT_API_KEY", "MANYCHAT_SECRET_KEY") if not globals().get(k)]
+missing = [
+    k for k in ("OPENAI_API_KEY", "WORKFLOW_ID", "MANYCHAT_API_KEY", "MANYCHAT_SECRET_KEY")
+    if not globals().get(k)
+]
 if missing:
     logger.critical(f"Missing env vars: {missing}")
     raise SystemExit(1)
@@ -34,7 +43,7 @@ message_timers = {}
 processing_locks = {}
 
 # ------------------------------------------------------
-# 🔥 ChatKit API Final Working Version
+# CHATKIT SESSION API (THE CORRECT ONE)
 # ------------------------------------------------------
 def call_chatkit(workflow_id, user_id, message_text):
     url = "https://api.openai.com/v1/chatkit/sessions"
@@ -46,7 +55,9 @@ def call_chatkit(workflow_id, user_id, message_text):
     }
 
     payload = {
-        "workflow": {"id": workflow_id},
+        "workflow": {
+            "id": workflow_id        # ← IMPORTANT: must be inside workflow{}
+        },
         "user": user_id,
         "messages": [
             {
@@ -57,17 +68,22 @@ def call_chatkit(workflow_id, user_id, message_text):
     }
 
     try:
-        r = requests.post(url, json=payload, headers=headers, timeout=50)
-        r.raise_for_status()
+        r = requests.post(url, json=payload, headers=headers, timeout=60)
+
+        if r.status_code >= 400:
+            logger.error("❌ ChatKit Error: %s", r)
+            logger.error("📩 ChatKit Response Body: %s", r.text)
+            return {"__error": True, "body": r.text, "status": r.status_code}
+
         return r.json()
 
     except Exception as e:
-        logger.error("❌ ChatKit Error: %s", getattr(e, "response", None))
-        return {"__error": True}
+        logger.exception("❌ ChatKit Exception")
+        return {"__error": True, "exception": True}
 
 
 # ------------------------------------------------------
-# Extract reply (assistant message)
+# EXTRACT REPLY
 # ------------------------------------------------------
 def extract_reply(resp):
     try:
@@ -81,11 +97,14 @@ def extract_reply(resp):
 
 
 # ------------------------------------------------------
-# ManyChat reply
+# SEND MANYCHAT
 # ------------------------------------------------------
 def send_manychat_reply(subscriber_id, reply, platform):
     url = "https://api.manychat.com/fb/sending/sendContent"
-    headers = {"Authorization": f"Bearer {MANYCHAT_API_KEY}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {MANYCHAT_API_KEY}",
+        "Content-Type": "application/json"
+    }
 
     channel = "instagram" if platform.lower() == "instagram" else "facebook"
 
@@ -103,7 +122,7 @@ def send_manychat_reply(subscriber_id, reply, platform):
     try:
         r = requests.post(url, json=payload, headers=headers, timeout=20)
         r.raise_for_status()
-        logger.info(f"📨 sent reply to {subscriber_id}")
+        logger.info(f"📨 Sent reply to {subscriber_id}")
         return True
     except Exception:
         logger.exception("❌ ManyChat Send Failed")
@@ -111,7 +130,7 @@ def send_manychat_reply(subscriber_id, reply, platform):
 
 
 # ------------------------------------------------------
-# Processing logic (batching)
+# PROCESSING (BATCH)
 # ------------------------------------------------------
 def schedule_processing(user_id):
     lock = processing_locks.setdefault(user_id, threading.Lock())
@@ -126,6 +145,7 @@ def schedule_processing(user_id):
 
         logger.info(f"⚙️ Processing for {user_id}: {text}")
 
+        # Call ChatKit
         resp = call_chatkit(WORKFLOW_ID, user_id, text)
 
         if resp.get("__error"):
@@ -135,6 +155,7 @@ def schedule_processing(user_id):
 
         send_manychat_reply(user_id, reply, platform)
 
+        # Cleanup
         pending_messages.pop(user_id, None)
         t = message_timers.pop(user_id, None)
         if t:
@@ -163,7 +184,7 @@ def add_message(user_id, text, platform):
 
 
 # ------------------------------------------------------
-# Webhook
+# MANYCHAT WEBHOOK
 # ------------------------------------------------------
 @app.route("/manychat_webhook", methods=["POST"])
 def manychat_webhook():
