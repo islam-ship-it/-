@@ -1,6 +1,6 @@
 flask
-requests
-python-dotenv
-openai==1.40.0
-pymongo
 gunicorn
+python-dotenv
+openai==1.55.3
+pymongo
+requests
