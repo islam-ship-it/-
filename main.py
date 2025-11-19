@@ -3,270 +3,150 @@ import os
 import json
 import logging
 import time
-import uuid
 from datetime import datetime
-from typing import List, Optional, Dict
+from typing import Optional, List
 
 import requests
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
+from openai import OpenAI
 from pymongo import MongoClient, ASCENDING
-from pymongo.errors import DuplicateKeyError
 
-# ------------------------------------------
+# -------------------------
 # Logging
-# ------------------------------------------
+# -------------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-log = logging.getLogger("manychat-openai-bot")
+log = logging.getLogger("manychat-assistant-mongo")
 
-# ------------------------------------------
-# Load ENV
-# ------------------------------------------
+# -------------------------
+# Load env
+# -------------------------
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-PROMPT_ID = os.getenv("PROMPT_ID")               # pmpt_xxx (Studio Prompt or Workflow)
+ASSISTANT_ID = os.getenv("ASSISTANT_ID")
 MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
 MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
 MONGO_URI = os.getenv("MONGO_URI")
-MONGO_DB = os.getenv("MONGO_DB", "manychatdb")
+PORT = int(os.getenv("PORT", 5000))
 
-PORT = int(os.getenv("PORT", "10000"))
-MAX_SUMMARY_MESSAGES = 20
-
-if not (OPENAI_API_KEY and PROMPT_ID and MANYCHAT_API_KEY and MANYCHAT_SECRET_KEY and MONGO_URI):
-    log.critical("Missing environment variables")
+if not (OPENAI_API_KEY and ASSISTANT_ID and MANYCHAT_API_KEY and MANYCHAT_SECRET_KEY and MONGO_URI):
+    log.critical("Missing required env vars.")
     raise SystemExit(1)
 
-# ------------------------------------------
-# MongoDB
-# ------------------------------------------
-mongo = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-db = mongo[MONGO_DB]
+# -------------------------
+# OpenAI Client (OLD API)
+# -------------------------
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-sessions_col = db["bot_sessions"]
-messages_col = db["bot_messages"]
-attachments_col = db["bot_attachments"]
+# -------------------------
+# MongoDB
+# -------------------------
+mongo = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+db = mongo.get_database()
+sessions_col = db.get_collection("sessions")
+messages_col = db.get_collection("messages")
 
 sessions_col.create_index([("user_id", ASCENDING)], unique=True)
 messages_col.create_index([("user_id", ASCENDING), ("created_at", ASCENDING)])
-attachments_col.create_index([("user_id", ASCENDING), ("created_at", ASCENDING)])
 
-# ------------------------------------------
-# Flask
-# ------------------------------------------
+# -------------------------
+# Flask App
+# -------------------------
 app = Flask(__name__)
 
-# ------------------------------------------
+# -------------------------
 # Helpers
-# ------------------------------------------
-def now_ts():
-    return int(time.time())
+# -------------------------
+def get_or_create_thread(user_id):
+    session = sessions_col.find_one({"user_id": user_id})
+    if session and session.get("thread_id"):
+        return session["thread_id"]
+
+    thread = client.beta.threads.create()
+    thread_id = thread.id
+
+    sessions_col.update_one(
+        {"user_id": user_id},
+        {"$set": {"thread_id": thread_id}},
+        upsert=True
+    )
+
+    return thread_id
 
 
-def create_conversation_for_user(user_id: str) -> str:
-    """Generate local conversation_id (no OpenAI conversation API)."""
-    s = sessions_col.find_one({"user_id": user_id})
-    if s:
-        return s["conversation_id"]
+def send_to_assistant(thread_id, text):
+    client.beta.threads.messages.create(
+        thread_id=thread_id,
+        role="user",
+        content=text
+    )
 
-    conv_id = str(uuid.uuid4())
+    run = client.beta.threads.runs.create(
+        thread_id=thread_id,
+        assistant_id=ASSISTANT_ID
+    )
 
-    try:
-        sessions_col.insert_one({
-            "user_id": user_id,
-            "conversation_id": conv_id,
-            "created_at": now_ts(),
-            "updated_at": now_ts()
-        })
-    except DuplicateKeyError:
-        s = sessions_col.find_one({"user_id": user_id})
-        return s["conversation_id"]
+    while True:
+        run_status = client.beta.threads.runs.retrieve(thread_id=thread_id, run_id=run.id)
+        if run_status.status in ["completed", "failed"]:
+            break
+        time.sleep(0.5)
 
-    return conv_id
+    if run_status.status == "failed":
+        return "❌ حدث خطأ."
 
+    msgs = client.beta.threads.messages.list(thread_id=thread_id)
+    for m in reversed(msgs.data):
+        if m.role == "assistant":
+            return m.content[0].text.value
 
-def store_message(user_id, role, content, raw=None):
-    messages_col.insert_one({
-        "user_id": user_id,
-        "role": role,
-        "content": content,
-        "raw": raw or {},
-        "created_at": datetime.utcnow()
-    })
+    return "❌ لم يتم العثور على رد."
 
 
-def store_attachment(user_id, url, kind="file", meta=None):
-    attachments_col.insert_one({
-        "user_id": user_id,
-        "url": url,
-        "kind": kind,
-        "meta": meta or {},
-        "created_at": datetime.utcnow()
-    })
-
-
-def get_recent_messages(user_id, limit=40):
-    cursor = messages_col.find({"user_id": user_id}).sort("created_at", -1).limit(limit)
-    return list(reversed(list(cursor)))
-
-
-# ------------------------------------------
-# Build input items for Responses API
-# ------------------------------------------
-def build_input_items(text: str, attachments: List[dict]) -> List[dict]:
-    items = []
-
-    # main text
-    if text:
-        items.append({"text": text})
-
-    # attachments
-    for a in attachments:
-        url = a["url"]
-        kind = a.get("type", "file")
-        items.append({"text": f"[{kind}] {url}"})
-
-    return items
-
-
-# ------------------------------------------
-# 🔥 Responses API — Official REST Call (Required for PROMPT_ID)
-# ------------------------------------------
-def call_responses_api(prompt_id: str, conversation_id: str, input_items: List[dict]) -> dict:
-
-    url = "https://api.openai.com/v1/responses"
-
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json"
-    }
-
-    payload = {
-        "model": prompt_id,
-        "conversation": conversation_id,
-        "input": input_items
-    }
-
-    try:
-        res = requests.post(url, headers=headers, json=payload, timeout=45)
-        res.raise_for_status()
-        return res.json()
-    except Exception as e:
-        log.exception("Responses API Error: %s", e)
-        return {"__error": True, "error": str(e)}
-
-
-# ------------------------------------------
-# Extract final assistant reply text
-# ------------------------------------------
-def extract_reply_text(resp: dict) -> str:
-
-    if resp.get("output_text"):
-        return resp["output_text"]
-
-    output = resp.get("output") or resp.get("outputs") or resp.get("items") or []
-
-    if isinstance(output, list):
-        for item in output:
-            content = item.get("content")
-            if isinstance(content, list):
-                for part in content:
-                    if part.get("text"):
-                        return part["text"]
-
-    return "⚠ لم يتم توليد رد."
-
-
-# ------------------------------------------
-# ManyChat Sender
-# ------------------------------------------
 def send_manychat_reply(sub_id, text, platform):
     url = "https://api.manychat.com/fb/sending/sendContent"
-
     headers = {
         "Authorization": f"Bearer {MANYCHAT_API_KEY}",
         "Content-Type": "application/json"
     }
 
-    channel = "instagram" if platform.lower() == "instagram" else "facebook"
-
     payload = {
         "subscriber_id": str(sub_id),
-        "channel": channel,
+        "channel": "instagram" if platform == "instagram" else "facebook",
         "data": {
             "version": "v2",
-            "content": {"messages": [{"type": "text", "text": text}]}
+            "content": {
+                "messages": [{"type": "text", "text": text}]
+            }
         }
     }
 
-    try:
-        requests.post(url, headers=headers, json=payload, timeout=20)
-    except Exception:
-        log.exception("Failed to send ManyChat reply to %s", sub_id)
+    requests.post(url, headers=headers, json=payload)
 
 
-# ------------------------------------------
-# Webhook
-# ------------------------------------------
 @app.route("/manychat_webhook", methods=["POST"])
-def webhook():
-
+def manychat_webhook():
     if request.headers.get("Authorization") != f"Bearer {MANYCHAT_SECRET_KEY}":
         return jsonify({"error": "unauthorized"}), 403
 
     data = request.get_json(force=True)
     contact = data.get("full_contact") or {}
 
-    user_id = str(contact.get("id") or contact.get("subscriber_id") or "unknown")
+    user_id = str(contact.get("id") or contact.get("subscriber_id"))
     text = (contact.get("last_text_input") or "").strip()
-    platform = "Instagram" if "instagram" in str(contact.get("source", "")).lower() else "Facebook"
+    platform = "instagram" if "instagram" in str(contact.get("source", "")).lower() else "facebook"
 
-    # attachments
-    attachments = []
-    for a in contact.get("last_attachments", []):
-        url = a.get("url") or a.get("image_url") or a.get("file_url")
-        if url:
-            attachments.append({"url": url, "type": a.get("type", "file")})
+    thread_id = get_or_create_thread(user_id)
+    reply = send_to_assistant(thread_id, text)
 
-    # store incoming
-    store_message(user_id, "user", text or "[no text]", raw=contact)
-    for a in attachments:
-        store_attachment(user_id, a["url"], a["type"])
-
-    # local conversation ID
-    conv_id = create_conversation_for_user(user_id)
-
-    # build inputs
-    input_items = build_input_items(text, attachments)
-
-    # memory summary
-    msgs = get_recent_messages(user_id)
-    if len(msgs) > MAX_SUMMARY_MESSAGES:
-        summary = "ملخص سابق: " + " | ".join(m["content"] for m in msgs[-10:])
-        input_items.insert(0, {"text": summary})
-
-    # call Responses API
-    resp = call_responses_api(PROMPT_ID, conv_id, input_items)
-
-    if resp.get("__error"):
-        send_manychat_reply(user_id, "⚠ حدث خطأ أثناء معالجة طلبك.", platform)
-        return jsonify({"error": "openai_failed"}), 500
-
-    reply = extract_reply_text(resp)
-
-    # save assistant reply
-    store_message(user_id, "assistant", reply, raw=resp)
-
-    # send to ManyChat
     send_manychat_reply(user_id, reply, platform)
-
-    return jsonify({"status": "ok"}), 200
+    return jsonify({"status": "ok"})
 
 
 @app.route("/")
 def home():
-    return "🔥 ManyChat ↔ OpenAI Responses API — Bot Running Successfully!"
+    return "🔥 ManyChat ↔ OpenAI Assistants API (OLD) — Running!"
 
 
 if __name__ == "__main__":
