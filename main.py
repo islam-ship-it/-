@@ -1,49 +1,82 @@
 import os
-import time
-import threading
+import json
 import logging
-from flask import Flask, request, jsonify
 import requests
+from flask import Flask, request, jsonify
+from dotenv import load_dotenv
 
 # -------------------------
-# Logging
+# إعدادات
 # -------------------------
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
+load_dotenv()
 
-# -------------------------
-# ENV
-# -------------------------
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-WORKFLOW_ID = "wf_691ac2e8aa388190a7b428f30a6ed0170545bfe71974583"
-WORKFLOW_VERSION = "6"
-
+WORKFLOW_ID = os.getenv("WORKFLOW_ID")     # مثال wf_xxxxx
+WORKFLOW_VERSION = os.getenv("WORKFLOW_VERSION")  # مثال "version=6"
 MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
 MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
-BATCH_WAIT_TIME = 2.0
+
+# تحقق من المتغيرات
+required = {
+    "OPENAI_API_KEY": OPENAI_API_KEY,
+    "WORKFLOW_ID": WORKFLOW_ID,
+    "WORKFLOW_VERSION": WORKFLOW_VERSION,
+    "MANYCHAT_API_KEY": MANYCHAT_API_KEY,
+    "MANYCHAT_SECRET_KEY": MANYCHAT_SECRET_KEY
+}
+
+missing = [k for k,v in required.items() if not v]
+if missing:
+    raise SystemExit(f"❌ Error: Missing environment variables: {missing}")
 
 # -------------------------
-# Flask app
+# إعداد Flask
 # -------------------------
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
 
 # -------------------------
-# Temporary memory (no Mongo)
+# استدعاء Workflow الجديد
 # -------------------------
-pending_messages = {}
-message_timers = {}
-locks = {}
-user_sessions = {}   # memory sessions
+def call_workflow(user_message: str):
+    url = "https://api.openai.com/v1/workflows/runs"
 
-# -------------------------
-# Send to ManyChat
-# -------------------------
-def send_reply(subscriber_id, text, platform):
-    url = "https://api.manychat.com/fb/sending/sendContent"
+    payload = {
+        "workflow_id": WORKFLOW_ID,
+        "version": WORKFLOW_VERSION,       # "version=6"
+        "input": {
+            "user_message": user_message
+        }
+    }
+
     headers = {
-        "Authorization": f"Bearer {MANYCHAT_API_KEY}",
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json"
     }
+
+    logging.info("📡 Calling OpenAI Workflow...")
+
+    response = requests.post(url, headers=headers, json=payload)
+
+    if response.status_code != 200:
+        logging.error(f"❌ Workflow Error: {response.text}")
+        return "⚠️ حصل خطأ أثناء تشغيل سير العمل."
+
+    data = response.json()
+
+    # استخراج نص الرد من workflow
+    try:
+        output_text = data["output"]["final_text"]
+        return output_text
+    except:
+        return "⚠️ لم أستطع استخراج الرد من سير العمل."
+
+# -------------------------
+# إرسال الرد إلى ManyChat
+# -------------------------
+def send_manychat_reply(subscriber_id, text, platform="facebook"):
+    url = "https://api.manychat.com/fb/sending/sendContent"
+
     channel = "instagram" if platform.lower() == "instagram" else "facebook"
 
     payload = {
@@ -52,140 +85,65 @@ def send_reply(subscriber_id, text, platform):
             "version": "v2",
             "content": {
                 "messages": [
-                    {"type": "text", "text": text.strip()}
+                    {"type": "text", "text": text}
                 ]
             }
         },
         "channel": channel
     }
 
+    headers = {
+        "Authorization": f"Bearer {MANYCHAT_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
     try:
-        r = requests.post(url, json=payload, headers=headers)
+        r = requests.post(url, headers=headers, json=payload)
         r.raise_for_status()
-        logger.info(f"ManyChat sent to {subscriber_id}")
-    except:
-        logger.exception("❌ ManyChat send failed")
-
-# -------------------------
-# Workflow REST Call
-# -------------------------
-def call_workflow(text, session_id):
-    try:
-        logger.info("Calling Workflow via REST...")
-
-        url = f"https://api.openai.com/v1/workflows/{WORKFLOW_ID}/runs?version={WORKFLOW_VERSION}"
-
-        payload = {
-            "input": {
-                "user_input": text,
-                "session_id": session_id
-            }
-        }
-
-        headers = {
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json"
-        }
-
-        r = requests.post(url, json=payload, headers=headers, timeout=30)
-        r.raise_for_status()
-
-        resp = r.json()
-
-        try:
-            return resp["output"]["assistant_response"]
-        except:
-            return "لم أستطع استخراج رد الوكيل."
-
-    except Exception:
-        logger.exception("❌ Workflow REST failed")
-        return "حصل خطأ أثناء تشغيل الوكيل."
-
-# -------------------------
-# Batch Processing
-# -------------------------
-def process_user(user_id):
-    lock = locks.setdefault(user_id, threading.Lock())
-
-    with lock:
-        if user_id not in pending_messages:
-            return
-
-        session = user_sessions.get(user_id, {"platform": "facebook"})
-        platform = session["platform"]
-        texts = pending_messages[user_id]
-        combined = "\n".join(texts).strip()
-
-        logger.info(f"[{user_id}] Processing batch: {combined}")
-
-        reply = call_workflow(combined, user_id)
-
-        send_reply(user_id, reply, platform)
-
-        pending_messages.pop(user_id, None)
-        timer = message_timers.pop(user_id, None)
-        if timer:
-            timer.cancel()
-
-        logger.info(f"[{user_id}] Done")
-
-def add_to_queue(session, text):
-    user_id = session["id"]
-
-    if user_id in message_timers:
-        message_timers[user_id].cancel()
-
-    if user_id not in pending_messages:
-        pending_messages[user_id] = []
-
-    pending_messages[user_id].append(text)
-
-    logger.info(f"Queued message for {user_id} (batch={len(pending_messages[user_id])})")
-
-    t = threading.Timer(BATCH_WAIT_TIME, process_user, args=[user_id])
-    message_timers[user_id] = t
-    t.start()
-
+        logging.info(f"📨 Sent reply to {subscriber_id}")
+    except Exception as e:
+        logging.error(f"❌ ManyChat Error: {e}")
 
 # -------------------------
 # Webhook
 # -------------------------
 @app.route("/manychat_webhook", methods=["POST"])
-def webhook():
+def manychat_webhook():
+    # تحقق من المفتاح
     auth = request.headers.get("Authorization")
     if auth != f"Bearer {MANYCHAT_SECRET_KEY}":
-        return jsonify({"error": "unauthorized"}), 403
+        return jsonify({"error": "Unauthorized"}), 403
 
     data = request.get_json(force=True)
     contact = data.get("full_contact")
 
     if not contact:
-        return jsonify({"error": "no-contact"}), 400
+        return jsonify({"error": "invalid"}), 400
 
-    user_id = str(contact["id"])
-    platform = "instagram" if "instagram" in contact.get("source", "").lower() else "facebook"
+    subscriber_id = contact.get("id")
+    user_msg = contact.get("last_text_input") or contact.get("last_input_text")
 
-    user_sessions[user_id] = {"id": user_id, "platform": platform}
+    if not user_msg:
+        return jsonify({"status": "no_input"}), 200
 
-    last_input = (
-        contact.get("last_text_input")
-        or contact.get("last_input_text")
-        or data.get("last_input")
-    )
+    logging.info(f"📩 Received: {user_msg}")
 
-    if not last_input:
-        return jsonify({"status": "no_input"})
+    ai_reply = call_workflow(user_msg)
 
-    add_to_queue(user_sessions[user_id], last_input)
+    send_manychat_reply(subscriber_id, ai_reply)
 
-    return jsonify({"status": "received"})
+    return jsonify({"status": "done"})
 
-
+# -------------------------
+# صفحة رئيسية
+# -------------------------
 @app.route("/")
 def home():
     return "Workflow Bot Running"
 
-
+# -------------------------
+# تشغيل
+# -------------------------
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 5000))
+    port = int(os.getenv("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
