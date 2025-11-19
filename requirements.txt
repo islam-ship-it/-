@@ -1,12 +1,6 @@
-flask==3.1.2
-gunicorn==23.0.0
-python-dotenv==1.2.1
-pymongo==4.15.4
-requests==2.32.5
-
-# مهم جداً — النسخة اللي بدون مشاكل مع Responses API
-
-
-# لضمان التوافق مع Python 3.11
-httpx==0.28.1
-openai==1.59.6
+flask==2.3.3
+python-dotenv==1.0.0
+requests==2.31.0
+pymongo==4.5.0
+openai==0.28.1
+gunicorn==21.2.0
