@@ -80,7 +80,6 @@ def create_conversation_for_user(user_id: str) -> str:
             "updated_at": now_ts()
         })
     except DuplicateKeyError:
-        # if race condition
         s = sessions_col.find_one({"user_id": user_id})
         return s["conversation_id"]
 
@@ -112,21 +111,27 @@ def get_recent_messages(user_id, limit=40):
     return list(reversed(list(cursor)))
 
 
-def build_input_items(user_text, attachments):
+# ------------------------------------------
+# Build input items for Responses API
+# ------------------------------------------
+def build_input_items(text: str, attachments: List[dict]) -> List[dict]:
     items = []
-    if user_text:
-        items.append({"role": "user", "content": user_text})
 
+    # main text
+    if text:
+        items.append({"text": text})
+
+    # attachments
     for a in attachments:
         url = a["url"]
         kind = a.get("type", "file")
-        items.append({"role": "user", "content": f"[{kind}] {url}"})
+        items.append({"text": f"[{kind}] {url}"})
 
     return items
 
 
 # ------------------------------------------
-# 🔥 Responses API — Official REST Call
+# 🔥 Responses API — Official REST Call (Required for PROMPT_ID)
 # ------------------------------------------
 def call_responses_api(prompt_id: str, conversation_id: str, input_items: List[dict]) -> dict:
 
@@ -138,13 +143,13 @@ def call_responses_api(prompt_id: str, conversation_id: str, input_items: List[d
     }
 
     payload = {
-        "model": prompt_id,                 # this is your STUDIO PROMPT/WORKFLOW
-        "input": input_items,               # user messages
-        "conversation": conversation_id     # local conversation id
+        "model": prompt_id,
+        "conversation": conversation_id,
+        "input": input_items
     }
 
     try:
-        res = requests.post(url, headers=headers, json=payload, timeout=40)
+        res = requests.post(url, headers=headers, json=payload, timeout=45)
         res.raise_for_status()
         return res.json()
     except Exception as e:
@@ -153,16 +158,15 @@ def call_responses_api(prompt_id: str, conversation_id: str, input_items: List[d
 
 
 # ------------------------------------------
-# Extract final reply text from responses API
+# Extract final assistant reply text
 # ------------------------------------------
 def extract_reply_text(resp: dict) -> str:
 
-    # direct output_text
     if resp.get("output_text"):
         return resp["output_text"]
 
-    # check output items
     output = resp.get("output") or resp.get("outputs") or resp.get("items") or []
+
     if isinstance(output, list):
         for item in output:
             content = item.get("content")
@@ -175,11 +179,15 @@ def extract_reply_text(resp: dict) -> str:
 
 
 # ------------------------------------------
-# ManyChat sender
+# ManyChat Sender
 # ------------------------------------------
 def send_manychat_reply(sub_id, text, platform):
     url = "https://api.manychat.com/fb/sending/sendContent"
-    headers = {"Authorization": f"Bearer {MANYCHAT_API_KEY}", "Content-Type": "application/json"}
+
+    headers = {
+        "Authorization": f"Bearer {MANYCHAT_API_KEY}",
+        "Content-Type": "application/json"
+    }
 
     channel = "instagram" if platform.lower() == "instagram" else "facebook"
 
@@ -193,10 +201,9 @@ def send_manychat_reply(sub_id, text, platform):
     }
 
     try:
-        r = requests.post(url, headers=headers, json=payload, timeout=20)
-        r.raise_for_status()
+        requests.post(url, headers=headers, json=payload, timeout=20)
     except Exception:
-        log.exception("Failed sending ManyChat reply to %s", sub_id)
+        log.exception("Failed to send ManyChat reply to %s", sub_id)
 
 
 # ------------------------------------------
@@ -222,37 +229,36 @@ def webhook():
         if url:
             attachments.append({"url": url, "type": a.get("type", "file")})
 
-    # Save incoming
+    # store incoming
     store_message(user_id, "user", text or "[no text]", raw=contact)
     for a in attachments:
         store_attachment(user_id, a["url"], a["type"])
 
-    # Local conversation ID
+    # local conversation ID
     conv_id = create_conversation_for_user(user_id)
 
-    # Build input
-    items = build_input_items(text, attachments)
+    # build inputs
+    input_items = build_input_items(text, attachments)
 
-    # Optional memory summary
+    # memory summary
     msgs = get_recent_messages(user_id)
     if len(msgs) > MAX_SUMMARY_MESSAGES:
         summary = "ملخص سابق: " + " | ".join(m["content"] for m in msgs[-10:])
-        items.insert(0, {"role": "system", "content": summary})
+        input_items.insert(0, {"text": summary})
 
-    # Call Responses API
-    resp = call_responses_api(PROMPT_ID, conv_id, items)
+    # call Responses API
+    resp = call_responses_api(PROMPT_ID, conv_id, input_items)
 
     if resp.get("__error"):
-        send_manychat_reply(user_id, "⚠ حدث خطأ أثناء المعالجة.", platform)
+        send_manychat_reply(user_id, "⚠ حدث خطأ أثناء معالجة طلبك.", platform)
         return jsonify({"error": "openai_failed"}), 500
 
-    # Extract reply
     reply = extract_reply_text(resp)
 
-    # Save assistant reply
+    # save assistant reply
     store_message(user_id, "assistant", reply, raw=resp)
 
-    # Send to ManyChat
+    # send to ManyChat
     send_manychat_reply(user_id, reply, platform)
 
     return jsonify({"status": "ok"}), 200
@@ -260,7 +266,7 @@ def webhook():
 
 @app.route("/")
 def home():
-    return "🔥 ManyChat ↔ OpenAI Responses API — Bot is running!"
+    return "🔥 ManyChat ↔ OpenAI Responses API — Bot Running Successfully!"
 
 
 if __name__ == "__main__":
