@@ -1,288 +1,265 @@
-"""
-main_v22.py
-
-Fixed version v22 of the webhook/processor that:
-- Avoids sending huge concatenated strings to the Threads API
-- Sends a structured payload (JSON) with limited history (last N messages)
-- If payload still too large, progressively truncates history and then summarizes it using the assistant
-- Keeps per-user locks/queues to avoid overlapping runs
-- Supports text + image URLs + audio (audio transcribed elsewhere or passed as text)
-- Clear logging and safe error handling
-
-This file is intentionally self-contained; adapt parts (OpenAI model names, DB, flask configuration)
-for your environment and keys.
-"""
+# main.py
+# نسخة v23 — معالج Webhook ManyChat مُنظّم، يدعم نصوص، صور، وصوت (روابط)،
+# يدير حجم المحتوى قبل الإرسال إلى OpenAI Threads API لتجنُّب خطأ string_above_max_length
+# ملاحظات:  - اضبط متغيرات البيئة أدناه
+#            - هذا ملف مستقل يمكن استبداله مباشرة
 
 import os
+import io
 import json
-import logging
-import threading
 import time
-from typing import List, Dict, Any, Optional
+import logging
+import asyncio
+import traceback
+from typing import Dict, Any, List, Optional
+from urllib.parse import urlparse
+
+import requests
 from flask import Flask, request, jsonify
 
-# Make sure openai package is installed and configured. Uses OpenAI Python SDK v1-style client.
+# استخدام عميل OpenAI الرسمي
 try:
     from openai import OpenAI
 except Exception:
-    # If import fails, raise a helpful error when starting.
-    raise
+    # إذا لم يكن متاحًا بنفس الاسم، فحاول الاستيراد القديم كنسخة احتياطية
+    import openai
 
-# ------------------- Config -------------------
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-if not OPENAI_API_KEY:
-    raise RuntimeError("OPENAI_API_KEY environment variable required")
+    class OpenAI:
+        def __init__(self, **kwargs):
+            self.__client = openai
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+        def __getattr__(self, name):
+            return getattr(self.__client, name)
 
-# Limits and behavior tuning
-MAX_CONTENT_CHARS = 250_000  # safe margin under 256k limit
-HISTORY_MAX_MESSAGES = 6     # keep last 6 messages (adjustable)
-SUMMARY_MODEL = "gpt-4o-mini"  # change to available summarization model in your account
-SUMMARY_MAX_TOKENS = 256
-THREADS_API_PATH_TEMPLATE = "/v1/threads/{thread_id}/messages"
-
-# Per-user locks to avoid concurrent processors racing
-user_locks: Dict[str, threading.Lock] = {}
-user_locks_mutex = threading.Lock()
-
-# Basic logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+# ---------- إعداد اللوج ----------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+)
 logger = logging.getLogger(__name__)
 
-# Flask app
+# ---------- إعداد التطبيق والمتغيرات ----------
 app = Flask(__name__)
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+OPENAI_API_BASE = os.environ.get("OPENAI_API_BASE")  # إن كنت تستخدم بنية خاصة
+THREADS_API_MAX_CONTENT = 256000  # حد تقريبى من الخطأ الذي ظهر
+
+# اختيارات التهيئة
+ASSISTANT_THREAD_ID_TEMPLATE = os.environ.get("ASSISTANT_THREAD_ID_TEMPLATE", "thread_{user_id}")
+# مثال: "thread_{user_id}" — ستُستبدل {user_id} بمعرف المستخدم من ManyChat
+
+# تهيئة العميل
+client = OpenAI(api_key=OPENAI_API_KEY)
+
+# ---------- أدوات مساعدة ----------
+
+def safe_get(d: Dict[str, Any], *keys, default=None):
+    cur = d
+    for k in keys:
+        if not isinstance(cur, dict) or k not in cur:
+            return default
+        cur = cur[k]
+    return cur
 
 
-# ------------------- Utilities -------------------
-
-def get_user_lock(user_id: str) -> threading.Lock:
-    """Return a lock object for a given user id (create if absent)."""
-    with user_locks_mutex:
-        if user_id not in user_locks:
-            user_locks[user_id] = threading.Lock()
-        return user_locks[user_id]
-
-
-def last_n_history(history: List[Dict[str, Any]], n: int = HISTORY_MAX_MESSAGES) -> List[Dict[str, Any]]:
-    """Return the last n items of conversation history, preserving order oldest->newest."""
-    if not history:
-        return []
-    return history[-n:]
-
-
-def build_structured_payload(
-    user_text: str,
-    history: List[Dict[str, Any]],
-    images: Optional[List[str]] = None,
-    audio_texts: Optional[List[str]] = None,
-) -> Dict[str, Any]:
-    """Construct a JSON-serializable structured payload to send to the Threads/messages API.
-
-    Payload format:
-    {
-      "type": "conversation_input",
-      "text": "...",
-      "images": [...],
-      "audio_texts": [...],
-      "history": [{"role":"user","text":"..."}, {"role":"assistant","text":"..."}]
-    }
+def extract_text_from_full_contact(full_contact: Dict[str, Any]) -> str:
+    """According to logs, ManyChat puts latest user text in full_contact['last_input'].
+    Fall back to other fields if missing.
     """
-    payload = {
-        "type": "conversation_input",
-        "text": user_text or "",
-        "images": images or [],
-        "audio_texts": audio_texts or [],
-        "history": last_n_history(history, HISTORY_MAX_MESSAGES),
-    }
+    text = safe_get(full_contact, "last_input")
+    if text:
+        return str(text)
+
+    # Fallbacks (kept short and safe)
+    for candidate in [
+        safe_get(full_contact, "messages", 0, "text"),
+        safe_get(full_contact, "message", "text"),
+        safe_get(full_contact, "last_message", "text"),
+    ]:
+        if candidate:
+            return str(candidate)
+
+    return ""
+
+
+def extract_attachment(full_contact: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return attachment dict if present with fields: type, url, filename(optional)
+    ManyChat may include attachments in different keys; check several.
+    """
+    # Most reliable try
+    att = safe_get(full_contact, "last_attachment") or safe_get(full_contact, "attachment")
+    if isinstance(att, dict) and att.get("url"):
+        return att
+
+    # Try nested messages
+    messages = full_contact.get("messages") or []
+    if messages and isinstance(messages, list):
+        for m in messages:
+            if isinstance(m, dict) and m.get("attachment"):
+                a = m.get("attachment")
+                if isinstance(a, dict) and a.get("url"):
+                    return a
+    return None
+
+
+def build_enriched_content(user_id: str, user_text: str, attachment: Optional[Dict[str, Any]], history: List[str]) -> str:
+    """Create a single string payload but ensure it's under THREADS_API_MAX_CONTENT.
+    Strategy:
+      1) Start with user_text + attachment metadata
+      2) Append as much recent history as fits
+      3) If still too long, truncate the oldest history or compress with simple summarization
+    """
+    parts: List[str] = []
+    parts.append(f"[user_id:{user_id}]")
+    if user_text:
+        parts.append("[user_text]")
+        parts.append(user_text)
+
+    if attachment:
+        parts.append("[attachment]")
+        att_type = attachment.get("type") or attachment.get("mime_type") or guess_type_from_url(attachment.get("url"))
+        parts.append(f"type={att_type}")
+        parts.append(f"url={attachment.get('url')}")
+
+    if history:
+        parts.append("[recent_history]")
+        # append from newest to oldest until length limit
+        for h in reversed(history):
+            parts.append(h)
+            candidate = "\n".join(parts)
+            if len(candidate) > THREADS_API_MAX_CONTENT:
+                parts.pop()  # remove the last added history that broke the limit
+                break
+
+    payload = "\n".join(parts)
+
+    # If payload still exceeds limit (rare), aggressively truncate user_text
+    if len(payload) > THREADS_API_MAX_CONTENT:
+        # keep first N chars of user_text
+        keep = THREADS_API_MAX_CONTENT - 2000
+        if keep < 100:
+            keep = 100
+        truncated_text = (user_text[:keep] + "... [truncated]") if user_text else ""
+        # rebuild minimal payload
+        minimal = f"[user_id:{user_id}]\n[user_text]\n{truncated_text}"
+        if attachment:
+            minimal += f"\n[attachment]\ntype={att_type}\nurl={attachment.get('url')}"
+        payload = minimal[:THREADS_API_MAX_CONTENT]
+
     return payload
 
 
-def safe_serialize_payload(payload: Dict[str, Any]) -> str:
-    """Serialize payload to JSON string. If the serialized size exceeds MAX_CONTENT_CHARS,
-    progressively trim the history and, if necessary, request a summarized history using the summarizer.
+def guess_type_from_url(url: Optional[str]) -> str:
+    if not url:
+        return "unknown"
+    path = urlparse(url).path.lower()
+    if path.endswith(('.mp3', '.wav', '.m4a', '.ogg')):
+        return 'audio'
+    if path.endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')):
+        return 'image'
+    return 'file'
+
+
+async def post_to_threads(thread_id: str, role: str, content: str, max_retries: int = 3) -> Dict[str, Any]:
+    """Post message to OpenAI Threads API (beta/messages). Uses asyncio.to_thread to keep compatibility.
+    Returns API response dict.
     """
-    payload_copy = dict(payload)
-
-    serialized = json.dumps(payload_copy, ensure_ascii=False)
-    if len(serialized) <= MAX_CONTENT_CHARS:
-        return serialized
-
-    # 1) Trim history count gradually until we fall under the limit
-    history = payload_copy.get("history", [])
-    while len(history) > 0:
-        history = history[1:]  # drop the oldest one
-        payload_copy["history"] = history
-        serialized = json.dumps(payload_copy, ensure_ascii=False)
-        if len(serialized) <= MAX_CONTENT_CHARS:
-            return serialized
-
-    # 2) If still too large, produce a summary of the original history and include the summary only
-    logger.info("Payload too large after trimming; creating history summary")
-    try:
-        summary = summarize_history(payload.get("history", []))
-    except Exception as e:
-        logger.exception("Failed to summarize history: %s", e)
-        # fallback: include a minimal note
-        summary = "(conversation history omitted due to size)"
-
-    payload_copy["history_summary"] = summary
-    payload_copy["history"] = []
-    serialized = json.dumps(payload_copy, ensure_ascii=False)
-    if len(serialized) <= MAX_CONTENT_CHARS:
-        return serialized
-
-    # final fallback: send only the text and a short note
-    fallback = {"type": "conversation_input", "text": payload.get("text", ""), "note": "history omitted (too large)"}
-    return json.dumps(fallback, ensure_ascii=False)
+    for attempt in range(1, max_retries + 1):
+        try:
+            # Some SDKs use client.beta.threads.messages.create
+            if hasattr(client, 'beta') and hasattr(client.beta, 'threads'):
+                # blocking call wrapped into thread
+                return await asyncio.to_thread(
+                    lambda: client.beta.threads.messages.create(
+                        thread_id=thread_id,
+                        role=role,
+                        content=content,
+                    )
+                )
+            else:
+                # Fallback: use direct REST via requests (simple)
+                api_url = (OPENAI_API_BASE or 'https://api.openai.com') + f"/v1/threads/{thread_id}/messages"
+                headers = {
+                    'Authorization': f'Bearer {OPENAI_API_KEY}',
+                    'Content-Type': 'application/json',
+                }
+                resp = requests.post(api_url, headers=headers, json={
+                    'role': role,
+                    'content': content,
+                }, timeout=30)
+                resp.raise_for_status()
+                return resp.json()
+        except Exception as e:
+            logger.warning(f"Attempt {attempt} failed posting to threads: {e}")
+            if attempt == max_retries:
+                raise
+            await asyncio.sleep(0.5 * attempt)
 
 
-def summarize_history(history: List[Dict[str, Any]]) -> str:
-    """Call the assistant (synchronously) with a short summarization prompt.
-    Returns a short summary string.
-    """
-    # Quick guard
-    if not history:
-        return ""
-
-    # Build prompt for summarization
-    convo_text_parts = []
-    for m in history:
-        role = m.get("role", "user")
-        text = m.get("text", "")
-        convo_text_parts.append(f"{role}: {text}")
-    convo_text = "\n".join(convo_text_parts)
-
-    prompt = (
-        "Summarize the following conversation briefly (2-4 sentences) focusing on user intent and open items:\n\n"
-        + convo_text
-    )
-
-    try:
-        # Use the Responses API to get a short summary. Adjust model/name as available.
-        resp = client.responses.create(
-            model=SUMMARY_MODEL,
-            input=[
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=SUMMARY_MAX_TOKENS,
-            temperature=0.2,
-        )
-
-        # The new SDK returns outputs under resp.output or resp.get("output"). We'll try to robustly extract text.
-        summary_text = ""
-        if hasattr(resp, "output") and resp.output:
-            # output is likely a list of objects with 'content' items
-            parts = []
-            for item in resp.output:
-                if isinstance(item, dict) and item.get("type") == "output_text":
-                    parts.append(item.get("text", ""))
-                elif isinstance(item, str):
-                    parts.append(item)
-            summary_text = " ".join(p for p in parts if p)
-        else:
-            # fallback: try resp.get("text") or join choices
-            summary_text = str(resp)
-
-        # final small cleanup
-        summary_text = summary_text.strip()
-        if not summary_text:
-            summary_text = "(summary empty)"
-
-        return summary_text
-
-    except Exception as e:
-        logger.exception("summarize_history failed: %s", e)
-        raise
-
-
-# ------------------- Threads API wrapper -------------------
-
-def post_message_to_thread(thread_id: str, structured_payload_json: str) -> Dict[str, Any]:
-    """Post a message to the thread using the OpenAI client.
-
-    The function takes care of catching and logging size / 400 errors and returns the API result dict.
-    """
-    try:
-        # Here we call the threads messages endpoint. The exact SDK call may differ per SDK release.
-        # We try the 'client.responses' fallback if threads endpoint is not present.
-        logger.info("Posting to thread %s, payload_size=%d", thread_id, len(structured_payload_json))
-
-        # If your SDK supports threads messages directly, uncomment and adapt the call below:
-        # result = client.beta.threads.messages.create(thread_id=thread_id, role="user", content=structured_payload_json)
-
-        # Generic HTTP fallback via client._request (NOT public API) is not recommended.
-        # Use the Responses API as a proxy: create a response using the payload as content.
-        result = client.responses.create(
-            model="gpt-4o-mini",
-            input=[{"role": "user", "content": structured_payload_json}],
-        )
-
-        return result
-
-    except Exception as e:
-        logger.exception("Failed to post to thread: %s", e)
-        raise
-
-
-# ------------------- Webhook Endpoint -------------------
-
+# ---------- Webhook handler ----------
 @app.route('/manychat_webhook', methods=['POST'])
 def manychat_webhook():
-    """Receive incoming webhook from ManyChat (or other chat gateway) and forward a cleaned/structured
-    message to the assistant thread.
-
-    Expected JSON (example):
-    {
-      "user_id": "123",
-      "thread_id": "thread_abc",
-      "text": "Hello",
-      "images": ["https://..."],
-      "audio_texts": ["transcribed audio text ..."],
-      "history": [{"role":"user","text":"..."}, ...]
-    }
-    """
-    payload = request.get_json(force=True)
-    logger.info("Webhook received payload keys=%s", list(payload.keys()) if isinstance(payload, dict) else str(type(payload)))
-
-    user_id = str(payload.get('user_id') or payload.get('sender') or 'unknown')
-    thread_id = payload.get('thread_id')
-    user_text = payload.get('text', '')
-    images = payload.get('images', [])
-    audio_texts = payload.get('audio_texts', [])
-    history = payload.get('history', []) or []
-
-    if not thread_id:
-        logger.warning("No thread_id provided in webhook")
-        return jsonify({"ok": False, "error": "thread_id required"}), 400
-
-    lock = get_user_lock(user_id)
-    if not lock.acquire(blocking=False):
-        # Another processor is running for this user. We drop or queue depending on your desired logic.
-        logger.warning("Processor busy for user %s - rejecting incoming event to avoid run overlap", user_id)
-        return jsonify({"ok": False, "error": "processor_busy"}), 429
-
     try:
-        # Build structured payload
-        structured_payload = build_structured_payload(user_text=user_text, history=history, images=images, audio_texts=audio_texts)
-        serialized = safe_serialize_payload(structured_payload)
+        payload = request.get_json(force=True)
+        logger.info(f"تم استلام Webhook مفاتيح الحمولة = {list(payload.keys()) if isinstance(payload, dict) else 'N/A'}")
 
-        # Post to thread
-        result = post_message_to_thread(thread_id, serialized)
+        # ManyChat full_contact payload often nested under 'full_contact'
+        full_contact = payload.get('full_contact') if isinstance(payload, dict) else None
+        if not full_contact:
+            logger.warning("لم يتم توفير معرف الموضوع في خطاف الويب أو full_contact مفقود")
+            return jsonify({"ok": False, "reason": "missing_full_contact"}), 400
 
-        # Provide a compact, friendly reply for the webhook initiator
-        return jsonify({"ok": True, "posted_size": len(serialized), "thread_id": thread_id}), 200
+        user_id = safe_get(full_contact, 'uid') or safe_get(full_contact, 'id') or safe_get(full_contact, 'visitor_id') or 'unknown_user'
+        user_text = extract_text_from_full_contact(full_contact)
+        attachment = extract_attachment(full_contact)
+
+        # Build a compact history: ManyChat might not send full history; but if thread id exists in payload use it.
+        recent_history = []
+        # if the webhook includes 'chat_history' or similar
+        raw_history = safe_get(full_contact, 'history') or safe_get(full_contact, 'messages') or []
+        if isinstance(raw_history, list):
+            # keep textual parts only, limit to last 8 entries
+            txts = []
+            for m in raw_history[-8:]:
+                if isinstance(m, dict):
+                    t = m.get('text') or m.get('message') or ''
+                else:
+                    t = str(m)
+                if t:
+                    txts.append(t)
+            recent_history = txts
+
+        enriched = build_enriched_content(user_id=user_id, user_text=user_text, attachment=attachment, history=recent_history)
+
+        # pick thread id (per-user thread name templating)
+        thread_id = ASSISTANT_THREAD_ID_TEMPLATE.format(user_id=user_id)
+
+        # Avoid sending enormous payloads; we have already tried to guard.
+        if len(enriched) > THREADS_API_MAX_CONTENT:
+            logger.warning(f"Payload size {len(enriched)} exceeds limit, truncating further")
+            enriched = enriched[:THREADS_API_MAX_CONTENT]
+
+        # Post asynchronously to OpenAI threads
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        resp = loop.run_until_complete(post_to_threads(thread_id=thread_id, role='user', content=enriched))
+
+        logger.info(f"تم إرسال المحتوى للمساعدة في thread {thread_id}")
+
+        return jsonify({"ok": True, "thread_response": resp}), 200
 
     except Exception as e:
-        logger.exception("Error processing webhook for user %s: %s", user_id, e)
+        logger.error("Exception in manychat_webhook: %s", traceback.format_exc())
         return jsonify({"ok": False, "error": str(e)}), 500
 
-    finally:
-        lock.release()
+
+# ---------- Optional: health check & root ----------
+@app.route('/', methods=['GET'])
+def root():
+    return jsonify({"ok": True, "msg": "service running"}), 200
 
 
-# ------------------- Local runner -------------------
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    logger.info("Starting main_v22 on port %d", port)
+    port = int(os.environ.get('PORT', 10000))
+    logger.info(f"Starting app on port {port}")
     app.run(host='0.0.0.0', port=port)
