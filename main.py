@@ -200,8 +200,7 @@ async def build_contents(texts: List[str], image_urls: List[str], audio_urls: Li
     out = []
 
     if texts:
-        combined = "
-".join(texts).join(texts)
+        combined = "\n".join(texts)
         out.append({"type": "input_text", "text": combined})
 
     for img in image_urls:
@@ -337,3 +336,4 @@ def home():
 # ==============================================================
 if __name__ == "__main__":
     app.run(host="0.0
+
