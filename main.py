@@ -53,7 +53,7 @@ pending_messages = {}
 message_timers = {}
 processing_locks = {}
 # انتظر ثانيتين بعد آخر رسالة من المستخدم قبل معالجة الدفعة
-BATCH_WAIT_TIME = 2.0 
+BATCH_WAIT_TIME = 5.0 
 
 # --- دوال إدارة الجلسات ---
 def get_or_create_session_from_contact(contact_data):
