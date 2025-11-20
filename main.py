@@ -1,279 +1,416 @@
-# main.py
-# نسخة v23 — معالج Webhook ManyChat مُنظّم، يدعم نصوص، صور، وصوت (روابط)،
-# يدير حجم المحتوى قبل الإرسال إلى OpenAI Threads API لتجنُّب خطأ string_above_max_length
-# ملاحظات:  - اضبط متغيرات البيئة أدناه
-#            - هذا ملف مستقل يمكن استبداله مباشرة
-
 import os
-import io
-import json
 import time
-import logging
-import asyncio
-import traceback
-from typing import Dict, Any, List, Optional
-from urllib.parse import urlparse
-
+import json
 import requests
+import threading
+import asyncio
+import logging
+import base64
 from flask import Flask, request, jsonify
+from openai import OpenAI
+from pymongo import MongoClient
+from datetime import datetime, timezone
+from dotenv import load_dotenv
 
-# استخدام عميل OpenAI الرسمي
-try:
-    from openai import OpenAI
-except Exception:
-    # إذا لم يكن متاحًا بنفس الاسم، فحاول الاستيراد القديم كنسخة احتياطية
-    import openai
 
-    class OpenAI:
-        def __init__(self, **kwargs):
-            self.__client = openai
-
-        def __getattr__(self, name):
-            return getattr(self.__client, name)
-
-# ---------- إعداد اللوج ----------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-)
+# --- الإعدادات ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler()])
 logger = logging.getLogger(__name__)
+load_dotenv()
+logger.info("▶️ [START] تم تحميل إعدادات البيئة.")
 
-# ---------- إعداد التطبيق والمتغيرات ----------
+# --- مفاتيح API ---
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+ASSISTANT_ID_PREMIUM = os.getenv("ASSISTANT_ID_PREMIUM")
+MONGO_URI = os.getenv("MONGO_URI")
+
+MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
+MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
+META_VERIFY_TOKEN = os.getenv("META_VERIFY_TOKEN")
+PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
+logger.info("🔑 [CONFIG] تم تحميل مفاتيح API.")
+
+# --- قاعدة البيانات ---
+try:
+    client_db = MongoClient(MONGO_URI)
+    db = client_db["multi_platform_bot"]
+    sessions_collection = db["sessions"]
+    logger.info("✅ [DB] تم الاتصال بقاعدة البيانات بنجاح.")
+except Exception as e:
+    logger.critical(f"❌ [DB] فشل الاتصال بقاعدة البيانات: {e}", exc_info=True)
+    exit()
+
+# --- إعدادات التطبيق ---
 app = Flask(__name__)
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-OPENAI_API_BASE = os.environ.get("OPENAI_API_BASE")  # إن كنت تستخدم بنية خاصة
-THREADS_API_MAX_CONTENT = 256000  # حد تقريبى من الخطأ الذي ظهر
-
-# اختيارات التهيئة
-ASSISTANT_THREAD_ID_TEMPLATE = os.environ.get("ASSISTANT_THREAD_ID_TEMPLATE", "thread_{user_id}")
-# مثال: "thread_{user_id}" — ستُستبدل {user_id} بمعرف المستخدم من ManyChat
-
-# تهيئة العميل
 client = OpenAI(api_key=OPENAI_API_KEY)
+logger.info("🚀 [APP] تم إعداد تطبيق Flask و OpenAI Client.")
 
-# ---------- أدوات مساعدة ----------
+# --- متغيرات عالمية ---
+pending_messages = {}
+message_timers = {}
+processing_locks = {}
+BATCH_WAIT_TIME = 2.0
 
-def safe_get(d: Dict[str, Any], *keys, default=None):
-    cur = d
-    for k in keys:
-        if not isinstance(cur, dict) or k not in cur:
-            return default
-        cur = cur[k]
-    return cur
-
-
-def extract_text_from_full_contact(full_contact: Dict[str, Any]) -> str:
-    """According to logs, ManyChat puts latest user text in full_contact['last_input'].
-    Fall back to other fields if missing.
-    """
-    text = safe_get(full_contact, "last_input")
-    if text:
-        return str(text)
-
-    # Fallbacks (kept short and safe)
-    for candidate in [
-        safe_get(full_contact, "messages", 0, "text"),
-        safe_get(full_contact, "message", "text"),
-        safe_get(full_contact, "last_message", "text"),
-    ]:
-        if candidate:
-            return str(candidate)
-
-    return ""
+# --- دوال إدارة الجلسات ---
+def get_or_create_session_from_contact(contact_data, platform):
+    user_id = str(contact_data.get("id"))
+    if not user_id:
+        logger.error(f"❌ [SESSION] لم يتم العثور على user_id في البيانات: {contact_data}")
+        return None
+        
+    session = sessions_collection.find_one({"_id": user_id})
+    now_utc = datetime.now(timezone.utc)
+    
+    main_platform = "Unknown"
+    if platform.startswith("ManyChat"):
+        contact_source = contact_data.get("source", "").lower()
+        if "instagram" in contact_source:
+            main_platform = "Instagram"
+        elif "facebook" in contact_source:
+            main_platform = "Facebook"
+        else:
+            main_platform = "Instagram" if "ig_id" in contact_data and contact_data.get("ig_id") else "Facebook"
 
 
-def extract_attachment(full_contact: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Return attachment dict if present with fields: type, url, filename(optional)
-    ManyChat may include attachments in different keys; check several.
-    """
-    # Most reliable try
-    att = safe_get(full_contact, "last_attachment") or safe_get(full_contact, "attachment")
-    if isinstance(att, dict) and att.get("url"):
-        return att
+    if session:
+        update_fields = {
+            "last_contact_date": now_utc, "platform": main_platform,
+            "profile.name": contact_data.get("name"), "profile.profile_pic": contact_data.get("profile_pic"),
+            "status": "active"
+        }
+        sessions_collection.update_one({"_id": user_id}, {"$set": {k: v for k, v in update_fields.items() if v is not None}})
+        return sessions_collection.find_one({"_id": user_id})
+    else:
+        logger.info(f"🆕 [SESSION] مستخدم جديد. جاري إنشاء جلسة شاملة له: {user_id} على منصة {main_platform}")
+        new_session = {
+            "_id": user_id, "platform": main_platform,
+            "profile": {"name": contact_data.get("name"), "first_name": contact_data.get("first_name"), "last_name": contact_data.get("last_name"), "profile_pic": contact_data.get("profile_pic")},
+            "openai_thread_id": None, "tags": [f"source:{main_platform.lower()}"],
+            "custom_fields": contact_data.get("custom_fields", {}),
+            "conversation_summary": "", "status": "active",
+            "first_contact_date": now_utc, "last_contact_date": now_utc
+        }
+        sessions_collection.insert_one(new_session)
+        return new_session
 
-    # Try nested messages
-    messages = full_contact.get("messages") or []
-    if messages and isinstance(messages, list):
-        for m in messages:
-            if isinstance(m, dict) and m.get("attachment"):
-                a = m.get("attachment")
-                if isinstance(a, dict) and a.get("url"):
-                    return a
-    return None
-
-
-def build_enriched_content(user_id: str, user_text: str, attachment: Optional[Dict[str, Any]], history: List[str]) -> str:
-    """Create a single string payload but ensure it's under THREADS_API_MAX_CONTENT.
-    Strategy:
-      1) Start with user_text + attachment metadata
-      2) Append as much recent history as fits
-      3) If still too long, truncate the oldest history or compress with simple summarization
-    """
-    parts: List[str] = []
-    parts.append(f"[user_id:{user_id}]")
-    if user_text:
-        parts.append("[user_text]")
-        parts.append(user_text)
-
-    if attachment:
-        parts.append("[attachment]")
-        att_type = attachment.get("type") or attachment.get("mime_type") or guess_type_from_url(attachment.get("url"))
-        parts.append(f"type={att_type}")
-        parts.append(f"url={attachment.get('url')}")
-
-    if history:
-        parts.append("[recent_history]")
-        # append from newest to oldest until length limit
-        for h in reversed(history):
-            parts.append(h)
-            candidate = "\n".join(parts)
-            if len(candidate) > THREADS_API_MAX_CONTENT:
-                parts.pop()  # remove the last added history that broke the limit
-                break
-
-    payload = "\n".join(parts)
-
-    # If payload still exceeds limit (rare), aggressively truncate user_text
-    if len(payload) > THREADS_API_MAX_CONTENT:
-        # keep first N chars of user_text
-        keep = THREADS_API_MAX_CONTENT - 2000
-        if keep < 100:
-            keep = 100
-        truncated_text = (user_text[:keep] + "... [truncated]") if user_text else ""
-        # rebuild minimal payload
-        minimal = f"[user_id:{user_id}]\n[user_text]\n{truncated_text}"
-        if attachment:
-            minimal += f"\n[attachment]\ntype={att_type}\nurl={attachment.get('url')}"
-        payload = minimal[:THREADS_API_MAX_CONTENT]
-
-    return payload
-
-
-def guess_type_from_url(url: Optional[str]) -> str:
-    if not url:
-        return "unknown"
-    path = urlparse(url).path.lower()
-    if path.endswith(('.mp3', '.wav', '.m4a', '.ogg')):
-        return 'audio'
-    if path.endswith(('.jpg', '.jpeg', '.png', '.gif', '.webp')):
-        return 'image'
-    return 'file'
-
-
-async def post_to_threads(thread_id: str, role: str, content: str, max_retries: int = 3) -> Dict[str, Any]:
-    """Post message to OpenAI Threads API (beta/messages). Uses asyncio.to_thread to keep compatibility.
-    Returns API response dict.
-    """
-    for attempt in range(1, max_retries + 1):
-        try:
-            # Some SDKs use client.beta.threads.messages.create
-            if hasattr(client, 'beta') and hasattr(client.beta, 'threads'):
-                # blocking call wrapped into thread
-                return await asyncio.to_thread(
-                    lambda: client.beta.threads.messages.create(
-                        thread_id=thread_id,
-                        role=role,
-                        content=content,
-                    )
-                )
-            else:
-                # Fallback: use direct REST via requests (simple)
-                api_url = (OPENAI_API_BASE or 'https://api.openai.com') + f"/v1/threads/{thread_id}/messages"
-                headers = {
-                    'Authorization': f'Bearer {OPENAI_API_KEY}',
-                    'Content-Type': 'application/json',
-                }
-                resp = requests.post(api_url, headers=headers, json={
-                    'role': role,
-                    'content': content,
-                }, timeout=30)
-                resp.raise_for_status()
-                return resp.json()
-        except Exception as e:
-            logger.warning(f"Attempt {attempt} failed posting to threads: {e}")
-            if attempt == max_retries:
-                raise
-            await asyncio.sleep(0.5 * attempt)
-
-
-# ---------- Webhook handler ----------
-@app.route('/manychat_webhook', methods=['POST'])
-def manychat_webhook():
+# --- دوال OpenAI ---
+async def get_image_description_for_assistant(base64_image):
+    logger.info("🤖 [VISION-FOR-ASSISTANT] بدء استخلاص وصف تفصيلي من الصورة...")
+    prompt_text = "استخرج كل النصوص الموجودة في هذه الصورة بدقة شديدة وبشكل حرفي. اعرض التفاصيل بالكامل مثل المبالغ، أرقام الهواتف، التواريخ، وأي بيانات أخرى."
     try:
-        payload = request.get_json(force=True)
-        logger.info(f"تم استلام Webhook مفاتيح الحمولة = {list(payload.keys()) if isinstance(payload, dict) else 'N/A'}")
+        response = await asyncio.to_thread(
+            client.chat.completions.create,
+            model="gpt-4.1",
+            messages=[{"role": "user", "content": [{"type": "text", "text": prompt_text}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}]}],
+            max_tokens=500,
+        )
+        description = response.choices[0].message.content
+        logger.info(f"✅ [VISION] النص المستخلص: {description}")
+        return description
+    except Exception as e:
+        logger.error(f"❌ [VISION] فشل استخلاص النص من الصورة: {e}", exc_info=True)
+        return None
 
-        # ManyChat full_contact payload often nested under 'full_contact'
-        full_contact = payload.get('full_contact') if isinstance(payload, dict) else None
-        if not full_contact:
-            logger.warning("لم يتم توفير معرف الموضوع في خطاف الويب أو full_contact مفقود")
-            return jsonify({"ok": False, "reason": "missing_full_contact"}), 400
-
-        user_id = safe_get(full_contact, 'uid') or safe_get(full_contact, 'id') or safe_get(full_contact, 'visitor_id') or 'unknown_user'
-        user_text = extract_text_from_full_contact(full_contact)
-        attachment = extract_attachment(full_contact)
-
-        # Build a compact history: ManyChat might not send full history; but if thread id exists in payload use it.
-        recent_history = []
-        # if the webhook includes 'chat_history' or similar
-        raw_history = safe_get(full_contact, 'history') or safe_get(full_contact, 'messages') or []
-        if isinstance(raw_history, list):
-            # keep textual parts only, limit to last 8 entries
-            txts = []
-            for m in raw_history[-8:]:
-                if isinstance(m, dict):
-                    t = m.get('text') or m.get('message') or ''
-                else:
-                    t = str(m)
-                if t:
-                    txts.append(t)
-            recent_history = txts
-
-        enriched = build_enriched_content(user_id=user_id, user_text=user_text, attachment=attachment, history=recent_history)
-
-        # pick thread id (per-user thread name templating)
-        thread_id = ASSISTANT_THREAD_ID_TEMPLATE.format(user_id=user_id)
-
-        # Avoid sending enormous payloads; we have already tried to guard.
-        if len(enriched) > THREADS_API_MAX_CONTENT:
-            logger.warning(f"Payload size {len(enriched)} exceeds limit, truncating further")
-            enriched = enriched[:THREADS_API_MAX_CONTENT]
-
-                # Ensure thread exists — create if 404
+async def get_assistant_reply(session, content):
+    user_id = session["_id"]
+    thread_id = session.get("openai_thread_id")
+    logger.info(f"🤖 [ASSISTANT] بدء عملية الحصول على رد للمستخدم {user_id}.")
+    if not thread_id:
+        logger.warning(f"🧵 [ASSISTANT] لا يوجد thread للمستخدم {user_id}. سيتم إنشاء واحد جديد.")
         try:
-            # quick check: retrieve thread
-            if hasattr(client, 'beta') and hasattr(client.beta, 'threads'):
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    loop.run_until_complete(asyncio.to_thread(lambda: client.beta.threads.retrieve(thread_id=thread_id)))
-                except Exception:
-                    # create new thread
-                    new_thread = loop.run_until_complete(asyncio.to_thread(lambda: client.beta.threads.create(id=thread_id)))
+            thread = await asyncio.to_thread(client.beta.threads.create)
+            thread_id = thread.id
+            sessions_collection.update_one({"_id": user_id}, {"$set": {"openai_thread_id": thread_id}})
+            logger.info(f"✅ [ASSISTANT] تم إنشاء وتخزين thread جديد: {thread_id}")
         except Exception as e:
-            logger.warning(f"Thread check/create failed: {e}")
+            logger.error(f"❌ [ASSISTANT] فشل في إنشاء thread جديد: {e}", exc_info=True)
+            return "⚠️ عفوًا، حدث خطأ أثناء تهيئة المحادثة."
+    try:
+        await asyncio.to_thread(client.beta.threads.messages.create, thread_id=thread_id, role="user", content=content)
+        run = await asyncio.to_thread(client.beta.threads.runs.create, thread_id=thread_id, assistant_id=ASSISTANT_ID_PREMIUM)
+        start_time = time.time()
+        while run.status in ["queued", "in_progress"]:
+            if time.time() - start_time > 90:
+                logger.error(f"⏰ [ASSISTANT] Timeout! استغرق الـ run {run.id} أكثر من 90 ثانية.")
+                return "⚠️ حدث تأخير في الرد، يرجى المحاولة مرة أخرى."
+            await asyncio.sleep(1)
+            run = await asyncio.to_thread(client.beta.threads.runs.retrieve, thread_id=thread_id, run_id=run.id)
+        if run.status == "completed":
+            messages = await asyncio.to_thread(client.beta.threads.messages.list, thread_id=thread_id, limit=1)
+            reply = messages.data[0].content[0].text.value.strip()
+            logger.info(f"🗣️ [ASSISTANT] الرد الذي تم الحصول عليه: \"{reply}\"")
+            return reply
+        else:
+            logger.error(f"❌ [ASSISTANT] لم يكتمل الـ run. الحالة: {run.status}. الخطأ: {run.last_error}")
+            return "⚠️ عفوًا، حدث خطأ فني. فريقنا يعمل على إصلاحه."
+    except Exception as e:
+        logger.error(f"❌ [ASSISTANT] حدث استثناء غير متوقع: {e}", exc_info=True)
+        return "⚠️ عفوًا، حدث خطأ غير متوقع."
 
-        # Post asynchronously to OpenAI threads
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        resp = loop.run_until_complete(post_to_threads(thread_id=thread_id, role='user', content=enriched))(post_to_threads(thread_id=thread_id, role='user', content=enriched))
+# --- دوال الإرسال والوسائط ---
+def send_meta_reply(recipient_id, text_message, platform):
+    logger.info(f"📤 [META-API] بدء إرسال رد مباشر إلى {recipient_id} على منصة {platform}...")
+    if not PAGE_ACCESS_TOKEN:
+        logger.error("❌ [META-API] مفتاح PAGE_ACCESS_TOKEN غير موجود!")
+        return
 
-        logger.info(f"تم إرسال المحتوى للمساعدة في thread {thread_id}")
+    if platform not in ["Instagram", "Facebook"]:
+        logger.error(f"❌ [META-API] منصة غير مدعومة للإرسال المباشر: '{platform}'.")
+        return
 
-        return jsonify({"ok": True, "thread_response": resp}), 200
+    # نقطة نهاية الإرسال (Send API)
+    url = f"https://graph.facebook.com/v19.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
+    
+    # تحديد القناة المناسبة (Instagram أو Facebook Messenger)
+    if platform == "Instagram":
+        # لإرسال رسائل Instagram Direct، يجب استخدام حقل `recipient` مع معرف المستخدم (PSID)
+        # أو معرف Instagram (IGSID) إذا كان التطبيق معدًا لذلك.
+        # هنا نفترض أن `recipient_id` هو PSID للمستخدم.
+        payload = {
+            "recipient": {"id": recipient_id},
+            "message": {"text": text_message},
+            "messaging_type": "RESPONSE",
+        }
+    else: # Facebook
+        payload = {
+            "recipient": {"id": recipient_id},
+            "message": {"text": text_message},
+            "messaging_type": "RESPONSE",
+        }
+
+    headers = {"Content-Type": "application/json"}
+
+    try:
+        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=20)
+        response.raise_for_status()
+        logger.info(f"✅ [META-API] تم إرسال الرسالة بنجاح إلى {recipient_id} عبر {platform}.")
+
+    except requests.exceptions.HTTPError as e:
+        error_text = e.response.text if e.response is not None else str(e)
+        logger.error(f"❌ [META-API] فشل إرسال الرسالة: {e}. تفاصيل الخطأ: {error_text}", exc_info=True)
 
     except Exception as e:
-        logger.error("Exception in manychat_webhook: %s", traceback.format_exc())
-        return jsonify({"ok": False, "error": str(e)}), 500
+        logger.error(f"❌ [META-API] خطأ غير متوقع أثناء الإرسال: {e}", exc_info=True)
 
 
-# ---------- Optional: health check & root ----------
-@app.route('/', methods=['GET'])
-def root():
-    return jsonify({"ok": True, "msg": "service running"}), 200
+def send_manychat_reply(subscriber_id, text_message, platform, retry=False):
+    logger.info(f"📤 [MANYCHAT] بدء إرسال رد إلى {subscriber_id} على منصة {platform}...")
+    if not MANYCHAT_API_KEY:
+        logger.error("❌ [MANYCHAT] مفتاح MANYCHAT_API_KEY غير موجود!")
+        return
+
+    if platform not in ["Instagram", "Facebook"]:
+        logger.error(f"❌ [MANYCHAT] منصة غير مدعومة أو غير محددة: '{platform}'. لا يمكن إرسال الرد.")
+        return
+
+    url = "https://api.manychat.com/fb/sending/sendContent"
+    headers = {"Authorization": f"Bearer {MANYCHAT_API_KEY}", "Content-Type": "application/json"}
+    channel = "instagram" if platform == "Instagram" else "facebook"
+
+    # تقسيم الرسالة لفقرات
+    paragraphs = [p.strip( ) for p in text_message.split("\n\n") if p.strip()]
+    if len(paragraphs) <= 1:
+        paragraphs = [p.strip() for p in text_message.split("\n") if p.strip()]
+    messages_to_send = [{"type": "text", "text": p} for p in paragraphs] if paragraphs else []
+
+    if not messages_to_send:
+        logger.warning(f"⚠️ [MANYCHAT] لا يوجد محتوى لإرساله إلى {subscriber_id} بعد معالجة النص.")
+        return
+
+    payload = {
+        "subscriber_id": str(subscriber_id),
+        "data": {"version": "v2", "content": {"messages": messages_to_send}},
+        "channel": channel,
+    }
+
+    try:
+        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=20)
+        response.raise_for_status()
+        logger.info(f"✅ [MANYCHAT] تم إرسال الرسالة بنجاح إلى {subscriber_id} عبر {channel}.")
+
+    except requests.exceptions.HTTPError as e:
+        error_text = e.response.text if e.response is not None else str(e)
+        # التحقق من كود الخطأ 3011
+        if "3011" in error_text:
+            if not retry:
+                logger.warning(f"⚠️ [MANYCHAT] المستخدم {subscriber_id} خارج نافذة 24 ساعة أو لم يتم تحديث النشاط بعد. سيتم إعادة المحاولة بعد ثانيتين...")
+                time.sleep(5)
+                send_manychat_reply(subscriber_id, text_message, platform, retry=True)
+            else:
+                logger.error(f"❌ [MANYCHAT] فشل الإرسال للمستخدم {subscriber_id} حتى بعد إعادة المحاولة. تفاصيل الخطأ: {error_text}")
+            return
+        # أي خطأ آخر
+        try:
+            error_details = e.response.json()
+        except Exception:
+            error_details = error_text
+        logger.error(f"❌ [MANYCHAT] فشل إرسال الرسالة: {e}. تفاصيل الخطأ: {error_details}", exc_info=True)
+
+    except Exception as e:
+        logger.error(f"❌ [MANYCHAT] خطأ غير متوقع أثناء الإرسال: {e}", exc_info=True)
 
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 10000))
-    logger.info(f"Starting app on port {port}")
-    app.run(host='0.0.0.0', port=port)
+
+
+def download_media_from_url(media_url):
+    logger.info(f"⬇️ [MEDIA] محاولة تحميل وسائط من الرابط: {media_url}")
+    try:
+        media_response = requests.get(media_url, timeout=20)
+        media_response.raise_for_status()
+        return media_response.content
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ [MEDIA] فشل تحميل الوسائط من {media_url}: {e}", exc_info=True)
+        return None
+
+def transcribe_audio(audio_content, file_format="mp4"):
+    logger.info(f"🎙️ [WHISPER] بدء تحويل مقطع صوتي (الصيغة: {file_format})...")
+    try:
+        temp_audio_file = f"temp_audio_{int(time.time())}.{file_format}"
+        with open(temp_audio_file, "wb") as f: f.write(audio_content)
+        with open(temp_audio_file, "rb") as audio_file:
+            transcription = client.audio.transcriptions.create(model="whisper-1", file=audio_file)
+        os.remove(temp_audio_file)
+        return transcription.text
+    except Exception as e:
+        logger.error(f"❌ [WHISPER] خطأ أثناء تحويل الصوت: {e}", exc_info=True)
+        return None
+
+# --- آلية المعالجة الموحدة ---
+def schedule_assistant_response(user_id):
+    lock = processing_locks.setdefault(user_id, threading.Lock())
+    with lock:
+        if user_id not in pending_messages or not pending_messages[user_id]: return
+        
+        user_data = pending_messages[user_id]
+        session = user_data["session"]
+        platform = session["platform"]
+        combined_content = "\n".join(user_data["texts"])
+        
+        logger.info(f"⚙️ [BATCH] بدء معالجة المحتوى المجمع للمستخدم {user_id} على {platform}: '{combined_content}'")
+        reply_text = asyncio.run(get_assistant_reply(session, combined_content))
+        
+        if reply_text:
+            if platform in ["Instagram", "Facebook"]:
+                send_manychat_reply(user_id, reply_text, platform=platform)
+
+
+        if user_id in pending_messages: del pending_messages[user_id]
+        if user_id in message_timers: del message_timers[user_id]
+        logger.info(f"🗑️ [BATCH] تم الانتهاء من المعالجة للمستخدم {user_id}.")
+
+def add_to_processing_queue(session, text_content):
+    user_id = session["_id"]
+    if user_id in message_timers: message_timers[user_id].cancel()
+    if user_id not in pending_messages:
+        pending_messages[user_id] = {"texts": [], "session": session}
+    pending_messages[user_id]["texts"].append(text_content)
+    logger.info(f"➕ [QUEUE] تمت إضافة محتوى إلى قائمة الانتظار للمستخدم {user_id}. حجم القائمة الآن: {len(pending_messages[user_id]['texts'])}")
+    timer = threading.Timer(BATCH_WAIT_TIME, schedule_assistant_response, args=[user_id])
+    message_timers[user_id] = timer
+    timer.start()
+
+# --- ويب هوك ManyChat ---
+@app.route("/manychat_webhook", methods=["POST"])
+def manychat_webhook_handler():
+    logger.info("📞 [WEBHOOK-MC] تم استلام طلب جديد.")
+    auth_header = request.headers.get('Authorization')
+    if not MANYCHAT_SECRET_KEY or auth_header != f'Bearer {MANYCHAT_SECRET_KEY}':
+        logger.critical("🚨 [WEBHOOK-MC] محاولة وصول غير مصرح بها!")
+        return jsonify({"status": "error", "message": "Unauthorized"}), 403
+    
+    data = request.get_json()
+    if not data:
+        logger.error("❌ [WEBHOOK-MC] CRITICAL: لم يتم استلام بيانات JSON.")
+        return jsonify({"status": "error", "message": "Request body must be JSON."}), 400
+        
+    full_contact = data.get("full_contact")
+    if not full_contact:
+        logger.error("❌ [WEBHOOK-MC] CRITICAL: 'full_contact' غير موجودة.")
+        return jsonify({"status": "error", "message": "'full_contact' data is required."}), 400
+
+    session = get_or_create_session_from_contact(full_contact, "ManyChat")
+    if not session:
+        logger.error("❌ [WEBHOOK-MC] فشل في إنشاء أو الحصول على جلسة.")
+        return jsonify({"status": "error", "message": "Failed to create or get session"}), 500
+
+    last_input = full_contact.get("last_text_input") or full_contact.get("last_input_text")
+    if not last_input:
+        logger.warning("[WEBHOOK-MC] لا يوجد إدخال نصي للمعالجة.")
+        return jsonify({"status": "received", "message": "No text input to process"}), 200
+    
+    logger.info(f"💬 [WEBHOOK-MC] الإدخال المستلم: \"{last_input}\"")
+    is_url = last_input.startswith(("http://", "https://" ))
+    is_media_url = is_url and ("cdn.fbsbx.com" in last_input or "scontent" in last_input)
+
+    def background_task():
+        if is_media_url:
+            logger.info("🖼️ [WEBHOOK-MC] تم اكتشاف رابط وسائط. بدء المعالجة في الخلفية.")
+            media_content = download_media_from_url(last_input)
+            if not media_content:
+                send_manychat_reply(session["_id"], "⚠️ عفوًا، لم أتمكن من تحميل الملف الذي أرسلته.", platform=session["platform"])
+                return
+
+            is_audio = any(ext in last_input for ext in ['.mp4', '.mp3', '.ogg']) or "audioclip" in last_input
+            if is_audio:
+                transcribed_text = transcribe_audio(media_content, file_format="mp4")
+                if transcribed_text:
+                    content_for_assistant = f"[رسالة صوتية من العميل]: \"{transcribed_text}\""
+                    add_to_processing_queue(session, content_for_assistant)
+            else: # It's an image
+                description = asyncio.run(get_image_description_for_assistant(base64.b64encode(media_content).decode('utf-8')))
+                if description:
+                    content_for_assistant = f"[وصف صورة أرسلها العميل]: {description}"
+                    add_to_processing_queue(session, content_for_assistant)
+        else:
+            logger.info("📝 [WEBHOOK-MC] تم تحديد الإدخال كنص عادي.")
+            add_to_processing_queue(session, last_input)
+
+    threading.Thread(target=background_task).start()
+    return jsonify({"status": "received"}), 200
+
+
+
+# --- نقطة الدخول الرئيسية ---
+@app.route("/")
+def home():
+    return "✅ Bot is running with Detailed Vision Logic (v12 - Retry Patch)."
+
+
+# --- ويب هوك Meta (Facebook/Instagram) ---
+@app.route("/meta_webhook", methods=["GET", "POST"])
+def meta_webhook_handler():
+    if request.method == "GET":
+        # التحقق من الويب هوك
+        mode = request.args.get("hub.mode")
+        token = request.args.get("hub.verify_token")
+        challenge = request.args.get("hub.challenge")
+
+        if mode == "subscribe" and token == META_VERIFY_TOKEN:
+            logger.info("✅ [WEBHOOK-META] تم التحقق من الويب هوك بنجاح.")
+            return challenge, 200
+        else:
+            logger.error("❌ [WEBHOOK-META] فشل التحقق من الويب هوك: رمز أو وضع غير صحيح.")
+            return "Verification token mismatch", 403
+
+    elif request.method == "POST":
+        logger.info("📞 [WEBHOOK-META] تم استلام طلب POST جديد (حدث).")
+        data = request.get_json()
+        
+        if not data:
+            logger.error("❌ [WEBHOOK-META] CRITICAL: لم يتم استلام بيانات JSON.")
+            return jsonify({"status": "error", "message": "Request body must be JSON."}), 400
+
+        # هنا يجب أن يتم تحليل بيانات الحدث (Event Data)
+        # نظرًا لتعقيد تنسيق رسائل Meta، سنقوم بتسجيل البيانات فقط في هذه المرحلة
+        # لتركيز المعالجة على ManyChat (الذي ما زال موجودًا)
+        logger.info(f"📝 [WEBHOOK-META] بيانات الحدث المستلمة: {json.dumps(data, indent=2)}")
+        
+        # يجب أن تقوم Meta بالتحقق من التوقيع (Signature Verification)
+        # لكن للتجربة السريعة، سنكتفي بالرد 200 لتجنب إعادة الإرسال المتكررة من Meta
+        
+        return jsonify({"status": "received", "message": "Event data received"}), 200
+
+    return jsonify({"status": "error", "message": "Method not allowed"}), 405
+
+if __name__ == "__main__":
+    logger.info("🚀 التطبيق جاهز للتشغيل. يرجى استخدام خادم WSGI (مثل Gunicorn) لتشغيله في بيئة الإنتاج.")
