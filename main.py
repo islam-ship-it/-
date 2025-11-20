@@ -198,7 +198,7 @@ async def post_to_threads(thread_id: str, role: str, content: str, max_retries: 
 
 # ---------- Webhook handler ----------
 @app.route('/manychat_webhook', methods=['POST'])
-def manychat_webhook():
+def manychat_webhook():():
     try:
         payload = request.get_json(force=True)
         logger.info(f"تم استلام Webhook مفاتيح الحمولة = {list(payload.keys()) if isinstance(payload, dict) else 'N/A'}")
@@ -239,10 +239,24 @@ def manychat_webhook():
             logger.warning(f"Payload size {len(enriched)} exceeds limit, truncating further")
             enriched = enriched[:THREADS_API_MAX_CONTENT]
 
+                # Ensure thread exists — create if 404
+        try:
+            # quick check: retrieve thread
+            if hasattr(client, 'beta') and hasattr(client.beta, 'threads'):
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(asyncio.to_thread(lambda: client.beta.threads.retrieve(thread_id=thread_id)))
+                except Exception:
+                    # create new thread
+                    new_thread = loop.run_until_complete(asyncio.to_thread(lambda: client.beta.threads.create(id=thread_id)))
+        except Exception as e:
+            logger.warning(f"Thread check/create failed: {e}")
+
         # Post asynchronously to OpenAI threads
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-        resp = loop.run_until_complete(post_to_threads(thread_id=thread_id, role='user', content=enriched))
+        resp = loop.run_until_complete(post_to_threads(thread_id=thread_id, role='user', content=enriched))(post_to_threads(thread_id=thread_id, role='user', content=enriched))
 
         logger.info(f"تم إرسال المحتوى للمساعدة في thread {thread_id}")
 
