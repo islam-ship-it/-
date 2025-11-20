@@ -290,7 +290,8 @@ def manychat_webhook():
     if text:
         items_to_add.append({'type': 'text', 'content': text})
 
-    # Images - try attachments / media
+    # Images - try attachments
+    image_urls = []  # FIX: ensure image_urls is defined before use / media
     media_urls = []
     # ManyChat/Facebook often uses 'attachments' array
     attachments = message.get('attachments') if isinstance(message, dict) else None
