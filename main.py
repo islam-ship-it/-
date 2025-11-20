@@ -1,9 +1,11 @@
-# main.py (patched) — original code with safe media support (images URLs + audio transcription)
+# main.py (Patched v20 - Final)
 # - Keeps original threading/timer architecture intact
 # - Adds support for: image URLs, audio URLs (transcribed to text)
 # - If text+image+audio arrive within the batch window -> they are merged into one message to the assistant
 # - Audio transcription uses OpenAI audio.transcriptions API (called in a thread); adjust model name if needed
 # - Minimal, safe changes; all original code paths preserved
+# - FIX: Implemented a strict threading.Lock in schedule_assistant_response to prevent concurrent processing for the same user.
+# - FIX: Added active waiting logic in get_assistant_reply to handle existing active Runs (safety net).
 
 import os
 import time
@@ -147,12 +149,35 @@ async def get_assistant_reply(session, content, timeout=90):
         logger.info(f"🧠 [MEMORY] لا توجد ذاكرة سابقة للمستخدم.")
 
     try:
+        # --- FIX: Active Waiting for existing Run ---
+        # 1. التحقق من وجود Run نشط والانتظار حتى يكتمل
+        runs = await asyncio.to_thread(client.beta.threads.runs.list, thread_id=thread_id, limit=1)
+        if runs.data and runs.data[0].status in ["queued", "in_progress"]:
+            active_run = runs.data[0]
+            logger.warning(f"⏳ [ASSISTANT] تم العثور على Run نشط سابق ({active_run.id}). جاري الانتظار حتى يكتمل.")
+            
+            start_time = time.time()
+            while active_run.status in ["queued", "in_progress"]:
+                if time.time() - start_time > timeout:
+                    logger.error(f"⏰ [ASSISTANT] Timeout! فشل انتظار Run نشط سابق ({active_run.id}).")
+                    # يمكن هنا محاولة إلغاء الـ Run النشط إذا لزم الأمر، لكن الأمان هو العودة برسالة خطأ
+                    return "⚠️ حدث تأخير في الرد بسبب معالجة سابقة لم تكتمل."
+                await asyncio.sleep(1)
+                active_run = await asyncio.to_thread(client.beta.threads.runs.retrieve, thread_id=thread_id, run_id=active_run.id)
+            
+            if active_run.status != "completed":
+                logger.error(f"❌ [ASSISTANT] الـ Run السابق فشل أو تم إلغاؤه. الحالة: {active_run.status}")
+                # إذا فشل الـ Run السابق، يمكننا المتابعة وإضافة الرسالة الجديدة
+                
+        # 2. إضافة الرسالة الجديدة بأمان
         logger.info(f"💬 [ASSISTANT] إضافة رسالة إلى Thread {thread_id}: '{content}'")
         await asyncio.to_thread(client.beta.threads.messages.create, thread_id=thread_id, role="user", content=enriched_content)
         
+        # 3. إنشاء Run جديد
         logger.info(f"▶️ [ASSISTANT] بدء تشغيل المساعد (Run) على Thread {thread_id}.")
         run = await asyncio.to_thread(client.beta.threads.runs.create, thread_id=thread_id, assistant_id=ASSISTANT_ID_PREMIUM)
         
+        # 4. انتظار الـ Run الجديد
         start_time = time.time()
         while run.status in ["queued", "in_progress"]:
             if time.time() - start_time > timeout:
@@ -185,7 +210,7 @@ def send_manychat_reply_async(subscriber_id, text_message, platform):
     channel = "instagram" if platform == "Instagram" else "facebook"
 
     payload = {
-        "subscriber_id": str(subscriber_id ),
+        "subscriber_id": str(subscriber_id  ),
         "data": {"version": "v2", "content": {"messages": [{"type": "text", "text": text_message.strip()}]}},
         "channel": channel,
     }
@@ -218,8 +243,8 @@ def transcribe_audio_url(audio_url):
     try:
         # Use to_thread to avoid blocking main thread if OpenAI client is blocking
         transcription_resp = asyncio.run(asyncio.to_thread(
-            client.audio.transcriptions.create, audio_bytes, "audio.webm", {"model":"gpt-4o-mini-transcribe"}))
-        # The exact attribute depends on client; try common patterns
+            client.audio.transcriptions.create, file=("audio.webm", audio_bytes), model="whisper-1"))
+        
         if hasattr(transcription_resp, "text"):
             return transcription_resp.text
         if isinstance(transcription_resp, dict) and transcription_resp.get("text"):
@@ -231,8 +256,16 @@ def transcribe_audio_url(audio_url):
         return None
 
 def schedule_assistant_response(user_id):
+    # --- FIX: Use a strict Lock for the entire processing block ---
     lock = processing_locks.setdefault(user_id, threading.Lock())
-    with lock:
+    
+    # محاولة الحصول على القفل. إذا كان هناك معالج آخر يعمل، يتم تجاهل هذا الطلب
+    # هذا يضمن أن عملية معالجة واحدة فقط يمكن أن تعمل في أي وقت للمستخدم الواحد.
+    if not lock.acquire(blocking=False):
+        logger.warning(f"⚠️ [PROCESSOR] تم تجاهل طلب معالجة للمستخدم {user_id} لأن معالجًا آخر لا يزال نشطًا (Lock acquired).")
+        return
+        
+    try:
         if user_id not in pending_messages or not pending_messages[user_id]:
             return
         
@@ -255,6 +288,7 @@ def schedule_assistant_response(user_id):
 
         # تفريغ الأصوات: نعمل تحويل إلى نص ونضيفها
         for audio_url in audios:
+            # يتم تفريغ الصوت هنا بشكل متزامن داخل هذا الثريد
             transcript = transcribe_audio_url(audio_url)
             if transcript:
                 combined_parts.append(f"[Audio transcript from {audio_url}]: {transcript}")
@@ -273,6 +307,7 @@ def schedule_assistant_response(user_id):
             thread_id = session.get("openai_thread_id")
             if thread_id:
                 logger.info(f"🗓️ [MEMORY] جدولة عملية تلخيص الذاكرة للمستخدم {user_id}.")
+                # تشغيل التلخيص في ثريد منفصل لتجنب حظر المعالج
                 summary_thread = threading.Thread(target=lambda: asyncio.run(summarize_and_save_conversation(user_id, thread_id)))
                 summary_thread.start()
 
@@ -280,6 +315,11 @@ def schedule_assistant_response(user_id):
         if user_id in pending_messages: del pending_messages[user_id]
         if user_id in message_timers: del message_timers[user_id]
         logger.info(f"🗑️ [PROCESSOR] تم الانتهاء من المعالجة للمستخدم {user_id}.")
+        
+    finally:
+        # تحرير القفل بعد الانتهاء من المعالجة
+        lock.release()
+        logger.info(f"🔓 [LOCK] تم تحرير القفل للمستخدم {user_id}.")
 
 # --- تعديل add_to_processing_queue لدعم النص + صور + صوت ---
 def add_to_processing_queue(session, payload):
@@ -322,9 +362,18 @@ def add_to_processing_queue(session, payload):
         # unknown type, ignore
         logger.warning(f"⚠️ [QUEUE] payload type unknown for user {user_id}: {type(payload)}")
 
+    # Check if there is any content to process
+    current_texts = pending_messages[user_id]['texts']
+    current_images = pending_messages[user_id]['images']
+    current_audios = pending_messages[user_id]['audios']
+    
+    if not (current_texts or current_images or current_audios):
+        logger.warning(f"⚠️ [QUEUE] لا يوجد محتوى لإضافته للمستخدم {user_id}.")
+        return
+
     logger.info(f"➕ [QUEUE] تمت إضافة محتوى إلى قائمة الانتظار للمستخدم {user_id}. "
-                f"counts: texts={len(pending_messages[user_id]['texts'])}, "
-                f"images={len(pending_messages[user_id]['images'])}, audios={len(pending_messages[user_id]['audios'])}")
+                f"counts: texts={len(current_texts)}, "
+                f"images={len(current_images)}, audios={len(current_audios)}")
 
     # start a new debounce timer
     timer = threading.Timer(BATCH_WAIT_TIME, schedule_assistant_response, args=[user_id])
@@ -394,7 +443,7 @@ def manychat_webhook_handler():
 # --- نقطة الدخول الرئيسية ---
 @app.route("/")
 def home():
-    return "✅ Bot is running in Unified Mode with Long-Term Memory (v19 - Final)."
+    return "✅ Bot is running in Unified Mode with Long-Term Memory (v20 - Final)."
 
 if __name__ == "__main__":
     logger.info("🚀 التطبيق جاهز للتشغيل. يرجى استخدام خادم WSGI (مثل Gunicorn) لتشغيله في بيئة الإنتاج.")
