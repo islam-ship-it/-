@@ -198,7 +198,7 @@ async def post_to_threads(thread_id: str, role: str, content: str, max_retries: 
 
 # ---------- Webhook handler ----------
 @app.route('/manychat_webhook', methods=['POST'])
-def manychat_webhook():():
+def manychat_webhook():
     try:
         payload = request.get_json(force=True)
         logger.info(f"تم استلام Webhook مفاتيح الحمولة = {list(payload.keys()) if isinstance(payload, dict) else 'N/A'}")
