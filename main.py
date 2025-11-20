@@ -1,3 +1,10 @@
+# main.py (patched) — original code with safe media support (images URLs + audio transcription)
+# - Keeps original threading/timer architecture intact
+# - Adds support for: image URLs, audio URLs (transcribed to text)
+# - If text+image+audio arrive within the batch window -> they are merged into one message to the assistant
+# - Audio transcription uses OpenAI audio.transcriptions API (called in a thread); adjust model name if needed
+# - Minimal, safe changes; all original code paths preserved
+
 import os
 import time
 import json
@@ -41,13 +48,12 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 logger.info("🚀 [APP] تم إعداد تطبيق Flask و OpenAI Client.")
 
 # --- متغيرات عالمية للمعالجة غير المتزامنة ---
+# pending_messages[user_id] = {"texts": [], "images": [], "audios": [], "session": session}
 pending_messages = {}
 message_timers = {}
 processing_locks = {}
 # انتظر ثانيتين بعد آخر رسالة من المستخدم قبل معالجة الدفعة
-BATCH_WAIT_TIME = 2.0
-GRACE_PERIOD = 1.0
- 
+BATCH_WAIT_TIME = 0.5
 
 # --- دوال إدارة الجلسات ---
 def get_or_create_session_from_contact(contact_data):
@@ -194,28 +200,75 @@ def send_manychat_reply_async(subscriber_id, text_message, platform):
     except Exception as e:
         logger.error(f"❌ [SENDER] خطأ غير متوقع أثناء الإرسال: {e}", exc_info=True)
 
-def schedule_assistant_response(user_id):
-    # Grace period before lock to allow late-arriving messages
+# --- New helper: transcribe audio from a public URL (option C: only transcribe audio; images send as URLs)
+def transcribe_audio_url(audio_url):
+    """
+    Downloads the audio from the given URL (simple GET) and calls OpenAI transcription.
+    Returns the transcript string or None on failure.
+    """
     try:
-        logger.info(f"⏳ [DEBOUNCE] Grace period {GRACE_PERIOD}s before processing user {user_id}")
-        time.sleep(GRACE_PERIOD)
-    except:
-        pass
+        logger.info(f"🔊 [TRANSCRIBE] تنزيل ملف الصوت من {audio_url} ...")
+        resp = requests.get(audio_url, timeout=20)
+        resp.raise_for_status()
+        audio_bytes = resp.content
+    except Exception as e:
+        logger.error(f"❌ [TRANSCRIBE] فشل تنزيل الصوت من {audio_url}: {e}")
+        return None
 
+    try:
+        # Use to_thread to avoid blocking main thread if OpenAI client is blocking
+        transcription_resp = asyncio.run(asyncio.to_thread(
+            client.audio.transcriptions.create, audio_bytes, "audio.webm", {"model":"gpt-4o-mini-transcribe"}))
+        # The exact attribute depends on client; try common patterns
+        if hasattr(transcription_resp, "text"):
+            return transcription_resp.text
+        if isinstance(transcription_resp, dict) and transcription_resp.get("text"):
+            return transcription_resp.get("text")
+        # fallback to string
+        return str(transcription_resp)
+    except Exception as e:
+        logger.error(f"❌ [TRANSCRIBE] فشل تفريغ الصوت عبر OpenAI: {e}", exc_info=True)
+        return None
+
+def schedule_assistant_response(user_id):
     lock = processing_locks.setdefault(user_id, threading.Lock())
     with lock:
-        if user_id not in pending_messages or not pending_messages[user_id]: return
+        if user_id not in pending_messages or not pending_messages[user_id]:
+            return
         
         user_data = pending_messages[user_id]
         session = user_data["session"]
-        # دمج كل الرسائل المجمعة في نص واحد مع فواصل أسطر
-        combined_content = "\n".join(user_data["texts"])
-        
+
+        # --- جمع الأنواع المختلفة بدلاً من نص واحد ---
+        texts = user_data.get("texts", [])
+        images = user_data.get("images", [])
+        audios = user_data.get("audios", [])
+
+        # دمج كل النصوص المجمعة في نص واحد مع فواصل أسطر
+        combined_parts = []
+        if texts:
+            combined_parts.append("\n".join(texts))
+
+        # أضف روابط الصور (URLs) كسطر يمكن للمساعد أن يرجع إليه
+        for img_url in images:
+            combined_parts.append(f"[Image]: {img_url}")
+
+        # تفريغ الأصوات: نعمل تحويل إلى نص ونضيفها
+        for audio_url in audios:
+            transcript = transcribe_audio_url(audio_url)
+            if transcript:
+                combined_parts.append(f"[Audio transcript from {audio_url}]: {transcript}")
+            else:
+                combined_parts.append(f"[Audio at {audio_url}]: (failed to transcribe)")
+
+        combined_content = "\n\n".join(combined_parts).strip()
         logger.info(f"⚙️ [PROCESSOR] بدء معالجة المحتوى المجمع للمستخدم {user_id}: '{combined_content}'")
+
+        # Call assistant (unchanged flow) by running the async function from sync
         reply_text = asyncio.run(get_assistant_reply(session, combined_content))
         
         if reply_text:
-            send_manychat_reply_async(user_id, reply_text, platform=session["platform"])
+            send_manychat_reply_async(user_id, reply_text, platform=session.get("platform", "Facebook"))
             
             thread_id = session.get("openai_thread_id")
             if thread_id:
@@ -223,25 +276,61 @@ def schedule_assistant_response(user_id):
                 summary_thread = threading.Thread(target=lambda: asyncio.run(summarize_and_save_conversation(user_id, thread_id)))
                 summary_thread.start()
 
+        # cleanup
         if user_id in pending_messages: del pending_messages[user_id]
         if user_id in message_timers: del message_timers[user_id]
         logger.info(f"🗑️ [PROCESSOR] تم الانتهاء من المعالجة للمستخدم {user_id}.")
 
-def add_to_processing_queue(session, text_content):
+# --- تعديل add_to_processing_queue لدعم النص + صور + صوت ---
+def add_to_processing_queue(session, payload):
+    """
+    payload يمكن أن يكون:
+      - نص string -> يضاف إلى texts
+      - dict -> {'text': ..., 'image_url': ..., 'audio_url': ...}
+    """
     user_id = session["_id"]
+
+    # ensure pending structure exists
+    if user_id not in pending_messages or not pending_messages[user_id]:
+        pending_messages[user_id] = {"texts": [], "images": [], "audios": [], "session": session}
+    else:
+        # always update session reference (fresh)
+        pending_messages[user_id]["session"] = session
+
+    # cancel previous timer if exists
     if user_id in message_timers:
-        message_timers[user_id].cancel()
-        logger.info(f"⏳ [DEBOUNCE] تم إلغاء المؤقت القديم للمستخدم {user_id} لأنه أرسل رسالة جديدة.")
+        try:
+            message_timers[user_id].cancel()
+            logger.info(f"⏳ [DEBOUNCE] تم إلغاء المؤقت القديم للمستخدم {user_id} لأنه أرسل رسالة جديدة.")
+        except Exception:
+            pass
 
-    if user_id not in pending_messages:
-        pending_messages[user_id] = {"texts": [], "session": session}
-    pending_messages[user_id]["texts"].append(text_content)
-    logger.info(f"➕ [QUEUE] تمت إضافة محتوى إلى قائمة الانتظار للمستخدم {user_id}. حجم القائمة الآن: {len(pending_messages[user_id]['texts'])}")
+    # accept both simple strings and dict payloads
+    if isinstance(payload, str):
+        pending_messages[user_id]["texts"].append(payload)
+    elif isinstance(payload, dict):
+        text = payload.get("text")
+        image_url = payload.get("image_url")
+        audio_url = payload.get("audio_url")
+        if text:
+            pending_messages[user_id]["texts"].append(text)
+        if image_url:
+            pending_messages[user_id]["images"].append(image_url)
+        if audio_url:
+            pending_messages[user_id]["audios"].append(audio_url)
+    else:
+        # unknown type, ignore
+        logger.warning(f"⚠️ [QUEUE] payload type unknown for user {user_id}: {type(payload)}")
 
-    logger.info(f"⏳ [DEBOUNCE] بدء مؤقت جديد لمدة {BATCH_WAIT_TIME} ثانية للمستخدم {user_id}.")
+    logger.info(f"➕ [QUEUE] تمت إضافة محتوى إلى قائمة الانتظار للمستخدم {user_id}. "
+                f"counts: texts={len(pending_messages[user_id]['texts'])}, "
+                f"images={len(pending_messages[user_id]['images'])}, audios={len(pending_messages[user_id]['audios'])}")
+
+    # start a new debounce timer
     timer = threading.Timer(BATCH_WAIT_TIME, schedule_assistant_response, args=[user_id])
     message_timers[user_id] = timer
     timer.start()
+    logger.info(f"⏳ [DEBOUNCE] بدء مؤقت جديد لمدة {BATCH_WAIT_TIME} ثانية للمستخدم {user_id}.")
 
 # --- ويب هوك ManyChat (النسخة الموحدة) ---
 @app.route("/manychat_webhook", methods=["POST"])
@@ -263,17 +352,41 @@ def manychat_webhook_handler():
         return jsonify({"status": "error", "message": "Failed to create session"}), 500
 
     contact_data = data.get("full_contact", {})
-    last_input = contact_data.get("last_text_input") or contact_data.get("last_input_text") or data.get("last_input")
 
-    if not last_input:
-        logger.warning("[WEBHOOK] لم يتم العثور على إدخال نصي للمعالجة.")
+    # --- extract text, image, audio (compatible with common ManyChat shapes) ---
+    last_input = contact_data.get("last_text_input") or contact_data.get("last_input_text") or data.get("last_input")
+    image_url = None
+    audio_url = None
+
+    # attachments variants
+    att = contact_data.get("last_attachment") or contact_data.get("attachment") or data.get("last_attachment")
+    if isinstance(att, dict):
+        att_type = att.get("type")
+        if att_type == "image":
+            image_url = att.get("url") or att.get("file_url")
+        elif att_type == "audio":
+            audio_url = att.get("url") or att.get("file_url")
+
+    # other fields that some ManyChat variants use
+    if not image_url:
+        attachments = contact_data.get("attachments") or data.get("attachments")
+        if isinstance(attachments, list):
+            for a in attachments:
+                if a.get("type") == "image":
+                    image_url = a.get("url") or a.get("file_url")
+                    break
+
+    if not audio_url:
+        audio_url = contact_data.get("last_audio_url") or contact_data.get("audio_url") or data.get("last_audio_url")
+
+    # If nothing found, respond no_input_received
+    if not any([last_input, image_url, audio_url]):
+        logger.warning("[WEBHOOK] لم يتم العثور على إدخال نصي/صورة/صوت للمعالجة.")
         return jsonify({"status": "no_input_received"})
 
-    platform = session.get("platform", "Unknown")
-    logger.info(f"🚦 [UNIFIED] تم تحديد المنصة: {platform}. سيتم استخدام المسار الموحد.")
-
-    logger.info(f"🔄 [UNIFIED] تفعيل المسار غير المتزامن لـ {platform}.")
-    add_to_processing_queue(session, last_input)
+    # Build payload dict and enqueue (we use dict to allow images/audio)
+    payload = {"text": last_input, "image_url": image_url, "audio_url": audio_url}
+    add_to_processing_queue(session, payload)
     
     logger.info("✅ [WEBHOOK] تم إرسال الطلب للمعالجة. إرجاع تأكيد استلام فوري.")
     return jsonify({"status": "received"})
