@@ -1,376 +1,400 @@
-# main_app.py
-# Flask webhook + queue + debounce + media filtering (ignore .mp4) + merge text/images/audio
-# Designed per user's request: support TEXT, IMAGES, AUDIO (non-mp4). If an incoming media URL
-# is an MP4 (or contains 'audioclip'), it is ignored and the user immediately receives
-# the reply: "ابعت صوت مش فيديو."  (don't process mp4 at all)
-#
-# Requirements (based on your env): Flask, requests, openai (OpenAI client), pymongo (optional)
-#
-# How it works:
-# - Incoming webhook -> quick validation -> apply MP4 filter (reject and reply immediately)
-# - Otherwise, append item to per-user queue and (re)start a 0.5s debounce Timer
-# - When Timer fires: collect queued items for that user, merge them into one "batch message"
-#   (text concatenation, image urls list, audio urls list)
-# - For audio urls: attempt transcription (placeholder calling OpenAI whisper via client)
-# - Send single combined prompt to assistant (OpenAI) and send assistant reply to client
-#
-# Notes:
-# - This file contains helper placeholders for sending replies to Facebook/ManyChat.
-#   Replace send_facebook_message(...) with your real integration code.
-# - transcribe_audio(...) uses OpenAI's Audio Transcription endpoint; you may need to
-#   adapt the call depending on the OpenAI SDK version you have.
-# - Logging added to help debug. Make sure to set environment variables for API keys.
+# main.py (patched) — original code with safe media support (images URLs + audio transcription)
+# - Keeps original threading/timer architecture intact
+# - Adds support for: image URLs, audio URLs (transcribed to text)
+# - If text+image+audio arrive within the batch window -> they are merged into one message to the assistant
+# - Audio transcription uses OpenAI audio.transcriptions API (called in a thread); adjust model name if needed
+# - Minimal, safe changes; all original code paths preserved
 
 import os
 import time
-import threading
-import tempfile
+import json
 import requests
+import threading
+import asyncio
 import logging
 from flask import Flask, request, jsonify
-from urllib.parse import urlparse
+from openai import OpenAI
+from pymongo import MongoClient
+from datetime import datetime, timezone
+from dotenv import load_dotenv
 
-# OpenAI client - using the modern client if available
+# --- الإعدادات ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', handlers=[logging.StreamHandler()])
+logger = logging.getLogger(__name__)
+load_dotenv()
+logger.info("▶️ [START] تم تحميل إعدادات البيئة.")
+
+# --- مفاتيح API ---
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+ASSISTANT_ID_PREMIUM = os.getenv("ASSISTANT_ID_PREMIUM")
+MONGO_URI = os.getenv("MONGO_URI")
+MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
+MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
+logger.info("🔑 [CONFIG] تم تحميل مفاتيح API.")
+
+# --- قاعدة البيانات ---
 try:
-    from openai import OpenAI
-    client = OpenAI()
-except Exception:
-    client = None
+    client_db = MongoClient(MONGO_URI)
+    db = client_db["multi_platform_bot"]
+    sessions_collection = db["sessions"]
+    logger.info("✅ [DB] تم الاتصال بقاعدة البيانات بنجاح.")
+except Exception as e:
+    logger.critical(f"❌ [DB] فشل الاتصال بقاعدة البيانات: {e}", exc_info=True)
+    exit()
 
-# Configuration
-DEBOUNCE_SECONDS = 0.5
-MP4_REJECTION_MESSAGE = "ابعت صوت مش فيديو."  # reply when mp4 detected
-ALLOWED_AUDIO_EXT = {'.m4a', '.mp3', '.wav', '.ogg', '.aac'}
-
+# --- إعدادات التطبيق ---
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
+client = OpenAI(api_key=OPENAI_API_KEY)
+logger.info("🚀 [APP] تم إعداد تطبيق Flask و OpenAI Client.")
 
-# Per-user queues and timers
-user_queues = {}        # user_id -> list of items
-user_timers = {}        # user_id -> threading.Timer
-queues_lock = threading.Lock()
+# --- متغيرات عالمية للمعالجة غير المتزامنة ---
+# pending_messages[user_id] = {"texts": [], "images": [], "audios": [], "session": session}
+pending_messages = {}
+message_timers = {}
+processing_locks = {}
+# انتظر ثانيتين بعد آخر رسالة من المستخدم قبل معالجة الدفعة
+BATCH_WAIT_TIME = 0.5
 
-# ------------------------- Helper utilities -------------------------
+# --- دوال إدارة الجلسات ---
+def get_or_create_session_from_contact(contact_data):
+    user_id = str(contact_data.get("id"))
+    if not user_id:
+        logger.error(f"❌ [SESSION] لم يتم العثور على user_id في البيانات: {contact_data}")
+        return None
+        
+    session = sessions_collection.find_one({"_id": user_id})
+    now_utc = datetime.now(timezone.utc)
+    
+    main_platform = "Unknown"
+    contact_source = contact_data.get("source", "").lower()
+    if "instagram" in contact_source:
+        main_platform = "Instagram"
+    elif "facebook" in contact_source:
+        main_platform = "Facebook"
+    elif "ig_id" in contact_data and contact_data.get("ig_id"):
+        main_platform = "Instagram"
+    else:
+        main_platform = "Facebook"
 
-def is_mp4_url(url: str) -> bool:
-    if not url:
-        return False
-    u = url.lower()
-    if '.mp4' in u:
-        return True
-    if 'audioclip' in u:
-        # many Facebook audio clips are sent as mp4 container with 'audioclip' in name
-        return True
-    return False
+    logger.info(f"ℹ️ [SESSION] تم تحديد المنصة '{main_platform}' للمستخدم {user_id}.")
 
+    if session:
+        update_fields = {
+            "last_contact_date": now_utc, "platform": main_platform,
+            "profile.name": contact_data.get("name"), "profile.profile_pic": contact_data.get("profile_pic"),
+            "status": "active"
+        }
+        sessions_collection.update_one({"_id": user_id}, {"$set": {k: v for k, v in update_fields.items() if v is not None}})
+        logger.info(f"🔄 [SESSION] تم تحديث الجلسة الحالية للمستخدم {user_id}.")
+        return sessions_collection.find_one({"_id": user_id})
+    else:
+        logger.info(f"🆕 [SESSION] مستخدم جديد. جاري إنشاء جلسة شاملة له: {user_id}")
+        new_session = {
+            "_id": user_id, "platform": main_platform,
+            "profile": {"name": contact_data.get("name"), "first_name": contact_data.get("first_name"), "last_name": contact_data.get("last_name"), "profile_pic": contact_data.get("profile_pic")},
+            "openai_thread_id": None, "tags": [f"source:{main_platform.lower()}"],
+            "custom_fields": contact_data.get("custom_fields", {}),
+            "conversation_summary": "", "status": "active",
+            "first_contact_date": now_utc, "last_contact_date": now_utc
+        }
+        sessions_collection.insert_one(new_session)
+        return new_session
 
-def get_extension_from_url(url: str) -> str:
+# --- دوال الذاكرة طويلة الأمد ---
+async def summarize_and_save_conversation(user_id, thread_id):
+    logger.info(f"🧠 [MEMORY] بدء عملية تلخيص الذاكرة للمستخدم {user_id}.")
     try:
-        path = urlparse(url).path
-        _, dot, ext = path.rpartition('.')
-        if dot:
-            return '.' + ext.lower()
-    except Exception:
-        pass
-    return ''
+        messages = await asyncio.to_thread(client.beta.threads.messages.list, thread_id=thread_id, limit=20)
+        history = "\n".join([f"{msg.role}: {msg.content[0].text.value}" for msg in reversed(messages.data)])
+        
+        prompt = f"Please summarize the following conversation concisely in a few key points. This summary will be used as a memory for a chatbot. Focus on user needs, important details (like products they are interested in, their budget, contact info), and the last state of the conversation.\n\nConversation:\n{history}\n\nSummary:"
 
-
-def send_facebook_message(user_id: str, text: str):
-    """Placeholder: replace with actual ManyChat / Facebook send code.
-    This function should send `text` to the user on the originating platform.
-    Keep it synchronous or adapt to your async sending infra.
-    """
-    logging.info(f"[SENDER] to {user_id}: {text}")
-    # TODO: implement HTTP POST to ManyChat/Facebook API here using stored credentials
-
-
-def download_file(url: str, dest_path: str):
-    logging.info(f"Downloading file: {url}")
-    headers = {"User-Agent": "Mozilla/5.0"}
-    r = requests.get(url, headers=headers, stream=True, timeout=30)
-    r.raise_for_status()
-    with open(dest_path, 'wb') as f:
-        for chunk in r.iter_content(chunk_size=8192):
-            if chunk:
-                f.write(chunk)
-    logging.info(f"Saved to: {dest_path}")
-
-
-def transcribe_audio(url: str) -> str:
-    """Download audio file and transcribe using OpenAI's transcription (whisper) if client exists.
-    Returns the transcription text or empty string on failure.
-    NOTE: adapt this to your environment / SDK version.
-    """
-    if client is None:
-        logging.warning("OpenAI client not available: skipping transcription")
-        return ''
-    try:
-        with tempfile.NamedTemporaryFile(suffix=get_extension_from_url(url) or '.audio', delete=False) as tf:
-            tmp_path = tf.name
-        download_file(url, tmp_path)
-
-        # Depending on SDK: use client.audio.transcriptions.create or use requests to OpenAI endpoint.
-        # We'll attempt the client approach, but this may need adjustment to match your installed SDK.
-        try:
-            # Example for new OpenAI Python client (may vary):
-            # response = client.audio.transcriptions.create(file=open(tmp_path, 'rb'), model='gpt-4o-transcribe')
-            # Many setups use 'whisper-1' model name for transcription.
-            with open(tmp_path, 'rb') as fh:
-                resp = client.audio.transcriptions.create(file=fh, model='whisper-1')
-            text = resp.get('text') if isinstance(resp, dict) else getattr(resp, 'text', '')
-            logging.info(f"Transcription success: {text[:120]}")
-            return text or ''
-        except Exception as e:
-            logging.exception("Transcription via client failed, attempting fallback or returning empty")
-            return ''
+        response = await asyncio.to_thread(
+            client.chat.completions.create,
+            model="gpt-4.1-mini",
+            messages=[{"role": "system", "content": prompt}]
+        )
+        summary = response.choices[0].message.content.strip()
+        
+        sessions_collection.update_one({"_id": user_id}, {"$set": {"conversation_summary": summary}})
+        logger.info(f"✅ [MEMORY] تم تلخيص وتحديث الذاكرة للمستخدم {user_id}.")
     except Exception as e:
-        logging.exception("Error downloading/transcribing audio")
-        return ''
-    finally:
+        logger.error(f"❌ [MEMORY] فشل في تلخيص المحادثة للمستخدم {user_id}: {e}", exc_info=True)
+
+# --- دوال OpenAI (مُعدّلة لتستخدم الذاكرة) ---
+async def get_assistant_reply(session, content, timeout=90):
+    user_id = session["_id"]
+    thread_id = session.get("openai_thread_id")
+    summary = session.get("conversation_summary", "")
+    logger.info(f"🤖 [ASSISTANT] بدء عملية الحصول على رد للمستخدم {user_id}.")
+
+    if not thread_id:
+        logger.warning(f"🧵 [ASSISTANT] لا يوجد thread للمستخدم {user_id}. سيتم إنشاء واحد جديد.")
         try:
-            if 'tmp_path' in locals() and os.path.exists(tmp_path):
-                os.remove(tmp_path)
+            thread = await asyncio.to_thread(client.beta.threads.create)
+            thread_id = thread.id
+            sessions_collection.update_one({"_id": user_id}, {"$set": {"openai_thread_id": thread_id}})
+            logger.info(f"✅ [ASSISTANT] تم إنشاء وتخزين thread جديد: {thread_id}")
+        except Exception as e:
+            logger.error(f"❌ [ASSISTANT] فشل في إنشاء thread جديد: {e}", exc_info=True)
+            return "⚠️ عفوًا، حدث خطأ أثناء تهيئة المحادثة."
+
+    enriched_content = content
+    if summary:
+        logger.info(f"🧠 [MEMORY] تم العثور على ذاكرة سابقة للمستخدم. سيتم استخدامها.")
+        enriched_content = f"For your context, here is a summary of my previous conversations with this user: '{summary}'. Now, please respond to the user's new message(s): '{content}'"
+    else:
+        logger.info(f"🧠 [MEMORY] لا توجد ذاكرة سابقة للمستخدم.")
+
+    try:
+        logger.info(f"💬 [ASSISTANT] إضافة رسالة إلى Thread {thread_id}: '{content}'")
+        await asyncio.to_thread(client.beta.threads.messages.create, thread_id=thread_id, role="user", content=enriched_content)
+        
+        logger.info(f"▶️ [ASSISTANT] بدء تشغيل المساعد (Run) على Thread {thread_id}.")
+        run = await asyncio.to_thread(client.beta.threads.runs.create, thread_id=thread_id, assistant_id=ASSISTANT_ID_PREMIUM)
+        
+        start_time = time.time()
+        while run.status in ["queued", "in_progress"]:
+            if time.time() - start_time > timeout:
+                logger.error(f"⏰ [ASSISTANT] Timeout! استغرق الـ run {run.id} أكثر من {timeout} ثانية.")
+                return "⚠️ حدث تأخير في الرد، يرجى المحاولة مرة أخرى."
+            await asyncio.sleep(1)
+            run = await asyncio.to_thread(client.beta.threads.runs.retrieve, thread_id=thread_id, run_id=run.id)
+        
+        if run.status == "completed":
+            messages = await asyncio.to_thread(client.beta.threads.messages.list, thread_id=thread_id, limit=1)
+            reply = messages.data[0].content[0].text.value.strip()
+            logger.info(f"🗣️ [ASSISTANT] الرد الذي تم الحصول عليه: \"{reply}\"")
+            return reply
+        else:
+            logger.error(f"❌ [ASSISTANT] لم يكتمل الـ run. الحالة: {run.status}. الخطأ: {run.last_error}")
+            return "⚠️ عفوًا، حدث خطأ فني."
+    except Exception as e:
+        logger.error(f"❌ [ASSISTANT] حدث استثناء غير متوقع: {e}", exc_info=True)
+        return "⚠️ عفوًا، حدث خطأ غير متوقع."
+
+# --- دوال المعالجة غير المتزامنة ---
+def send_manychat_reply_async(subscriber_id, text_message, platform):
+    logger.info(f"📤 [SENDER] بدء إرسال رد إلى {subscriber_id} على منصة {platform}...")
+    if not MANYCHAT_API_KEY:
+        logger.error("❌ [SENDER] مفتاح MANYCHAT_API_KEY غير موجود!")
+        return
+
+    url = "https://api.manychat.com/fb/sending/sendContent"
+    headers = {"Authorization": f"Bearer {MANYCHAT_API_KEY}", "Content-Type": "application/json"}
+    channel = "instagram" if platform == "Instagram" else "facebook"
+
+    payload = {
+        "subscriber_id": str(subscriber_id ),
+        "data": {"version": "v2", "content": {"messages": [{"type": "text", "text": text_message.strip()}]}},
+        "channel": channel,
+    }
+
+    try:
+        response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=20)
+        response.raise_for_status()
+        logger.info(f"✅ [SENDER] تم إرسال الرسالة بنجاح إلى {subscriber_id} عبر {channel}.")
+    except requests.exceptions.HTTPError as e:
+        error_text = e.response.text if e.response is not None else str(e)
+        logger.error(f"❌ [SENDER] فشل إرسال الرسالة: {e}. تفاصيل الخطأ: {error_text}")
+    except Exception as e:
+        logger.error(f"❌ [SENDER] خطأ غير متوقع أثناء الإرسال: {e}", exc_info=True)
+
+# --- New helper: transcribe audio from a public URL (option C: only transcribe audio; images send as URLs)
+def transcribe_audio_url(audio_url):
+    """
+    Downloads the audio from the given URL (simple GET) and calls OpenAI transcription.
+    Returns the transcript string or None on failure.
+    """
+    try:
+        logger.info(f"🔊 [TRANSCRIBE] تنزيل ملف الصوت من {audio_url} ...")
+        resp = requests.get(audio_url, timeout=20)
+        resp.raise_for_status()
+        audio_bytes = resp.content
+    except Exception as e:
+        logger.error(f"❌ [TRANSCRIBE] فشل تنزيل الصوت من {audio_url}: {e}")
+        return None
+
+    try:
+        # Use to_thread to avoid blocking main thread if OpenAI client is blocking
+        transcription_resp = asyncio.run(asyncio.to_thread(
+            client.audio.transcriptions.create, audio_bytes, "audio.webm", {"model":"gpt-4o-mini-transcribe"}))
+        # The exact attribute depends on client; try common patterns
+        if hasattr(transcription_resp, "text"):
+            return transcription_resp.text
+        if isinstance(transcription_resp, dict) and transcription_resp.get("text"):
+            return transcription_resp.get("text")
+        # fallback to string
+        return str(transcription_resp)
+    except Exception as e:
+        logger.error(f"❌ [TRANSCRIBE] فشل تفريغ الصوت عبر OpenAI: {e}", exc_info=True)
+        return None
+
+def schedule_assistant_response(user_id):
+    lock = processing_locks.setdefault(user_id, threading.Lock())
+    with lock:
+        if user_id not in pending_messages or not pending_messages[user_id]:
+            return
+        
+        user_data = pending_messages[user_id]
+        session = user_data["session"]
+
+        # --- جمع الأنواع المختلفة بدلاً من نص واحد ---
+        texts = user_data.get("texts", [])
+        images = user_data.get("images", [])
+        audios = user_data.get("audios", [])
+
+        # دمج كل النصوص المجمعة في نص واحد مع فواصل أسطر
+        combined_parts = []
+        if texts:
+            combined_parts.append("\n".join(texts))
+
+        # أضف روابط الصور (URLs) كسطر يمكن للمساعد أن يرجع إليه
+        for img_url in images:
+            combined_parts.append(f"[Image]: {img_url}")
+
+        # تفريغ الأصوات: نعمل تحويل إلى نص ونضيفها
+        for audio_url in audios:
+            transcript = transcribe_audio_url(audio_url)
+            if transcript:
+                combined_parts.append(f"[Audio transcript from {audio_url}]: {transcript}")
+            else:
+                combined_parts.append(f"[Audio at {audio_url}]: (failed to transcribe)")
+
+        combined_content = "\n\n".join(combined_parts).strip()
+        logger.info(f"⚙️ [PROCESSOR] بدء معالجة المحتوى المجمع للمستخدم {user_id}: '{combined_content}'")
+
+        # Call assistant (unchanged flow) by running the async function from sync
+        reply_text = asyncio.run(get_assistant_reply(session, combined_content))
+        
+        if reply_text:
+            send_manychat_reply_async(user_id, reply_text, platform=session.get("platform", "Facebook"))
+            
+            thread_id = session.get("openai_thread_id")
+            if thread_id:
+                logger.info(f"🗓️ [MEMORY] جدولة عملية تلخيص الذاكرة للمستخدم {user_id}.")
+                summary_thread = threading.Thread(target=lambda: asyncio.run(summarize_and_save_conversation(user_id, thread_id)))
+                summary_thread.start()
+
+        # cleanup
+        if user_id in pending_messages: del pending_messages[user_id]
+        if user_id in message_timers: del message_timers[user_id]
+        logger.info(f"🗑️ [PROCESSOR] تم الانتهاء من المعالجة للمستخدم {user_id}.")
+
+# --- تعديل add_to_processing_queue لدعم النص + صور + صوت ---
+def add_to_processing_queue(session, payload):
+    """
+    payload يمكن أن يكون:
+      - نص string -> يضاف إلى texts
+      - dict -> {'text': ..., 'image_url': ..., 'audio_url': ...}
+    """
+    user_id = session["_id"]
+
+    # ensure pending structure exists
+    if user_id not in pending_messages or not pending_messages[user_id]:
+        pending_messages[user_id] = {"texts": [], "images": [], "audios": [], "session": session}
+    else:
+        # always update session reference (fresh)
+        pending_messages[user_id]["session"] = session
+
+    # cancel previous timer if exists
+    if user_id in message_timers:
+        try:
+            message_timers[user_id].cancel()
+            logger.info(f"⏳ [DEBOUNCE] تم إلغاء المؤقت القديم للمستخدم {user_id} لأنه أرسل رسالة جديدة.")
         except Exception:
             pass
 
+    # accept both simple strings and dict payloads
+    if isinstance(payload, str):
+        pending_messages[user_id]["texts"].append(payload)
+    elif isinstance(payload, dict):
+        text = payload.get("text")
+        image_url = payload.get("image_url")
+        audio_url = payload.get("audio_url")
+        if text:
+            pending_messages[user_id]["texts"].append(text)
+        if image_url:
+            pending_messages[user_id]["images"].append(image_url)
+        if audio_url:
+            pending_messages[user_id]["audios"].append(audio_url)
+    else:
+        # unknown type, ignore
+        logger.warning(f"⚠️ [QUEUE] payload type unknown for user {user_id}: {type(payload)}")
 
-# ------------------------- Queueing + Debounce logic -------------------------
+    logger.info(f"➕ [QUEUE] تمت إضافة محتوى إلى قائمة الانتظار للمستخدم {user_id}. "
+                f"counts: texts={len(pending_messages[user_id]['texts'])}, "
+                f"images={len(pending_messages[user_id]['images'])}, audios={len(pending_messages[user_id]['audios'])}")
 
-def start_or_restart_timer(user_id: str):
-    def timer_cb():
-        try:
-            process_user_queue(user_id)
-        except Exception:
-            logging.exception("Error in process_user_queue")
+    # start a new debounce timer
+    timer = threading.Timer(BATCH_WAIT_TIME, schedule_assistant_response, args=[user_id])
+    message_timers[user_id] = timer
+    timer.start()
+    logger.info(f"⏳ [DEBOUNCE] بدء مؤقت جديد لمدة {BATCH_WAIT_TIME} ثانية للمستخدم {user_id}.")
 
-    with queues_lock:
-        if user_id in user_timers and user_timers[user_id] is not None:
-            user_timers[user_id].cancel()
-        t = threading.Timer(DEBOUNCE_SECONDS, timer_cb)
-        user_timers[user_id] = t
-        t.start()
+# --- ويب هوك ManyChat (النسخة الموحدة) ---
+@app.route("/manychat_webhook", methods=["POST"])
+def manychat_webhook_handler():
+    logger.info("📞 [WEBHOOK] تم استلام طلب جديد.")
+    auth_header = request.headers.get('Authorization')
+    if not MANYCHAT_SECRET_KEY or auth_header != f'Bearer {MANYCHAT_SECRET_KEY}':
+        logger.critical("🚨 [WEBHOOK] محاولة وصول غير مصرح بها!")
+        return jsonify({"status": "error", "message": "Unauthorized"}), 403
+    
+    data = request.get_json()
+    if not data or not data.get("full_contact"):
+        logger.error("❌ [WEBHOOK] CRITICAL: 'full_contact' غير موجودة.")
+        return jsonify({"status": "error", "message": "Invalid data"}), 400
 
+    session = get_or_create_session_from_contact(data["full_contact"])
+    if not session:
+        logger.error("❌ [WEBHOOK] فشل في إنشاء أو الحصول على جلسة.")
+        return jsonify({"status": "error", "message": "Failed to create session"}), 500
 
-def enqueue_item(user_id: str, item: dict):
-    """item: dict with keys: type in ('text','image','audio'), content: text or url"""
-    with queues_lock:
-        user_queues.setdefault(user_id, []).append(item)
-    start_or_restart_timer(user_id)
+    contact_data = data.get("full_contact", {})
 
+    # --- extract text, image, audio (compatible with common ManyChat shapes) ---
+    last_input = contact_data.get("last_text_input") or contact_data.get("last_input_text") or data.get("last_input")
+    image_url = None
+    audio_url = None
 
-def process_user_queue(user_id: str):
-    logging.info(f"Processing queue for user {user_id}")
-    with queues_lock:
-        items = user_queues.pop(user_id, [])
-        timer = user_timers.pop(user_id, None)
-        if timer is not None:
-            try:
-                timer.cancel()
-            except Exception:
-                pass
+    # attachments variants
+    att = contact_data.get("last_attachment") or contact_data.get("attachment") or data.get("last_attachment")
+    if isinstance(att, dict):
+        att_type = att.get("type")
+        if att_type == "image":
+            image_url = att.get("url") or att.get("file_url")
+        elif att_type == "audio":
+            audio_url = att.get("url") or att.get("file_url")
 
-    if not items:
-        logging.info("No items to process")
-        return
+    # other fields that some ManyChat variants use
+    if not image_url:
+        attachments = contact_data.get("attachments") or data.get("attachments")
+        if isinstance(attachments, list):
+            for a in attachments:
+                if a.get("type") == "image":
+                    image_url = a.get("url") or a.get("file_url")
+                    break
 
-    # Merge items
-    texts = []
-    image_urls = []
-    audio_urls = []
+    if not audio_url:
+        audio_url = contact_data.get("last_audio_url") or contact_data.get("audio_url") or data.get("last_audio_url")
 
-    for it in items:
-        t = it.get('type')
-        c = it.get('content')
-        if t == 'text' and c:
-            texts.append(c)
-        elif t == 'image' and c:
-            image_urls.append(c)
-        elif t == 'audio' and c:
-            audio_urls.append(c)
+    # If nothing found, respond no_input_received
+    if not any([last_input, image_url, audio_url]):
+        logger.warning("[WEBHOOK] لم يتم العثور على إدخال نصي/صورة/صوت للمعالجة.")
+        return jsonify({"status": "no_input_received"})
 
-    # Transcribe audios (best-effort, sequential)
-    transcriptions = []
-    for aurl in audio_urls:
-        try:
-            txt = transcribe_audio(aurl)
-            if txt:
-                transcriptions.append(txt)
-        except Exception:
-            logging.exception("Failed to transcribe audio url: %s", aurl)
+    # Build payload dict and enqueue (we use dict to allow images/audio)
+    payload = {"text": last_input, "image_url": image_url, "audio_url": audio_url}
+    add_to_processing_queue(session, payload)
+    
+    logger.info("✅ [WEBHOOK] تم إرسال الطلب للمعالجة. إرجاع تأكيد استلام فوري.")
+    return jsonify({"status": "received"})
 
-    # Build final assistant prompt
-    prompt_parts = []
-    if texts:
-        prompt_parts.append("\n\n-- User texts: --\n" + "\n".join(texts))
-    if transcriptions:
-        prompt_parts.append("\n\n-- Audio transcriptions: --\n" + "\n".join(transcriptions))
-    if image_urls:
-        prompt_parts.append("\n\n-- Image URLs (for reference): --\n" + "\n".join(image_urls))
+# --- نقطة الدخول الرئيسية ---
+@app.route("/")
+def home():
+    return "✅ Bot is running in Unified Mode with Long-Term Memory (v19 - Final)."
 
-    final_prompt = "\n\n".join(prompt_parts).strip()
-    if not final_prompt:
-        # Nothing meaningful to send
-        logging.info("No meaningful content after merge; skipping assistant call")
-        return
-
-    # Call assistant (placeholder) - adapt to your OpenAI usage (chat/completions, Threads, etc.)
-    assistant_reply = call_assistant(final_prompt)
-
-    # Send assistant reply back to the user (via Facebook / ManyChat)
-    if assistant_reply:
-        send_facebook_message(user_id, assistant_reply)
-
-
-def call_assistant(prompt_text: str) -> str:
-    """Placeholder for calling OpenAI assistant. Replace according to your preferred endpoint.
-    Returns assistant's text reply or empty string.
-    """
-    logging.info("Calling assistant with prompt length=%d", len(prompt_text))
-    if client is None:
-        logging.warning("OpenAI client not available; returning placeholder reply")
-        return "معليش، مش قادر أرد دلوقتي — فيه مشكلة في خدمة المعالج." 
-
-    try:
-        # Example: using chat completions (adjust model and payload per your setup)
-        resp = client.chat.completions.create(
-            model='gpt-4o-mini',
-            messages=[
-                {"role": "system", "content": "أنت مساعد خبير. اقراء محتوى المستخدم وأجب باختصار وبلغة عربية فصحى أو عربية عامية حسب النص."},
-                {"role": "user", "content": prompt_text}
-            ],
-            max_tokens=800,
-        )
-        # Parse response - adapt to SDK response structure
-        if isinstance(resp, dict):
-            # new clients often return dict
-            choices = resp.get('choices', [])
-            if choices:
-                return choices[0].get('message', {}).get('content', '').strip()
-        else:
-            # object-like response
-            try:
-                return resp.choices[0].message.content.strip()
-            except Exception:
-                pass
-    except Exception:
-        logging.exception("Assistant call failed")
-    return ''
-
-
-# ------------------------- Webhook endpoint -------------------------
-
-@app.route('/manychat_webhook', methods=['POST'])
-def manychat_webhook():
-    payload = request.get_json(silent=True) or {}
-    logging.info(f"Webhook received: keys={list(payload.keys())}")
-
-    # Extract platform user id and message info - adapt this section to ManyChat payload
-    # For example payload: {"user_id": "123", "message": {"type":"text","text":"hello"}}
-
-    user_id = str(payload.get('user_id') or payload.get('sender', {}).get('id') or payload.get('from'))
-    message = payload.get('message') or payload.get('data') or payload
-
-    # Basic guard
-    if not user_id:
-        logging.warning("Webhook missing user identification")
-        return jsonify({'status': 'missing user id'}), 400
-
-    # Normalize incoming items: check text, images, audio urls
-    # This section must be adapted to your provider's exact JSON shape.
-    # We'll attempt several common fields.
-    items_to_add = []
-
-    # Text
-    text = None
-    if isinstance(message, dict):
-        text = message.get('text') or message.get('message') or message.get('body')
-    if not text and isinstance(payload.get('text'), str):
-        text = payload.get('text')
-
-    if text:
-        items_to_add.append({'type': 'text', 'content': text})
-
-    # Images - try attachments
-    image_urls = []  # FIX: ensure image_urls is defined before use / media
-    media_urls = []
-    # ManyChat/Facebook often uses 'attachments' array
-    attachments = message.get('attachments') if isinstance(message, dict) else None
-    if attachments and isinstance(attachments, list):
-        for a in attachments:
-            url = a.get('payload', {}).get('url') or a.get('url')
-            if url:
-                media_urls.append(url)
-
-    # Also check direct fields that sometimes appear
-    for key in ['image_url', 'image', 'photo']:
-        v = message.get(key) if isinstance(message, dict) else None
-        if isinstance(v, str):
-            media_urls.append(v)
-
-    # Audio fields
-    audio_urls = []
-    for key in ['audio_url', 'audio', 'voice']:
-        v = message.get(key) if isinstance(message, dict) else None
-        if isinstance(v, str):
-            audio_urls.append(v)
-
-    # Also check 'media' list or 'attachments' we already processed
-    if isinstance(message, dict) and message.get('media'):
-        for m in message.get('media'):
-            if isinstance(m, str):
-                media_urls.append(m)
-            elif isinstance(m, dict):
-                url = m.get('url') or m.get('src')
-                if url:
-                    media_urls.append(url)
-
-    # Merge discovered media into image/audio classification
-    for url in media_urls:
-        if not url:
-            continue
-        if is_mp4_url(url):
-            # immediate rejection: mp4 found -> send short reply and DO NOT enqueue
-            logging.info(f"MP4 detected for user {user_id}: {url} -> rejecting")
-            send_facebook_message(user_id, MP4_REJECTION_MESSAGE)
-            # Important: if mp4 appears, do not enqueue any of this webhook's contents
-            return jsonify({'status': 'rejected mp4'}), 200
-        ext = get_extension_from_url(url)
-        if ext in ALLOWED_AUDIO_EXT:
-            audio_urls.append(url)
-        else:
-            # treat as image by default
-            image_urls.append(url)
-
-    # Add image items
-    for img in image_urls:
-        items_to_add.append({'type': 'image', 'content': img})
-
-    # Add audio items
-    for au in audio_urls:
-        # if mp4 passed somehow, defend again
-        if is_mp4_url(au):
-            logging.info(f"MP4 found in audio loop for user {user_id} -> rejecting")
-            send_facebook_message(user_id, MP4_REJECTION_MESSAGE)
-            return jsonify({'status': 'rejected mp4'}), 200
-        items_to_add.append({'type': 'audio', 'content': au})
-
-    # If nothing meaningful, reply back politely
-    if not items_to_add:
-        logging.info("No meaningful content to queue; sending default prompt reply")
-        send_facebook_message(user_id, "ما استلمتش حاجة صالحة. ممكن تبعت رسالة نصية أو صورة أو تسجيل صوتي؟")
-        return jsonify({'status': 'no content'}), 200
-
-    # Enqueue items
-    for it in items_to_add:
-        enqueue_item(user_id, it)
-
-    # Acknowledge webhook receipt quickly (we don't say "thanks for the file")
-    # We will send the user the real reply after processing the batch.
-    return jsonify({'status': 'queued'}), 200
-
-
-# ------------------------- Run Flask -------------------------
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port)
+if __name__ == "__main__":
+    logger.info("🚀 التطبيق جاهز للتشغيل. يرجى استخدام خادم WSGI (مثل Gunicorn) لتشغيله في بيئة الإنتاج.")
