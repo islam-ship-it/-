@@ -1,6 +1,10 @@
-flask==2.3.3
-python-dotenv==1.0.0
-requests==2.31.0
-pymongo==4.5.0
-openai==0.28.1
-gunicorn==21.2.0
+flask[async]
+openai
+pymongo
+apscheduler
+requests
+python-dotenv
+gunicorn
+uvicorn
+asgiref
+python-telegram-bot
