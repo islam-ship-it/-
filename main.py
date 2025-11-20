@@ -201,7 +201,7 @@ async def build_contents(texts: List[str], image_urls: List[str], audio_urls: Li
 
     if texts:
         combined = "
-".join(texts)
+".join(texts).join(texts)
         out.append({"type": "input_text", "text": combined})
 
     for img in image_urls:
