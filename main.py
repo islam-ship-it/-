@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 # -------------------------------
-# 🚨 FULL DEBUG LOGGING MODE
+# 🚨 FULL DEBUG LOGGING MODE — لا يتم تفعيله قبل إنشاء app
 # -------------------------------
 import http.client as http_client
 http_client.HTTPConnection.debuglevel = 1
@@ -31,26 +31,6 @@ logging.getLogger("werkzeug").setLevel(logging.DEBUG)
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-@app.before_request
-def before_logging():
-    logger.debug("======== NEW REQUEST ========")
-    logger.debug(f"URL: {request.url}")
-    logger.debug(f"Method: {request.method}")
-    logger.debug(f"Headers: {dict(request.headers)}")
-    try:
-        logger.debug(f"Body: {request.get_data(as_text=True)}")
-    except:
-        logger.debug("Body: <UNREADABLE>")
-
-@app.after_request
-def after_logging(response):
-    logger.debug("======== RESPONSE SENT ========")
-    logger.debug(f"Status: {response.status}")
-    try:
-        logger.debug(f"Body: {response.get_data(as_text=True)}")
-    except:
-        logger.debug("Body: <UNREADABLE>")
-    return response
 
 # -------------------------------
 # تحميل الإعدادات
@@ -65,10 +45,6 @@ MONGO_URI = os.getenv("MONGO_URI")
 
 MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
 MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
-
-# ⛔ تمت إزالة:
-# META_VERIFY_TOKEN
-# PAGE_ACCESS_TOKEN
 
 logger.info("🔑 [CONFIG] تم تحميل مفاتيح API (بدون Meta Tokens).")
 
@@ -95,24 +71,42 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 logger.info("🚀 [APP] تم إعداد Flask و OpenAI.")
 
 # -------------------------------
-# متغيرات
+# 🔥 ضـع الـ Debug Logging هنا — بعد إنشاء app
 # -------------------------------
+
+@app.before_request
+def before_logging():
+    logger.debug("======== NEW REQUEST ========")
+    logger.debug(f"URL: {request.url}")
+    logger.debug(f"Method: {request.method}")
+    logger.debug(f"Headers: {dict(request.headers)}")
+    try:
+        logger.debug(f"Body: {request.get_data(as_text=True)}")
+    except:
+        logger.debug("Body: <UNREADABLE>")
+
+@app.after_request
+def after_logging(response):
+    logger.debug("======== RESPONSE SENT ========")
+    logger.debug(f"Status: {response.status}")
+    try:
+        logger.debug(f"Body: {response.get_data(as_text=True)}")
+    except:
+        logger.debug("Body: <UNREADABLE>")
+    return response
+
+
+# -------------------------------
+# باقي الكود كما هو (بدون Meta)
+# -------------------------------
+
 
 pending_messages = {}
 message_timers = {}
 processing_locks = {}
 BATCH_WAIT_TIME = 2.0
 
-# =====================================================================
-#  🚨 تمت إزالة كل الأكواد المتعلقة بـ Meta
-#  (verify token + send_meta_reply + الويب هوك الخاص بـ Meta)
-# =====================================================================
-
-
-# -------------------------------
-# الدوال كما هي 100%
-# -------------------------------
-
+# == get_or_create_session_from_contact ===
 def get_or_create_session_from_contact(contact_data, platform):
     user_id = str(contact_data.get("id"))
     if not user_id:
@@ -299,10 +293,6 @@ def add_to_queue(session, text):
     timer.start()
 
 
-# ----------------------------
-# ManyChat Webhook
-# ----------------------------
-
 @app.route("/manychat_webhook", methods=["POST"])
 def mc_webhook():
 
@@ -351,18 +341,10 @@ def mc_webhook():
     return jsonify({"ok": True}), 200
 
 
-# ----------------------------
-# الصفحة الرئيسية
-# ----------------------------
-
 @app.route("/")
 def home():
-    return "Bot running (No Meta API)."
+    return "Bot running (No Meta API + Debug Mode)."
 
-
-# ----------------------------
-# تشغيل التطبيق
-# ----------------------------
 
 if __name__ == "__main__":
     logger.info("🚀 جاهز للتشغيل.")
