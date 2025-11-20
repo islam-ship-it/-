@@ -1,12 +1,10 @@
-# main.py (Patched v21 - Final)
-# - Keeps original threading/timer architecture intact
-# - Adds support for: image URLs, audio URLs (transcribed to text)
-# - If text+image+audio arrive within the batch window -> they are merged into one message to the assistant
-# - Audio transcription uses OpenAI audio.transcriptions API (called in a thread); model is 'whisper-1'
-# - Minimal, safe changes; all original code paths preserved
-# - FIX: Implemented a strict threading.Lock in schedule_assistant_response to prevent concurrent processing for the same user.
-# - FIX: Added active waiting logic in get_assistant_reply to handle existing active Runs (safety net).
-# - UPDATE: Removed long-term memory (summarization) and replaced it with sending the last 10 messages as context.
+# main.py (Patched v22 - Final)
+# - Structured JSON payload to assistant (prevents "thanks for the file" and duplicate/garbled replies)
+# - Uses last 10 messages as structured history (role + text)
+# - Keeps threading/timer architecture; strict Lock per user to prevent concurrent processing
+# - Audio transcribed to text (whisper-1) and included in audio_texts list
+# - Images sent as URLs in images list
+# - Batch window 0.5s: text+image+audio merged
 
 import os
 import time
@@ -51,11 +49,9 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 logger.info("🚀 [APP] تم إعداد تطبيق Flask و OpenAI Client.")
 
 # --- متغيرات عالمية للمعالجة غير المتزامنة ---
-# pending_messages[user_id] = {"texts": [], "images": [], "audios": [], "session": session}
 pending_messages = {}
 message_timers = {}
 processing_locks = {}
-# انتظر ثانيتين بعد آخر رسالة من المستخدم قبل معالجة الدفعة
 BATCH_WAIT_TIME = 0.5
 
 # --- دوال إدارة الجلسات ---
@@ -103,15 +99,14 @@ def get_or_create_session_from_contact(contact_data):
         sessions_collection.insert_one(new_session)
         return new_session
 
-# --- تم إلغاء دوال الذاكرة طويلة الأمد (التلخيص) بناءً على طلب المستخدم ---
-
-# --- دوال OpenAI (مُعدّلة لتستخدم الذاكرة) ---
-async def get_assistant_reply(session, content, timeout=90):
+# --- دوال OpenAI ---
+async def get_assistant_reply(session, json_payload, timeout=90):
+    """
+    json_payload: a Python dict (structured), will be converted to JSON string and sent to the assistant.
+    This function creates/uses a thread, appends a user message containing the JSON, then creates a Run and waits.
+    """
     user_id = session["_id"]
     thread_id = session.get("openai_thread_id")
-    # تم إلغاء الذاكرة الطويلة (التلخيص) بناءً على طلب المستخدم.
-    # سيتم إرسال آخر 10 رسائل من المحادثة كـ "سياق" بدلاً من ذلك.
-    # يتم استرجاع الرسائل لاحقًا عند الحاجة.
     logger.info(f"🤖 [ASSISTANT] بدء عملية الحصول على رد للمستخدم {user_id}.")
 
     if not thread_id:
@@ -125,63 +120,52 @@ async def get_assistant_reply(session, content, timeout=90):
             logger.error(f"❌ [ASSISTANT] فشل في إنشاء thread جديد: {e}", exc_info=True)
             return "⚠️ عفوًا، حدث خطأ أثناء تهيئة المحادثة."
 
-    enriched_content = content
-    # استرجاع آخر 10 رسائل من المحادثة كذاكرة قصيرة المدى
-    try:
-        messages = await asyncio.to_thread(client.beta.threads.messages.list, thread_id=thread_id, limit=10)
-        # تصفية الرسائل وإعدادها كـ "سياق"
-        # ملاحظة: يتم عكس الترتيب لأن API يعيد الأحدث أولاً، ونحن نريدها بالترتيب الزمني
-        history = "\n".join([f"{msg.role}: {msg.content[0].text.value}" for msg in reversed(messages.data) if msg.role != "user"])
-        
-        if history:
-            logger.info(f"🧠 [MEMORY] تم إعداد آخر 10 رسائل من المحادثة كذاكرة قصيرة المدى.")
-            enriched_content = f"For your context, here is the history of our last 10 messages (excluding your last message): \n---\n{history}\n---\nNow, please respond to the user's new message(s): '{content}'"
-        else:
-            logger.info(f"🧠 [MEMORY] لا توجد ذاكرة سابقة للمستخدم.")
-            enriched_content = content
-            
-    except Exception as e:
-        logger.error(f"❌ [MEMORY] فشل في استرجاع سجل المحادثة: {e}", exc_info=True)
-        enriched_content = content
+    # Prepare structured JSON string for assistant
+    # We include a short wrapper instruction to ensure the assistant:
+    #  - reads the JSON and responds with a single message
+    #  - does NOT comment on attachments or say 'thanks for the file'
+    payload_string = json.dumps(json_payload, ensure_ascii=False)
+    instruction = (
+        "You are a helpful assistant. The user's input is provided below as a JSON object. "
+        "Read the JSON and answer the user's request once, in Arabic. "
+        "Do NOT mention or apologize about files/attachments. "
+        "Do NOT output JSON — output only the natural-language reply to the user's request. "
+        "Keep the reply concise and focused.\n\n"
+        "JSON:\n"
+    )
+    enriched_content = instruction + payload_string
 
     try:
-        # --- FIX: Active Waiting for existing Run ---
-        # 1. التحقق من وجود Run نشط والانتظار حتى يكتمل
+        # --- Wait if there is an active run ---
         runs = await asyncio.to_thread(client.beta.threads.runs.list, thread_id=thread_id, limit=1)
         if runs.data and runs.data[0].status in ["queued", "in_progress"]:
             active_run = runs.data[0]
             logger.warning(f"⏳ [ASSISTANT] تم العثور على Run نشط سابق ({active_run.id}). جاري الانتظار حتى يكتمل.")
-            
             start_time = time.time()
             while active_run.status in ["queued", "in_progress"]:
                 if time.time() - start_time > timeout:
-                    logger.error(f"⏰ [ASSISTANT] Timeout! فشل انتظار Run نشط سابق ({active_run.id}).")
-                    # يمكن هنا محاولة إلغاء الـ Run النشط إذا لزم الأمر، لكن الأمان هو العودة برسالة خطأ
+                    logger.error(f"⏰ [ASSISTANT] Timeout waiting for active run ({active_run.id}).")
                     return "⚠️ حدث تأخير في الرد بسبب معالجة سابقة لم تكتمل."
                 await asyncio.sleep(1)
                 active_run = await asyncio.to_thread(client.beta.threads.runs.retrieve, thread_id=thread_id, run_id=active_run.id)
-            
-            if active_run.status != "completed":
-                logger.error(f"❌ [ASSISTANT] الـ Run السابق فشل أو تم إلغاؤه. الحالة: {active_run.status}")
-                # إذا فشل الـ Run السابق، يمكننا المتابعة وإضافة الرسالة الجديدة
-                
-        # 2. إضافة الرسالة الجديدة بأمان
-        logger.info(f"💬 [ASSISTANT] إضافة رسالة إلى Thread {thread_id}: '{content}'")
+
+        # add the structured message as a single user message
+        logger.info(f"💬 [ASSISTANT] إضافة رسالة مُهيكلة إلى Thread {thread_id} للمستخدم {user_id}.")
         await asyncio.to_thread(client.beta.threads.messages.create, thread_id=thread_id, role="user", content=enriched_content)
-        
-        # 3. إنشاء Run جديد
+
+        # start a run
         logger.info(f"▶️ [ASSISTANT] بدء تشغيل المساعد (Run) على Thread {thread_id}.")
         run = await asyncio.to_thread(client.beta.threads.runs.create, thread_id=thread_id, assistant_id=ASSISTANT_ID_PREMIUM)
-        
-        # 4. انتظار الـ Run الجديد
+
+        # wait for completion
         start_time = time.time()
         while run.status in ["queued", "in_progress"]:
             if time.time() - start_time > timeout:
-                logger.error(f"⏰ [ASSISTANT] Timeout! استغرق الـ run {run.id} أكثر من {timeout} ثانية.")
+                logger.error(f"⏰ [ASSISTANT] Timeout! run {run.id} took more than {timeout} seconds.")
                 return "⚠️ حدث تأخير في الرد، يرجى المحاولة مرة أخرى."
             await asyncio.sleep(1)
             run = await asyncio.to_thread(client.beta.threads.runs.retrieve, thread_id=thread_id, run_id=run.id)
-        
+
         if run.status == "completed":
             messages = await asyncio.to_thread(client.beta.threads.messages.list, thread_id=thread_id, limit=1)
             reply = messages.data[0].content[0].text.value.strip()
@@ -194,7 +178,7 @@ async def get_assistant_reply(session, content, timeout=90):
         logger.error(f"❌ [ASSISTANT] حدث استثناء غير متوقع: {e}", exc_info=True)
         return "⚠️ عفوًا، حدث خطأ غير متوقع."
 
-# --- دوال المعالجة غير المتزامنة ---
+# --- إرسال رد ManyChat ---
 def send_manychat_reply_async(subscriber_id, text_message, platform):
     logger.info(f"📤 [SENDER] بدء إرسال رد إلى {subscriber_id} على منصة {platform}...")
     if not MANYCHAT_API_KEY:
@@ -206,8 +190,8 @@ def send_manychat_reply_async(subscriber_id, text_message, platform):
     channel = "instagram" if platform == "Instagram" else "facebook"
 
     payload = {
-        "subscriber_id": str(subscriber_id  ),
-        "data": {"version": "v2", "content": {"messages": [{"type": "text", "text": text_message.strip()}]}},
+        "subscriber_id": str(subscriber_id),
+        "data": {"version": "v2", "content": {"messages": [{"type": "text", "text": text_message.strip()}] }},
         "channel": channel,
     }
 
@@ -221,12 +205,8 @@ def send_manychat_reply_async(subscriber_id, text_message, platform):
     except Exception as e:
         logger.error(f"❌ [SENDER] خطأ غير متوقع أثناء الإرسال: {e}", exc_info=True)
 
-# --- New helper: transcribe audio from a public URL (option C: only transcribe audio; images send as URLs)
+# --- تفريغ الصوت من URL ---
 def transcribe_audio_url(audio_url):
-    """
-    Downloads the audio from the given URL (simple GET) and calls OpenAI transcription.
-    Returns the transcript string or None on failure.
-    """
     try:
         logger.info(f"🔊 [TRANSCRIBE] تنزيل ملف الصوت من {audio_url} ...")
         resp = requests.get(audio_url, timeout=20)
@@ -237,7 +217,6 @@ def transcribe_audio_url(audio_url):
         return None
 
     try:
-        # Use to_thread to avoid blocking main thread if OpenAI client is blocking
         transcription_resp = asyncio.run(asyncio.to_thread(
             client.audio.transcriptions.create, file=("audio.webm", audio_bytes), model="whisper-1"))
         
@@ -245,88 +224,102 @@ def transcribe_audio_url(audio_url):
             return transcription_resp.text
         if isinstance(transcription_resp, dict) and transcription_resp.get("text"):
             return transcription_resp.get("text")
-        # fallback to string
         return str(transcription_resp)
     except Exception as e:
         logger.error(f"❌ [TRANSCRIBE] فشل تفريغ الصوت عبر OpenAI: {e}", exc_info=True)
         return None
 
+# --- schedule_assistant_response (builds structured JSON payload) ---
 def schedule_assistant_response(user_id):
-    # --- FIX: Use a strict Lock for the entire processing block ---
     lock = processing_locks.setdefault(user_id, threading.Lock())
-    
-    # محاولة الحصول على القفل. إذا كان هناك معالج آخر يعمل، يتم تجاهل هذا الطلب
-    # هذا يضمن أن عملية معالجة واحدة فقط يمكن أن تعمل في أي وقت للمستخدم الواحد.
     if not lock.acquire(blocking=False):
         logger.warning(f"⚠️ [PROCESSOR] تم تجاهل طلب معالجة للمستخدم {user_id} لأن معالجًا آخر لا يزال نشطًا (Lock acquired).")
         return
-        
+
     try:
         if user_id not in pending_messages or not pending_messages[user_id]:
             return
-        
+
         user_data = pending_messages[user_id]
         session = user_data["session"]
 
-        # --- جمع الأنواع المختلفة بدلاً من نص واحد ---
         texts = user_data.get("texts", [])
         images = user_data.get("images", [])
         audios = user_data.get("audios", [])
 
-        # دمج كل النصوص المجمعة في نص واحد مع فواصل أسطر
-        combined_parts = []
-        if texts:
-            combined_parts.append("\n".join(texts))
-
-        # أضف روابط الصور (URLs) كسطر يمكن للمساعد أن يرجع إليه
-        for img_url in images:
-            combined_parts.append(f"[Image]: {img_url}")
-
-        # تفريغ الأصوات: نعمل تحويل إلى نص ونضيفها
+        # Collect final structured fields
+        main_text = "\n".join(texts).strip() if texts else ""
+        audio_texts = []
         for audio_url in audios:
-            # يتم تفريغ الصوت هنا بشكل متزامن داخل هذا الثريد
             transcript = transcribe_audio_url(audio_url)
             if transcript:
-                combined_parts.append(f"[Audio transcript from {audio_url}]: {transcript}")
+                audio_texts.append(transcript)
             else:
-                combined_parts.append(f"[Audio at {audio_url}]: (failed to transcribe)")
+                # If transcription failed, include a short placeholder without "file" wording
+                audio_texts.append("(تعذر تحويل الصوت إلى نص)")
 
-        combined_content = "\n\n".join(combined_parts).strip()
-        logger.info(f"⚙️ [PROCESSOR] بدء معالجة المحتوى المجمع للمستخدم {user_id}: '{combined_content}'")
+        images_list = images[:]  # copy
 
-        # Call assistant (unchanged flow) by running the async function from sync
-        reply_text = asyncio.run(get_assistant_reply(session, combined_content))
-        
+        # Build structured history: last 10 messages from thread if available
+        history_struct = []
+        thread_id = session.get("openai_thread_id")
+        if thread_id:
+            try:
+                messages = asyncio.run(asyncio.to_thread(client.beta.threads.messages.list, thread_id=thread_id, limit=10))
+                # messages.data may be newest-first; reverse to chronological
+                for msg in reversed(messages.data):
+                    # Try to extract text safely; skip non-text system messages
+                    try:
+                        content_text = ""
+                        if msg.content and len(msg.content) > 0:
+                            # Heuristic: content[0].text.value if exists
+                            c = msg.content[0]
+                            if hasattr(c, "text") and getattr(c.text, "value", None):
+                                content_text = c.text.value
+                            elif isinstance(c, dict) and c.get("text"):
+                                content_text = c.get("text")
+                            else:
+                                content_text = str(c)
+                        history_struct.append({"role": msg.role, "text": content_text})
+                    except Exception:
+                        continue
+            except Exception as e:
+                logger.warning(f"⚠️ [MEMORY] تعذر استرجاع history للمستخدم {user_id}: {e}")
+
+        # Build final structured payload for assistant
+        structured_payload = {
+            "type": "multi_input",
+            "text": main_text,
+            "audio_texts": audio_texts,
+            "images": images_list,
+            "history": history_struct  # list of {role, text}
+        }
+
+        logger.info(f"⚙️ [PROCESSOR] إرسال payload مُنظّم للمساعد للمستخدم {user_id}: "
+                    f"text_len={len(main_text)}, images={len(images_list)}, audio_texts={len(audio_texts)}, history={len(history_struct)}")
+
+        # Call assistant and wait for reply synchronously
+        reply_text = asyncio.run(get_assistant_reply(session, structured_payload))
+
         if reply_text:
             send_manychat_reply_async(user_id, reply_text, platform=session.get("platform", "Facebook"))
-            
-            # تم إلغاء الذاكرة الطويلة (التلخيص) بناءً على طلب المستخدم.
-            # لا حاجة لجدولة عملية تلخيص الذاكرة.
 
         # cleanup
         if user_id in pending_messages: del pending_messages[user_id]
         if user_id in message_timers: del message_timers[user_id]
         logger.info(f"🗑️ [PROCESSOR] تم الانتهاء من المعالجة للمستخدم {user_id}.")
-        
+
     finally:
-        # تحرير القفل بعد الانتهاء من المعالجة
         lock.release()
         logger.info(f"🔓 [LOCK] تم تحرير القفل للمستخدم {user_id}.")
 
-# --- تعديل add_to_processing_queue لدعم النص + صور + صوت ---
+# --- إضافة إلى قائمة الانتظار (يدعم نص/صورة/صوت) ---
 def add_to_processing_queue(session, payload):
-    """
-    payload يمكن أن يكون:
-      - نص string -> يضاف إلى texts
-      - dict -> {'text': ..., 'image_url': ..., 'audio_url': ...}
-    """
     user_id = session["_id"]
 
-    # ensure pending structure exists
     if user_id not in pending_messages or not pending_messages[user_id]:
         pending_messages[user_id] = {"texts": [], "images": [], "audios": [], "session": session}
     else:
-        # always update session reference (fresh)
         pending_messages[user_id]["session"] = session
 
     # cancel previous timer if exists
@@ -337,7 +330,6 @@ def add_to_processing_queue(session, payload):
         except Exception:
             pass
 
-    # accept both simple strings and dict payloads
     if isinstance(payload, str):
         pending_messages[user_id]["texts"].append(payload)
     elif isinstance(payload, dict):
@@ -351,21 +343,16 @@ def add_to_processing_queue(session, payload):
         if audio_url:
             pending_messages[user_id]["audios"].append(audio_url)
     else:
-        # unknown type, ignore
         logger.warning(f"⚠️ [QUEUE] payload type unknown for user {user_id}: {type(payload)}")
 
-    # Check if there is any content to process
     current_texts = pending_messages[user_id]['texts']
     current_images = pending_messages[user_id]['images']
     current_audios = pending_messages[user_id]['audios']
-    
     if not (current_texts or current_images or current_audios):
         logger.warning(f"⚠️ [QUEUE] لا يوجد محتوى لإضافته للمستخدم {user_id}.")
         return
 
-    logger.info(f"➕ [QUEUE] تمت إضافة محتوى إلى قائمة الانتظار للمستخدم {user_id}. "
-                f"counts: texts={len(current_texts)}, "
-                f"images={len(current_images)}, audios={len(current_audios)}")
+    logger.info(f"➕ [QUEUE] تمت إضافة محتوى إلى قائمة الانتظار للمستخدم {user_id}. counts: texts={len(current_texts)}, images={len(current_images)}, audios={len(current_audios)}")
 
     # start a new debounce timer
     timer = threading.Timer(BATCH_WAIT_TIME, schedule_assistant_response, args=[user_id])
@@ -373,7 +360,7 @@ def add_to_processing_queue(session, payload):
     timer.start()
     logger.info(f"⏳ [DEBOUNCE] بدء مؤقت جديد لمدة {BATCH_WAIT_TIME} ثانية للمستخدم {user_id}.")
 
-# --- ويب هوك ManyChat (النسخة الموحدة) ---
+# --- ويب هوك ManyChat ---
 @app.route("/manychat_webhook", methods=["POST"])
 def manychat_webhook_handler():
     logger.info("📞 [WEBHOOK] تم استلام طلب جديد.")
@@ -394,12 +381,10 @@ def manychat_webhook_handler():
 
     contact_data = data.get("full_contact", {})
 
-    # --- extract text, image, audio (compatible with common ManyChat shapes) ---
     last_input = contact_data.get("last_text_input") or contact_data.get("last_input_text") or data.get("last_input")
     image_url = None
     audio_url = None
 
-    # attachments variants
     att = contact_data.get("last_attachment") or contact_data.get("attachment") or data.get("last_attachment")
     if isinstance(att, dict):
         att_type = att.get("type")
@@ -408,7 +393,6 @@ def manychat_webhook_handler():
         elif att_type == "audio":
             audio_url = att.get("url") or att.get("file_url")
 
-    # other fields that some ManyChat variants use
     if not image_url:
         attachments = contact_data.get("attachments") or data.get("attachments")
         if isinstance(attachments, list):
@@ -420,12 +404,10 @@ def manychat_webhook_handler():
     if not audio_url:
         audio_url = contact_data.get("last_audio_url") or contact_data.get("audio_url") or data.get("last_audio_url")
 
-    # If nothing found, respond no_input_received
     if not any([last_input, image_url, audio_url]):
         logger.warning("[WEBHOOK] لم يتم العثور على إدخال نصي/صورة/صوت للمعالجة.")
         return jsonify({"status": "no_input_received"})
 
-    # Build payload dict and enqueue (we use dict to allow images/audio)
     payload = {"text": last_input, "image_url": image_url, "audio_url": audio_url}
     add_to_processing_queue(session, payload)
     
@@ -435,7 +417,7 @@ def manychat_webhook_handler():
 # --- نقطة الدخول الرئيسية ---
 @app.route("/")
 def home():
-    return "✅ Bot is running in Unified Mode with Short-Term Memory (v21 - Final)."
+    return "✅ Bot is running in Unified Mode with Structured JSON (v22)."
 
 if __name__ == "__main__":
     logger.info("🚀 التطبيق جاهز للتشغيل. يرجى استخدام خادم WSGI (مثل Gunicorn) لتشغيله في بيئة الإنتاج.")
