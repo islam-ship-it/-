@@ -1,11 +1,12 @@
-# main.py (Patched v20 - Final)
+# main.py (Patched v21 - Final)
 # - Keeps original threading/timer architecture intact
 # - Adds support for: image URLs, audio URLs (transcribed to text)
 # - If text+image+audio arrive within the batch window -> they are merged into one message to the assistant
-# - Audio transcription uses OpenAI audio.transcriptions API (called in a thread); adjust model name if needed
+# - Audio transcription uses OpenAI audio.transcriptions API (called in a thread); model is 'whisper-1'
 # - Minimal, safe changes; all original code paths preserved
 # - FIX: Implemented a strict threading.Lock in schedule_assistant_response to prevent concurrent processing for the same user.
 # - FIX: Added active waiting logic in get_assistant_reply to handle existing active Runs (safety net).
+# - UPDATE: Removed long-term memory (summarization) and replaced it with sending the last 10 messages as context.
 
 import os
 import time
@@ -102,32 +103,15 @@ def get_or_create_session_from_contact(contact_data):
         sessions_collection.insert_one(new_session)
         return new_session
 
-# --- دوال الذاكرة طويلة الأمد ---
-async def summarize_and_save_conversation(user_id, thread_id):
-    logger.info(f"🧠 [MEMORY] بدء عملية تلخيص الذاكرة للمستخدم {user_id}.")
-    try:
-        messages = await asyncio.to_thread(client.beta.threads.messages.list, thread_id=thread_id, limit=20)
-        history = "\n".join([f"{msg.role}: {msg.content[0].text.value}" for msg in reversed(messages.data)])
-        
-        prompt = f"Please summarize the following conversation concisely in a few key points. This summary will be used as a memory for a chatbot. Focus on user needs, important details (like products they are interested in, their budget, contact info), and the last state of the conversation.\n\nConversation:\n{history}\n\nSummary:"
-
-        response = await asyncio.to_thread(
-            client.chat.completions.create,
-            model="gpt-4.1-mini",
-            messages=[{"role": "system", "content": prompt}]
-        )
-        summary = response.choices[0].message.content.strip()
-        
-        sessions_collection.update_one({"_id": user_id}, {"$set": {"conversation_summary": summary}})
-        logger.info(f"✅ [MEMORY] تم تلخيص وتحديث الذاكرة للمستخدم {user_id}.")
-    except Exception as e:
-        logger.error(f"❌ [MEMORY] فشل في تلخيص المحادثة للمستخدم {user_id}: {e}", exc_info=True)
+# --- تم إلغاء دوال الذاكرة طويلة الأمد (التلخيص) بناءً على طلب المستخدم ---
 
 # --- دوال OpenAI (مُعدّلة لتستخدم الذاكرة) ---
 async def get_assistant_reply(session, content, timeout=90):
     user_id = session["_id"]
     thread_id = session.get("openai_thread_id")
-    summary = session.get("conversation_summary", "")
+    # تم إلغاء الذاكرة الطويلة (التلخيص) بناءً على طلب المستخدم.
+    # سيتم إرسال آخر 10 رسائل من المحادثة كـ "سياق" بدلاً من ذلك.
+    # يتم استرجاع الرسائل لاحقًا عند الحاجة.
     logger.info(f"🤖 [ASSISTANT] بدء عملية الحصول على رد للمستخدم {user_id}.")
 
     if not thread_id:
@@ -142,11 +126,23 @@ async def get_assistant_reply(session, content, timeout=90):
             return "⚠️ عفوًا، حدث خطأ أثناء تهيئة المحادثة."
 
     enriched_content = content
-    if summary:
-        logger.info(f"🧠 [MEMORY] تم العثور على ذاكرة سابقة للمستخدم. سيتم استخدامها.")
-        enriched_content = f"For your context, here is a summary of my previous conversations with this user: '{summary}'. Now, please respond to the user's new message(s): '{content}'"
-    else:
-        logger.info(f"🧠 [MEMORY] لا توجد ذاكرة سابقة للمستخدم.")
+    # استرجاع آخر 10 رسائل من المحادثة كذاكرة قصيرة المدى
+    try:
+        messages = await asyncio.to_thread(client.beta.threads.messages.list, thread_id=thread_id, limit=10)
+        # تصفية الرسائل وإعدادها كـ "سياق"
+        # ملاحظة: يتم عكس الترتيب لأن API يعيد الأحدث أولاً، ونحن نريدها بالترتيب الزمني
+        history = "\n".join([f"{msg.role}: {msg.content[0].text.value}" for msg in reversed(messages.data) if msg.role != "user"])
+        
+        if history:
+            logger.info(f"🧠 [MEMORY] تم إعداد آخر 10 رسائل من المحادثة كذاكرة قصيرة المدى.")
+            enriched_content = f"For your context, here is the history of our last 10 messages (excluding your last message): \n---\n{history}\n---\nNow, please respond to the user's new message(s): '{content}'"
+        else:
+            logger.info(f"🧠 [MEMORY] لا توجد ذاكرة سابقة للمستخدم.")
+            enriched_content = content
+            
+    except Exception as e:
+        logger.error(f"❌ [MEMORY] فشل في استرجاع سجل المحادثة: {e}", exc_info=True)
+        enriched_content = content
 
     try:
         # --- FIX: Active Waiting for existing Run ---
@@ -304,12 +300,8 @@ def schedule_assistant_response(user_id):
         if reply_text:
             send_manychat_reply_async(user_id, reply_text, platform=session.get("platform", "Facebook"))
             
-            thread_id = session.get("openai_thread_id")
-            if thread_id:
-                logger.info(f"🗓️ [MEMORY] جدولة عملية تلخيص الذاكرة للمستخدم {user_id}.")
-                # تشغيل التلخيص في ثريد منفصل لتجنب حظر المعالج
-                summary_thread = threading.Thread(target=lambda: asyncio.run(summarize_and_save_conversation(user_id, thread_id)))
-                summary_thread.start()
+            # تم إلغاء الذاكرة الطويلة (التلخيص) بناءً على طلب المستخدم.
+            # لا حاجة لجدولة عملية تلخيص الذاكرة.
 
         # cleanup
         if user_id in pending_messages: del pending_messages[user_id]
@@ -443,7 +435,7 @@ def manychat_webhook_handler():
 # --- نقطة الدخول الرئيسية ---
 @app.route("/")
 def home():
-    return "✅ Bot is running in Unified Mode with Long-Term Memory (v20 - Final)."
+    return "✅ Bot is running in Unified Mode with Short-Term Memory (v21 - Final)."
 
 if __name__ == "__main__":
     logger.info("🚀 التطبيق جاهز للتشغيل. يرجى استخدام خادم WSGI (مثل Gunicorn) لتشغيله في بيئة الإنتاج.")
