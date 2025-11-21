@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from dotenv import load_dotenv
 
 # -------------------------------
-# 🚨 FULL DEBUG LOGGING MODE — لا يتم تفعيله قبل إنشاء app
+# 🚨 FULL DEBUG LOGGING MODE
 # -------------------------------
 import http.client as http_client
 http_client.HTTPConnection.debuglevel = 1
@@ -31,7 +31,6 @@ logging.getLogger("werkzeug").setLevel(logging.DEBUG)
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-
 # -------------------------------
 # تحميل الإعدادات
 # -------------------------------
@@ -46,7 +45,7 @@ MONGO_URI = os.getenv("MONGO_URI")
 MANYCHAT_API_KEY = os.getenv("MANYCHAT_API_KEY")
 MANYCHAT_SECRET_KEY = os.getenv("MANYCHAT_SECRET_KEY")
 
-logger.info("🔑 [CONFIG] تم تحميل مفاتيح API (بدون Meta Tokens).")
+logger.info("🔑 [CONFIG] تم تحميل مفاتيح API.")
 
 # -------------------------------
 # قاعدة البيانات
@@ -71,7 +70,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 logger.info("🚀 [APP] تم إعداد Flask و OpenAI.")
 
 # -------------------------------
-# 🔥 ضـع الـ Debug Logging هنا — بعد إنشاء app
+# Debug Logging
 # -------------------------------
 
 @app.before_request
@@ -95,18 +94,15 @@ def after_logging(response):
         logger.debug("Body: <UNREADABLE>")
     return response
 
-
-# -------------------------------
-# باقي الكود كما هو (بدون Meta)
-# -------------------------------
-
+# ------------------------------------
+# Pending batching system
+# ------------------------------------
 
 pending_messages = {}
 message_timers = {}
 processing_locks = {}
 BATCH_WAIT_TIME = 2.0
 
-# == get_or_create_session_from_contact ===
 def get_or_create_session_from_contact(contact_data, platform):
     user_id = str(contact_data.get("id"))
     if not user_id:
@@ -205,6 +201,9 @@ async def get_assistant_reply(session, content):
     return "⚠️ حدث خطأ أثناء معالجة الرسالة."
 
 
+# ------------------------------------
+# FIXED: إرسال رسالة واحدة
+# ------------------------------------
 def send_manychat_reply(subscriber_id, text_message, platform, retry=False):
     logger.info(f"إرسال ManyChat → {subscriber_id}")
 
@@ -217,9 +216,11 @@ def send_manychat_reply(subscriber_id, text_message, platform, retry=False):
         "Authorization": f"Bearer {MANYCHAT_API_KEY}",
         "Content-Type": "application/json"
     }
+    
     channel = "instagram" if platform == "Instagram" else "facebook"
 
-    msgs = [{"type": "text", "text": p} for p in text_message.split("\n") if p.strip()]
+    # ❗ إرسال الرسالة كاملة بدون تقسيم
+    msgs = [{"type": "text", "text": text_message}]
 
     payload = {
         "subscriber_id": str(subscriber_id),
