@@ -1,3 +1,4 @@
+
 import os
 import time
 import json
@@ -63,7 +64,7 @@ message_timers = {}        # user_id -> threading.Timer
 queue_lock = threading.Lock()   # لحماية pending_messages و message_timers
 run_locks = {}             # user_id -> threading.Lock() يمنع أكثر من run واحد لنفس المستخدم
 
-BATCH_WAIT_TIME = 2.0      # ثانية بعد آخر رسالة لنجمع قبل إرسال للمساعد
+BATCH_WAIT_TIME = 4.0      # تم رفعها إلى 4 ثواني بعد طلبك
 RETRY_DELAY_WHEN_BUSY = 1.0  # ثانية لإعادة المحاولة لو فيه run شغال
 
 # ===========================
@@ -165,7 +166,7 @@ def download_media_from_url(url):
         return None
 
 # ===========================
-# استدعاءات OpenAI (كورو틴) — تعمل على أي Event Loop
+# استدعاءات OpenAI (كوروتين) — تعمل على أي Event Loop
 # ===========================
 async def get_assistant_reply_async(session, content):
     """
@@ -315,14 +316,19 @@ def schedule_assistant_response(user_id):
 
         session = data["session"]
         merged = "\n".join(data["texts"])
-        logger.info(f"📦 دمج {len(data['texts'])} رسالة وإرسالها للمساعد للمستخدم {user_id}")
-        logger.info(f"📝 محتوى الطلب:\n{merged}")
+        # === لوج مفصل للرسائل المجمعة قبل الإرسال ===
+        logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        logger.info(f"📦 الرسائل المجمعة قبل الإرسال للمساعد (المستخدم: {user_id}):")
+        for i, msg in enumerate(data["texts"], start=1):
+            logger.info(f"{i}) {msg}")
+        logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        logger.info(f"📝 النص النهائي المرسل للمساعد:\n{merged}")
 
         # === تشغيل event loop آمن داخل هذا الـ Thread ===
         loop = asyncio.new_event_loop()
         try:
             asyncio.set_event_loop(loop)
-            # ننفذ الكورو틴 الذي يتعامل مع OpenAI
+            # ننفذ الكوروتين الذي يتعامل مع OpenAI
             try:
                 reply = loop.run_until_complete(get_assistant_reply_async(session, merged))
             except Exception as e:
@@ -359,6 +365,7 @@ def add_to_queue(session, text):
 
         logger.info(f"📩 استلام رسالة جديدة من {uid}: {text}")
         logger.info(f"📊 إجمالي الرسائل المنتظرة لـ {uid}: {len(pending_messages[uid]['texts'])}")
+        logger.info(f"⏳ تم إعادة ضبط التايمر على: {BATCH_WAIT_TIME} ثانية")
 
         # إلغاء أي تايمر سابق وإعادة جدولة تايمر جديد بعد آخر رسالة
         if uid in message_timers:
