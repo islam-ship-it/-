@@ -1,4 +1,5 @@
-
+# Rewriting main.py with image-URL-supporting Threads API code (gpt-4o-mini)
+code = r'''
 import os
 import time
 import json
@@ -6,7 +7,6 @@ import requests
 import threading
 import asyncio
 import logging
-import base64
 from flask import Flask, request, jsonify
 from openai import OpenAI
 from pymongo import MongoClient
@@ -64,7 +64,7 @@ message_timers = {}        # user_id -> threading.Timer
 queue_lock = threading.Lock()   # لحماية pending_messages و message_timers
 run_locks = {}             # user_id -> threading.Lock() يمنع أكثر من run واحد لنفس المستخدم
 
-BATCH_WAIT_TIME = 4.0      # تم رفعها إلى 4 ثواني بعد طلبك
+BATCH_WAIT_TIME = 4.0      # ثانية بعد آخر رسالة لنجمع قبل إرسال للمساعد
 RETRY_DELAY_WHEN_BUSY = 1.0  # ثانية لإعادة المحاولة لو فيه run شغال
 
 # ===========================
@@ -116,96 +116,77 @@ def get_or_create_session_from_contact(contact_data, platform):
     return new_session
 
 # ===========================
-# Vision + Whisper (كما كان)
+# Helpers: build content for Threads API (text + image_url parts)
 # ===========================
-async def get_image_description_for_assistant(base64_image):
-    logger.info("🖼️ معالجة صورة...")
-    try:
-        response = await asyncio.to_thread(
-            client.chat.completions.create,
-            model="gpt-4.1",
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "اقرأ محتوى الصورة بدقة."},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                ]
-            }],
-            max_tokens=500
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        logger.error(f"❌ خطأ في معالجة الصورة: {e}", exc_info=True)
-        return None
-
-def transcribe_audio(content, fmt="mp4"):
-    filename = f"temp.{fmt}"
-    with open(filename, "wb") as f:
-        f.write(content)
-
-    try:
-        with open(filename, "rb") as f:
-            tr = client.audio.transcriptions.create(model="whisper-1", file=f)
-        os.remove(filename)
-        return tr.text
-    except Exception as e:
-        logger.error(f"❌ فشل تحويل الصوت لنص: {e}")
-        try:
-            os.remove(filename)
-        except:
-            pass
-        return None
-
-def download_media_from_url(url):
-    try:
-        r = requests.get(url, timeout=15)
-        r.raise_for_status()
-        return r.content
-    except Exception as e:
-        logger.error(f"❌ فشل تحميل الوسائط من URL: {e}")
-        return None
+def build_thread_content_from_merged(merged_text):
+    """
+    Parse merged_text lines. Lines that start with "[صورة]:" should be treated as image URLs.
+    Returns a list appropriate for client.beta.threads.messages.create content parameter.
+    """
+    parts = []
+    for line in merged_text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("[صورة]:"):
+            # extract url after the marker
+            url = line.split(":", 1)[1].strip()
+            if url:
+                parts.append({"type": "image_url", "image_url": {"url": url}})
+            else:
+                parts.append({"type": "text", "text": line})
+        else:
+            parts.append({"type": "text", "text": line})
+    if not parts:
+        parts = [{"type": "text", "text": merged_text}]
+    return parts
 
 # ===========================
 # استدعاءات OpenAI (كوروتين) — تعمل على أي Event Loop
 # ===========================
 async def get_assistant_reply_async(session, content):
     """
-    دالة async تتعامل مع OpenAI Threads API:
-    - تنشئ thread لو مش موجود
-    - تضيف رسالة
-    - تطلب تشغيل run وتنتظر لحد ما يكمل
-    - ترجع نص الرد
+    - content is a string (merged content).
+    - This function builds structured content (text + image_url parts) and sends to Threads API
+    - Uses gpt-4o-mini so model can view image URLs directly.
     """
     user_id = session["_id"]
     thread_id = session.get("openai_thread_id")
 
-    # إنشاء thread لو مش موجود (يتم في background thread باستخدام to_thread لأن المكتبة sync)
+    # create thread if not exists
     if not thread_id:
         thread = await asyncio.to_thread(client.beta.threads.create)
         thread_id = thread.id
         sessions_collection.update_one({"_id": user_id}, {"$set": {"openai_thread_id": thread_id}})
         logger.info(f"🔧 تم إنشاء thread جديد: {thread_id} للمستخدم {user_id}")
 
-    # أضف الرسالة للـ thread
+    # Build structured content (list of text/image parts)
+    content_parts = build_thread_content_from_merged(content)
+
     try:
+        # add message with structured content (the Threads API will interpret image_url parts)
         await asyncio.to_thread(
             client.beta.threads.messages.create,
             thread_id=thread_id,
             role="user",
-            content=content
+            content=content_parts
         )
     except Exception as e:
         logger.error(f"❌ خطأ أثناء إضافة رسالة إلى thread ({thread_id}): {e}", exc_info=True)
         raise
 
-    # اطلب run
-    run = await asyncio.to_thread(
-        client.beta.threads.runs.create,
-        thread_id=thread_id,
-        assistant_id=ASSISTANT_ID_PREMIUM
-    )
+    # request a run using a model that supports vision inside Threads (gpt-4o-mini)
+    try:
+        run = await asyncio.to_thread(
+            client.beta.threads.runs.create,
+            thread_id=thread_id,
+            assistant_id=ASSISTANT_ID_PREMIUM
+        )
+    except Exception as e:
+        logger.error(f"❌ خطأ أثناء إنشاء run: {e}", exc_info=True)
+        raise
 
-    # انتظر حتى يكتمل الـ run
+    # wait for completion
     while run.status in ["queued", "in_progress"]:
         await asyncio.sleep(1)
         run = await asyncio.to_thread(
@@ -267,7 +248,7 @@ def schedule_assistant_response(user_id):
     """
     تعمل داخل Thread (Timer). خطوات الأمان:
     - نحصل على البيانات تحت queue_lock
-    - نحاول نأخذ run_lock للمستخدم (non-blocking)
+    - نححاول نأخذ run_lock للمستخدم (non-blocking)
       - لو مش فاضية: نعيد جدولة بعد RETRY_DELAY_WHEN_BUSY ثانية
     - لو اخدنا القفل: ننشئ event loop محلي وننفذ get_assistant_reply_async
     - نحرر القفل بعد الانتهاء
@@ -278,9 +259,6 @@ def schedule_assistant_response(user_id):
         if not data:
             return
 
-        session = data["session"]
-        merged = "\n".join(data["texts"])
-
     # تأكد إن عندنا قفل Run للمستخدم
     user_run_lock = run_locks.setdefault(user_id, threading.Lock())
 
@@ -289,7 +267,6 @@ def schedule_assistant_response(user_id):
         logger.info(f"⏳ يوجد رد شغال للمستخدم {user_id} — إعادة جدولة بعد {RETRY_DELAY_WHEN_BUSY}s")
         # ضع مؤقت جديد لإعادة المحاولة
         with queue_lock:
-            # أكد إن البيانات لا تزال موجودة (قد تكون اضيفت رسائل إضافية)
             if user_id in message_timers:
                 try:
                     message_timers[user_id].cancel()
@@ -408,24 +385,31 @@ def mc_webhook():
     logger.info(f"📥 رسالة واردة من {session['_id']}: {txt}")
 
     is_url = isinstance(txt, str) and txt.startswith("http")
-    is_media = is_url and ("cdn.fbsbx.com" in txt or "scontent" in txt)
+    # treat image links as direct image URL if they look like images
+    is_image_url = is_url and any(ext in txt.lower() for ext in [".jpg", ".jpeg", ".png", ".webp", ".gif"])
+    is_media = is_url and ("cdn.fbsbx.com" in txt or "scontent" in txt or is_image_url)
 
     def bg():
-        if is_media:
+        # If it's a direct image URL, **do NOT download or convert to Base64**.
+        # Instead, attach the URL as a [صورة]: URL line so the model sees it in the same message.
+        if is_image_url:
+            add_to_queue(session, f"[صورة]: {txt}")
+            return
+
+        if is_media and any(ext in txt for ext in [".mp3", ".mp4", ".ogg"]):
+            # audio/video -> download and transcribe
             media = download_media_from_url(txt)
             if not media:
                 send_manychat_reply(session["_id"], "لم أتمكن من تحميل الوسائط.", session["platform"])
                 return
-
-            if any(ext in txt for ext in [".mp3", ".mp4", ".ogg"]):
-                tr = transcribe_audio(media)
-                if tr:
-                    add_to_queue(session, f"[رسالة صوتية]: {tr}")
-            else:
-                desc = asyncio.run(get_image_description_for_assistant(base64.b64encode(media).decode()))
-                if desc:
-                    add_to_queue(session, f"[صورة]: {desc}")
+            tr = transcribe_audio(media)
+            if tr:
+                add_to_queue(session, f"[صوت - نص]: {tr}")
+        elif is_media:
+            # not audio: may be a CDN image link; if not an image ext, still add as image link
+            add_to_queue(session, f"[صورة]: {txt}")
         else:
+            # normal text
             add_to_queue(session, txt)
 
     threading.Thread(target=bg, daemon=True).start()
@@ -436,7 +420,7 @@ def mc_webhook():
 # ===========================
 @app.route("/")
 def home():
-    return "Bot running (V3) - Arabic logs."
+    return "Bot running (V4) - Arabic logs - image URLs supported."
 
 # ===========================
 # تشغيل السيرفر
@@ -445,3 +429,11 @@ if __name__ == "__main__":
     logger.info("🚀 السيرفر جاهز للعمل")
     # على Render عادة لا تحتاج لتمرير host/port لكن لنستخدم القيم المحلية للـ debug
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
+'''
+path = "/mnt/data/main.py"
+with open(path, "w", encoding="utf-8") as f:
+    f.write(code)
+
+path
+
+
