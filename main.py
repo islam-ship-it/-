@@ -1,5 +1,4 @@
-# Rewriting main.py with image-URL-supporting Threads API code (gpt-4o-mini)
-code = r'''
+
 import os
 import time
 import json
